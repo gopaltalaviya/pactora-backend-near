@@ -1,0 +1,17 @@
+# Never in an image: secrets, history, and anything built on the host.
+.env
+.env.*
+!.env.example
+.git
+.githooks
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+.agent-cache
+artifacts
+docs
+scripts
+**/test
+*.md
+lcov.info

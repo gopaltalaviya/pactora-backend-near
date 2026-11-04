@@ -1,0 +1,2 @@
+ALTER TABLE "jobs" ADD COLUMN "idempotency_key" text;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "jobs_client_idempotency_uk" ON "jobs" USING btree ("client_agent_id","idempotency_key");

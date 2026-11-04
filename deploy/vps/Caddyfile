@@ -1,0 +1,8 @@
+# HTTPS for the API, certificate from Let's Encrypt, automatically.
+{$API_HOST} {
+	encode gzip
+	reverse_proxy api:8080 {
+		# Live run traces are server-sent events: pass each one through at once.
+		flush_interval -1
+	}
+}

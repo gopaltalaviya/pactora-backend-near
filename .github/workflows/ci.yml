@@ -1,0 +1,137 @@
+name: backend
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Everything that needs nothing but this repo.
+  static:
+    name: types · lint · format · secrets · audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with: {fetch-depth: 0}
+      - uses: pnpm/action-setup@v6
+        with: {version: 9.12.0}
+      - uses: actions/setup-node@v7
+        with: {node-version-file: .nvmrc, cache: pnpm}
+
+      - run: pnpm install --frozen-lockfile
+      # Sources AND tests: vitest strips types without checking them, so until
+      # tsconfig.test.json existed, a type error in a test could not fail CI.
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm format:check
+
+      # The hook that guards private keys, run again where it cannot be
+      # skipped with --no-verify — and gitleaks over the WHOLE history, which
+      # the hook, looking at one commit, cannot see.
+      - run: node scripts/check-no-secrets.mjs
+      - uses: gitleaks/gitleaks-action@v3
+        env: {GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'}
+
+      # Production dependencies only, high severity and above: a moderate
+      # advisory in a dev tool is not a reason to block a merge.
+      - run: pnpm audit --prod --audit-level high
+
+  test:
+    name: tests · coverage
+    runs-on: ubuntu-24.04
+
+    # The suite needs a database, and its chain config comes from the contracts
+    # repo — addresses and protocol parameters live there as the single source
+    # of truth, and duplicating them here would defeat the point of having one.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentx
+          POSTGRES_PASSWORD: agentx
+          POSTGRES_DB: agentx
+        ports: ['5442:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with: {path: agentx-backend}
+
+      # Cross-repo checkout. `github.token` is enough once both repos are
+      # public; until then it needs a PAT in CONTRACTS_TOKEN.
+      #
+      # This FAILS if the checkout does. It used to `continue-on-error` and
+      # skip the suite with a warning — so CI went green having run no tests,
+      # which is worse than red: it says "tested" about code nobody tested.
+      - uses: actions/checkout@v7
+        with:
+          repository: gopaltalaviya/agentx-contracts
+          path: agentx-contracts
+          token: ${{ secrets.CONTRACTS_TOKEN || github.token }}
+      # docs/15-api.md lives there; a test checks it against the served routes.
+      - uses: actions/checkout@v7
+        with:
+          repository: gopaltalaviya/agentx-docs
+          path: agentx-docs
+
+      - uses: pnpm/action-setup@v6
+        with: {version: 9.12.0}
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: agentx-backend/.nvmrc
+          cache: pnpm
+          cache-dependency-path: agentx-backend/pnpm-lock.yaml
+
+      - working-directory: agentx-backend
+        run: pnpm install --frozen-lockfile
+      # chain/ is what every image ships; it must equal agentx-contracts.
+      - working-directory: agentx-backend
+        env: {PACTORA_CONTRACTS_ROOT: ../agentx-contracts}
+        run: node scripts/sync-chain-facts.mjs --check
+      - working-directory: agentx-backend
+        run: pnpm -r build
+      - working-directory: agentx-backend
+        env: {DATABASE_URL: 'postgres://agentx:agentx@127.0.0.1:5442/agentx'}
+        run: pnpm --filter @pactora/db migrate
+      - working-directory: agentx-backend
+        env:
+          # 127.0.0.1, never localhost: Node resolves localhost to ::1 while
+          # the service container binds IPv4.
+          DATABASE_URL: postgres://agentx:agentx@127.0.0.1:5442/agentx
+          PACTORA_CONTRACTS_ROOT: ../agentx-contracts
+        # Coverage floors are enforced by vitest.config.ts.
+        run: pnpm test:coverage
+
+  images:
+    name: images
+    runs-on: ubuntu-24.04
+    needs: static
+    strategy:
+      matrix:
+        service: ['@pactora/api', '@pactora/signer', '@pactora/indexer']
+    steps:
+      - uses: actions/checkout@v7
+        with: {path: agentx-backend}
+      - uses: docker/setup-buildx-action@v4
+      # From this repo alone, exactly as a hosted build (Railway) does it: the
+      # chain facts come from chain/, which the tests job checks for drift.
+      - name: build ${{ matrix.service }}
+        working-directory: agentx-backend
+        run: >
+          docker buildx build --load
+          --build-arg SERVICE=${{ matrix.service }}
+          --build-arg GIT_SHA=${{ github.sha }}
+          -t pactora-ci .
+      # The image knows which commit it is (served on /health and /v1/status).
+      - run: docker run --rm --entrypoint cat pactora-ci /app/build-info.json | grep -q '"commit":"${{ github.sha }}"'
+      # The image must run as an unprivileged user.
+      - run: test "$(docker run --rm --entrypoint id pactora-ci -u)" != "0"

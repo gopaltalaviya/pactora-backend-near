@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+
+# Recorded agent completions ARE committed (since 2026-10-08): they are what
+# lets anyone run the demo with AGENT_MODE=cached and no AI key. A test
+# (packages/agent-core/test/recordings.test.ts) fails if a prompt change
+# leaves one unreachable. Re-record with AGENT_MODE=record.
+
+# demo service logs (regenerate by running the demo)
+artifacts/

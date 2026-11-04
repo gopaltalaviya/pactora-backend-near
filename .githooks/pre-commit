@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# Installed by `pnpm install` (the `prepare` script sets core.hooksPath), so a
+# fresh clone runs it too — it used to exist only on the machine that set it.
+
+# 1. Block the COMMIT, not the build after it. A secret that reaches a remote
+#    cannot be unpublished; rewriting history does not recall what was fetched.
+node scripts/check-no-secrets.mjs || {
+  echo ""
+  echo "  Commit blocked. Move secrets to .env (gitignored)."
+  exit 1
+}
+
+# 2. Lint and format only what is being committed: fast enough to never be
+#    worth skipping.
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- '*.ts' '*.mjs' '*.js' '*.json' | tr '\n' ' ')
+if [ -n "$STAGED" ]; then
+  npx --no-install prettier --check $STAGED || {
+    echo ""
+    echo "  Commit blocked: run 'pnpm format' and stage the result."
+    exit 1
+  }
+  LINTABLE=$(git diff --cached --name-only --diff-filter=ACMR -- '*.ts' '*.mjs' '*.js' | tr '\n' ' ')
+  if [ -n "$LINTABLE" ]; then
+    npx --no-install eslint --max-warnings 0 $LINTABLE || {
+      echo ""
+      echo "  Commit blocked: fix the lint errors above ('pnpm lint:fix' handles most)."
+      exit 1
+    }
+  fi
+fi

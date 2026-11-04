@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agentx
+      POSTGRES_PASSWORD: agentx
+      POSTGRES_DB: agentx
+    # 5442 on the host: 5432 is shadowed by another local Postgres on this
+    # machine, and connecting to the wrong database is worse than not connecting.
+    ports: ['5442:5432']
+    volumes: ['agentx-pg:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U agentx']
+      interval: 5s
+      retries: 10
+
+volumes:
+  agentx-pg:
+
+# No Redis here.
+#
+# One was provisioned early and never wired up: nothing in this repo imports a
+# client, and there is no redis dependency. It was removed rather than left
+# running, because a service in the compose file implies something depends on
+# it — and on Railway it would have been a paid plugin nothing connects to.
+#
+# What it was meant for, stated as the limitation it now is: rate limiting and
+# idempotency are per-process. With one replica that is correct. With more than
+# one, each replica keeps its own counters, so the effective rate limit is N
+# times the configured one. Idempotency is unaffected — it is enforced by a
+# UNIQUE constraint in Postgres, not in memory.

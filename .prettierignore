@@ -1,0 +1,12 @@
+dist/
+node_modules/
+coverage/
+pnpm-lock.yaml
+packages/db/migrations/
+docs/
+.agent-cache/
+artifacts/
+*.md
+
+# A byte-exact copy of agentx-contracts; scripts/sync-chain-facts.mjs is its only writer.
+chain/

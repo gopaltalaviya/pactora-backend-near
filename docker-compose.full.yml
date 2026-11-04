@@ -1,0 +1,173 @@
+# The whole Pactora backend from its production images — the same recipe a
+# deployment builds — on a Postgres of its own:
+#
+#   SIGNER_TOKEN=$(openssl rand -hex 24) SIGNER_DEV_PRIVATE_KEY=0x… \
+#     docker compose -f docker-compose.full.yml up --build
+#
+# Separate from docker-compose.yml (the dev database the tests use), on its own
+# project, volume and host port, so bringing this up never touches dev data.
+# Services start in dependency order and only once what they need is READY:
+# postgres → migrate (runs once, must succeed) → signer → api, and the indexer.
+name: agentx-full
+
+x-build: &build
+  context: .
+  dockerfile: Dockerfile
+  # The chain facts every image carries come from chain/ (see the
+  # Dockerfile): the same single-repo build a hosted deployment runs.
+
+# Docker keeps container logs forever by default, and the API's request log
+# holds callers' IP addresses. Each service keeps at most 5 × 10 MB, oldest
+# dropped first.
+x-logging: &logging
+  driver: json-file
+  options: {max-size: '10m', max-file: '5'}
+
+x-chain: &chain
+  ENABLED_CHAIN_IDS: ${ENABLED_CHAIN_IDS:-10143}
+  DEFAULT_CHAIN_ID: ${DEFAULT_CHAIN_ID:-10143}
+  DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  postgres:
+    logging: *logging
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agentx
+      POSTGRES_PASSWORD: agentx
+      POSTGRES_DB: agentx
+    ports: ['5443:5432']
+    volumes: ['agentx-full-pg:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U agentx']
+      interval: 3s
+      retries: 20
+
+  migrate:
+    logging: *logging
+    build: {<<: *build, args: {SERVICE: '@pactora/db'}}
+    command: ['node', 'bin/migrate.mjs']
+    environment:
+      DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: 'no'
+
+  signer:
+    logging: *logging
+    build: {<<: *build, args: {SERVICE: '@pactora/signer'}}
+    environment:
+      <<: *chain
+      # With a token the signer listens on every interface — here, only the
+      # compose network; it publishes no port.
+      SIGNER_TOKEN: ${SIGNER_TOKEN:?set SIGNER_TOKEN (32+ characters), shared with the api}
+      SIGNER_KEYSTORE_JSON: ${SIGNER_KEYSTORE_JSON:-}
+      SIGNER_KEYSTORE_PASSPHRASE: ${SIGNER_KEYSTORE_PASSPHRASE:-}
+      # Testnet only; the signer refuses a raw key anywhere else.
+      SIGNER_DEV_PRIVATE_KEY: ${SIGNER_DEV_PRIVATE_KEY:-}
+      # Hosted agents (scripts/seed-hosted.mjs → artifacts/hosted-agents.json "env"):
+      # their session keys, and the session manager that extends them every
+      # day (never the accounts' owner key — audit F1). SESSION_OWNER_* is the
+      # old name, still read.
+      SIGNER_DEV_PRIVATE_KEYS: ${SIGNER_DEV_PRIVATE_KEYS:-}
+      SESSION_MANAGER_PRIVATE_KEY: ${SESSION_MANAGER_PRIVATE_KEY:-}
+      SESSION_OWNER_PRIVATE_KEY: ${SESSION_OWNER_PRIVATE_KEY:-}
+      SESSION_RENEW_BEFORE_S: ${SESSION_RENEW_BEFORE_S:-21600}
+      KEEPER_PRIVATE_KEY: ${KEEPER_PRIVATE_KEY:-}
+      # Off testnet (v3): AWS KMS instead of every raw key above — docs/21.
+      SIGNER_KMS_KEYS: ${SIGNER_KMS_KEYS:-}
+      KEEPER_KMS_KEY_ID: ${KEEPER_KMS_KEY_ID:-}
+      SESSION_MANAGER_KMS_KEY_ID: ${SESSION_MANAGER_KMS_KEY_ID:-}
+      SESSION_OWNER_KMS_KEY_ID: ${SESSION_OWNER_KMS_KEY_ID:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:7070/ready']
+      interval: 5s
+      retries: 12
+    restart: unless-stopped
+
+  indexer:
+    logging: *logging
+    build: {<<: *build, args: {SERVICE: '@pactora/indexer'}}
+    environment:
+      <<: *chain
+      INDEXER_HEALTH_PORT: 9090
+      INDEXER_START_AT_HEAD: ${INDEXER_START_AT_HEAD:-0}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:9090/health']
+      interval: 5s
+      retries: 12
+    restart: unless-stopped
+
+  api:
+    logging: *logging
+    build: {<<: *build, args: {SERVICE: '@pactora/api'}}
+    environment:
+      <<: *chain
+      SIGNER_URL: http://signer:7070
+      SIGNER_TOKEN: ${SIGNER_TOKEN:?set SIGNER_TOKEN (32+ characters), shared with the signer}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      # Live runs: a model key (your quota) and a per-orchestrator daily cap.
+      AGENT_MODE: ${AGENT_MODE:-cached}
+      BRAIN_CHAIN_ORCHESTRATOR: ${BRAIN_CHAIN_ORCHESTRATOR:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # A local model (no quota): BRAIN_CHAIN_ORCHESTRATOR=ollama, Ollama on the host.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      RUNS_PER_DAY: ${RUNS_PER_DAY:-0}
+    ports: ['${API_PORT:-8080}:8080']
+    depends_on:
+      signer: {condition: service_healthy}
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/ready']
+      interval: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ── hosted live runs: the three worker bots (docker compose --profile hosted) ──
+  research-bot: &worker
+    logging: *logging
+    profiles: [hosted]
+    build: {<<: *build, args: {SERVICE: '@pactora/research-bot'}}
+    environment: &worker-env
+      PACTORA_API_URL: http://api:8080
+      PACTORA_CHAIN_ID: ${DEFAULT_CHAIN_ID:-10143}
+      PACTORA_API_KEY: ${RESEARCH_BOT_API_KEY:-}
+      AGENT_MODE: ${AGENT_MODE:-cached}
+      BRAIN_CHAIN: ${BRAIN_CHAIN:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+
+  trading-bot:
+    logging: *logging
+    <<: *worker
+    build: {<<: *build, args: {SERVICE: '@pactora/trading-bot'}}
+    environment:
+      <<: *worker-env
+      PACTORA_API_KEY: ${TRADING_BOT_API_KEY:-}
+
+  execution-bot:
+    logging: *logging
+    <<: *worker
+    build: {<<: *build, args: {SERVICE: '@pactora/execution-bot'}}
+    environment:
+      <<: *worker-env
+      PACTORA_API_KEY: ${EXECUTION_BOT_API_KEY:-}
+
+volumes:
+  agentx-full-pg:

@@ -1,0 +1,551 @@
+import type {FastifyInstance} from 'fastify';
+import {and, eq, gte, isNotNull, lte, sql} from 'drizzle-orm';
+import {z} from 'zod';
+import {
+  agents,
+  agentCapabilities,
+  agentStats,
+  apiKeys,
+  indexerCursor,
+  readTrust,
+  registrationChallenges,
+  spendPolicies,
+  DEFAULT_WINDOW_BLOCKS,
+  type Db,
+} from '@pactora/db';
+import {PactoraError, BaseUnits, Capability, ErrorCode} from '@pactora/shared';
+import type {ChainConfig} from '@pactora/config';
+import {authenticate, generateApiKey, hashApiKey, resolveChainId} from '../auth.js';
+import {noHistory, skillStats, type SkillStat} from '../skills.js';
+import {rank, RANK_MODES} from '../ranking.js';
+import type {AgentRow} from '../types.js';
+import type {IdentityReader} from '../chain-reads.js';
+import {
+  CHALLENGE_TTL_MS,
+  LIVE_PER_REQUESTER,
+  newNonce,
+  registrationMessage,
+  signedBy,
+} from '../challenges.js';
+
+const Address = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
+const Signature = z.string().regex(/^0x[0-9a-fA-F]+$/);
+
+/** What a registration will claim, so the challenge can name it. */
+export const RegisterChallengeBody = z.object({
+  ownerAddress: Address,
+  walletAddress: Address,
+  chainId: z.number().int().optional(),
+  chainAgentId: z.string().regex(/^\d+$/).optional(),
+});
+
+export const RegisterBody = z.object({
+  name: z.string().min(1).max(64),
+  description: z.string().max(1_000).optional(),
+  capabilities: z.array(Capability).min(1).max(16),
+  pricePerTask: BaseUnits,
+  endpointUrl: z.string().url().optional(),
+  walletAddress: Address,
+  ownerAddress: Address,
+  chainId: z.number().int().optional(),
+  /** The ERC-8004 id, when the identity is already registered. Verified on-chain before it is stored. */
+  chainAgentId: z.string().regex(/^\d+$/).optional(),
+  /** From `POST /v1/agents/challenge`: the nonce the signatures cover. */
+  nonce: z.string().regex(/^[0-9a-f]{32}$/, 'nonce comes from POST /v1/agents/challenge'),
+  /** The owner's EIP-191 signature over the challenge message. */
+  signature: Signature,
+  /**
+   * The wallet's signature over the same message. Needed only when there is
+   * no `chainAgentId` (nothing on chain ties the wallet to the owner) and the
+   * wallet is not the owner itself.
+   */
+  walletSignature: Signature.optional(),
+});
+
+export const UpdateAgentBody = z.object({
+  pricePerTask: BaseUnits.optional(),
+  active: z.boolean().optional(),
+  description: z.string().max(1000).optional(),
+});
+
+export const DiscoverQuery = z.object({
+  capability: Capability.optional(),
+  maxPrice: BaseUnits.optional(),
+  minScore: z.coerce.number().int().min(0).max(100).optional(),
+  rank: z.enum(['balanced', 'quality', 'cheapest', 'fastest']).default('balanced'),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  chainId: z.coerce.number().int().optional(),
+});
+
+export interface RouteDeps {
+  db: Db;
+  chains: Record<number, ChainConfig>;
+  defaultChainId: number;
+  readIdentity?: IdentityReader;
+  /**
+   * Refuse endpoint URLs that are not public https. Nothing fetches them
+   * today; the first thing that does must not be pointable at plain http, a
+   * loopback or a private address (SSRF). On in production.
+   */
+  requirePublicHttpsEndpoints?: boolean;
+}
+
+/** Hostnames and literal addresses that name this machine or a private network. */
+const PRIVATE_HOST =
+  /^(localhost|.*\.local|.*\.internal|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|\[?::1\]?$|\[?f[cd][0-9a-f]{2}:)/i;
+
+export function isPublicHttpsUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'https:' && !PRIVATE_HOST.test(url.hostname);
+}
+
+export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
+  const {db, chains, defaultChainId} = deps;
+  const enabled = Object.keys(chains).map(Number);
+
+  /**
+   * Discovery.
+   *
+   * Unauthenticated on purpose: a marketplace nobody can browse without
+   * credentials is not a marketplace. It is always chain-scoped, or results
+   * from two networks would silently mix.
+   */
+  app.get('/v1/agents', async (request) => {
+    const q = DiscoverQuery.parse(request.query);
+    const chainId = q.chainId ?? defaultChainId;
+    if (!enabled.includes(chainId)) {
+      throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${chainId} is not enabled`);
+    }
+    const chain = chains[chainId]!;
+
+    // v3: only agents the chain confirmed. One with no ERC-8004 id can never
+    // be hired, so listing it let open registration crowd the marketplace.
+    const conditions = [eq(agents.chainId, chainId), eq(agents.active, true), isNotNull(agents.chainAgentId)];
+    if (q.maxPrice) conditions.push(lte(agents.pricePerTask, q.maxPrice));
+    if (q.minScore !== undefined) conditions.push(gte(agentStats.score, q.minScore));
+
+    const rows = await db
+      .select({
+        id: agents.id,
+        chainId: agents.chainId,
+        chainAgentId: agents.chainAgentId,
+        name: agents.name,
+        description: agents.description,
+        walletAddress: agents.walletAddress,
+        ownerAddress: agents.ownerAddress,
+        pricePerTask: agents.pricePerTask,
+        stake: agents.stake,
+        active: agents.active,
+        endpointUrl: agents.endpointUrl,
+        score: agentStats.score,
+        completed: agentStats.completed,
+        failed: agentStats.failed,
+        lastActiveAt: agentStats.lastActiveAt,
+        capabilities: sql<string[]>`coalesce(array_agg(distinct ${agentCapabilities.capability})
+          filter (where ${agentCapabilities.capability} is not null), '{}')`,
+      })
+      .from(agents)
+      .leftJoin(agentStats, eq(agentStats.agentId, agents.id))
+      .leftJoin(agentCapabilities, eq(agentCapabilities.agentId, agents.id))
+      .where(and(...conditions))
+      .groupBy(agents.id, agentStats.agentId)
+      .limit(500);
+
+    const filtered = q.capability ? rows.filter((r) => r.capabilities.includes(q.capability!)) : rows;
+
+    // Asked for one skill: rank on the record IN that skill, not the blend of
+    // everything the agent offers. The overall figures are returned unchanged.
+    let skill: Map<number, SkillStat> | null = null;
+    if (q.capability) {
+      const cap = q.capability;
+      const all = await skillStats(
+        db,
+        chainId,
+        filtered.map((r) => r.id),
+        floorOf(chain),
+      );
+      skill = new Map(
+        filtered.map((r) => [r.id, all.get(r.id)?.find((s) => s.capability === cap) ?? noHistory(cap)]),
+      );
+    }
+    const forRanking = skill
+      ? filtered.map((r) => {
+          const s = skill.get(r.id)!;
+          return {...r, score: s.score, completed: s.completed, failed: s.failed};
+        })
+      : filtered;
+    const byId = new Map(filtered.map((r) => [r.id, r]));
+    const ranked = rank(forRanking, q.rank).slice(0, q.limit);
+
+    return {
+      chainId,
+      network: chain.name,
+      rank: q.rank,
+      agents: ranked.map((a) => ({
+        ...present(byId.get(a.id)!, chain),
+        ...(skill ? {skill: skill.get(a.id)!} : {}),
+      })),
+    };
+  });
+
+  app.get('/v1/agents/:id', async (request) => {
+    const {id} = request.params as {id: string};
+    // Anything but a positive integer names no agent — and must not reach
+    // Postgres as NaN, which answered 500.
+    // A lookup that finds nothing is NOT_FOUND. AGENT_NOT_HIREABLE is the
+    // hiring refusal (exists, but cannot be hired) and means something else.
+    if (!/^[1-9]\d{0,15}$/.test(id)) throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
+    const row = await db
+      .select({
+        id: agents.id,
+        chainId: agents.chainId,
+        chainAgentId: agents.chainAgentId,
+        name: agents.name,
+        description: agents.description,
+        walletAddress: agents.walletAddress,
+        ownerAddress: agents.ownerAddress,
+        pricePerTask: agents.pricePerTask,
+        stake: agents.stake,
+        active: agents.active,
+        endpointUrl: agents.endpointUrl,
+        score: agentStats.score,
+        completed: agentStats.completed,
+        failed: agentStats.failed,
+        lastActiveAt: agentStats.lastActiveAt,
+      })
+      .from(agents)
+      .leftJoin(agentStats, eq(agentStats.agentId, agents.id))
+      .where(eq(agents.id, Number(id)))
+      .limit(1);
+
+    const agent = row[0];
+    if (!agent) throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
+
+    const caps = await db
+      .select({capability: agentCapabilities.capability})
+      .from(agentCapabilities)
+      .where(eq(agentCapabilities.agentId, agent.id));
+
+    const chain = chains[agent.chainId];
+    if (!chain) throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${agent.chainId} is not enabled`);
+
+    // Every skill it offers, and any it has a record in, with that record.
+    const record = (await skillStats(db, agent.chainId, [agent.id], floorOf(chain))).get(agent.id) ?? [];
+    const names = [...new Set([...caps.map((c) => c.capability), ...record.map((s) => s.capability)])].sort();
+    return {
+      ...present({...agent, capabilities: caps.map((c) => c.capability)}, chain),
+      skills: names.map((n) => record.find((s) => s.capability === n) ?? noHistory(n)),
+    };
+  });
+
+  /**
+   * Whether this agent's record deserves belief (v3).
+   *
+   * The score proves every review cost a payment; this asks who paid. It
+   * counts distinct client owners, how much of the record one owner wrote,
+   * and whether a client received payment-token money from the worker's side
+   * shortly before it paid — the farming pattern prooflines measured on
+   * Monad. Answered in words with the numbers behind them, and the block the
+   * indexer had read up to, so the answer says what it rests on.
+   */
+  app.get('/v1/agents/:id/trust', async (request) => {
+    const {id} = request.params as {id: string};
+    if (!/^[1-9]\d{0,15}$/.test(id)) throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
+    const agent = await db.query.agents.findFirst({where: eq(agents.id, Number(id))});
+    if (!agent) throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
+    const chain = chains[agent.chainId];
+    if (!chain) throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${agent.chainId} is not enabled`);
+
+    const reading = await readTrust(db, {chainId: agent.chainId, agentId: agent.id, floor: floorOf(chain)});
+    const cursor = await db.query.indexerCursor.findFirst({
+      where: and(eq(indexerCursor.chainId, agent.chainId), eq(indexerCursor.contract, 'TaskEscrow')),
+    });
+    return {
+      agentId: String(agent.id),
+      chainId: agent.chainId,
+      verdict: reading.verdict,
+      reasons: reading.reasons,
+      metrics: reading.metrics,
+      fundingWindowBlocks: DEFAULT_WINDOW_BLOCKS,
+      indexedToBlock: cursor ? String(cursor.lastBlock) : null,
+    };
+  });
+
+  /**
+   * Start a registration: a message for the owner to sign (audit M1).
+   *
+   * Body `{ownerAddress, walletAddress, chainAgentId?, chainId?}` — the same
+   * values the registration will carry. Answers `{nonce, message, expiresAt}`.
+   * The owner signs `message` (EIP-191 personal_sign), as does the wallet
+   * when it must, and both go back with the registration and the nonce.
+   * Single-use, five minutes; each requester address keeps its newest few.
+   */
+  app.post('/v1/agents/challenge', async (request) => {
+    const body = RegisterChallengeBody.parse(request.body);
+    const chainId = body.chainId ?? defaultChainId;
+    if (!enabled.includes(chainId)) {
+      throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${chainId} is not enabled`);
+    }
+    const ownerAddress = body.ownerAddress.toLowerCase();
+    const nonce = newNonce();
+    const expiresAt = new Date(Date.now() + CHALLENGE_TTL_MS);
+    const requester = request.ip;
+    await db.transaction(async (tx) => {
+      await tx.insert(registrationChallenges).values({nonce, chainId, ownerAddress, requester, expiresAt});
+      await tx.execute(sql`
+        DELETE FROM registration_challenges
+        WHERE owner_address = ${ownerAddress}
+          AND (expires_at <= now()
+               OR nonce IN (SELECT nonce FROM registration_challenges
+                            WHERE owner_address = ${ownerAddress} AND requester = ${requester}
+                            ORDER BY expires_at DESC OFFSET ${LIVE_PER_REQUESTER}))
+      `);
+    });
+    return {
+      nonce,
+      message: registrationMessage({...body, chainId, nonce}),
+      expiresAt: expiresAt.toISOString(),
+    };
+  });
+
+  /**
+   * Register an agent.
+   *
+   * The on-chain ERC-8004 registration and the stake are done by the owner's
+   * own wallet; this records the off-chain half (capabilities, endpoint,
+   * searchable price) and issues the API key.
+   *
+   * It proves control first (audit M1). Matching public chain data proves
+   * nothing — anyone can read it — and the first registration of an agent
+   * receives its only API key. So `signature` must be the owner's over the
+   * challenge from `POST /v1/agents/challenge`, which names this chain,
+   * owner, wallet and ERC-8004 id. With no ERC-8004 id, nothing on chain ties
+   * the wallet to the owner, so the wallet signs too (`walletSignature`)
+   * unless it is the owner: otherwise anyone could claim a stranger's wallet,
+   * and the stranger's own registration would then hit the unique index.
+   *
+   * `chainAgentId` links the two, and without it the agent can never be
+   * hired: the escrow addresses agents by their ERC-8004 id. This used to say
+   * the id "stays NULL until the indexer observes the registration", but the
+   * indexer only watches TaskEscrow, so nothing ever set it — every agent
+   * registered through the API or the /register page was unhireable, and only
+   * the demo scripts worked, by writing the column with raw SQL.
+   *
+   * So the caller names the id and the chain confirms it: the id must exist,
+   * be owned by `ownerAddress`, and pay out to `walletAddress`. The database
+   * still never claims an on-chain fact the chain has not confirmed.
+   */
+  app.post('/v1/agents', async (request, reply) => {
+    const body = RegisterBody.parse(request.body);
+    if (deps.requirePublicHttpsEndpoints && body.endpointUrl && !isPublicHttpsUrl(body.endpointUrl)) {
+      throw new PactoraError(
+        ErrorCode.SCHEMA_MISMATCH,
+        'endpointUrl must be a public https URL — not http, a loopback or a private address',
+      );
+    }
+    const chainId = body.chainId ?? defaultChainId;
+    if (!enabled.includes(chainId)) {
+      throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${chainId} is not enabled`);
+    }
+
+    const challenge = await db.query.registrationChallenges.findFirst({
+      where: eq(registrationChallenges.nonce, body.nonce),
+    });
+    if (
+      !challenge ||
+      challenge.expiresAt.getTime() <= Date.now() ||
+      challenge.chainId !== chainId ||
+      challenge.ownerAddress !== body.ownerAddress.toLowerCase()
+    ) {
+      throw new PactoraError(
+        ErrorCode.UNAUTHORIZED,
+        'no live registration challenge for this owner and chain — request one from POST /v1/agents/challenge',
+      );
+    }
+    const message = registrationMessage({...body, chainId});
+    if (!(await signedBy(body.ownerAddress, message, body.signature))) {
+      throw new PactoraError(
+        ErrorCode.UNAUTHORIZED,
+        `the signature is not ${body.ownerAddress}'s over this registration's challenge`,
+      );
+    }
+
+    if (body.chainAgentId !== undefined) {
+      await verifyIdentity(deps.readIdentity, chainId, BigInt(body.chainAgentId), body);
+    } else if (body.walletAddress.toLowerCase() !== body.ownerAddress.toLowerCase()) {
+      if (!body.walletSignature || !(await signedBy(body.walletAddress, message, body.walletSignature))) {
+        throw new PactoraError(
+          ErrorCode.UNAUTHORIZED,
+          'with no chainAgentId, a wallet that is not the owner must sign the same challenge (walletSignature)',
+        );
+      }
+    }
+
+    const created = await db.transaction(async (tx) => {
+      // Consumed with the registration, atomically: a signature registers once.
+      const used = await tx
+        .delete(registrationChallenges)
+        .where(eq(registrationChallenges.nonce, body.nonce))
+        .returning({nonce: registrationChallenges.nonce});
+      if (used.length === 0) {
+        throw new PactoraError(ErrorCode.UNAUTHORIZED, 'that registration challenge was already used');
+      }
+
+      const [agent] = await tx
+        .insert(agents)
+        .values({
+          chainId,
+          ownerAddress: body.ownerAddress.toLowerCase(),
+          walletAddress: body.walletAddress.toLowerCase(),
+          name: body.name,
+          description: body.description ?? null,
+          endpointUrl: body.endpointUrl ?? null,
+          pricePerTask: body.pricePerTask,
+          chainAgentId: body.chainAgentId ?? null,
+        })
+        .returning();
+
+      await tx
+        .insert(agentCapabilities)
+        .values(body.capabilities.map((capability) => ({agentId: agent!.id, capability})));
+      await tx.insert(agentStats).values({agentId: agent!.id});
+
+      // A starting spend policy, from this chain's configured defaults.
+      //
+      // Without it an agent registers with no policy row at all, and
+      // /v1/budget falls back to the cache, finds nothing, and reports zero —
+      // so an orchestrator refuses to hire anybody and the marketplace does
+      // not work at all for a new agent. Meanwhile the signer, reading a
+      // wallet that is a plain EOA rather than an AgentAccount, enforces
+      // nothing. Those two disagreeing is worse than either alone.
+      //
+      // The on-chain caps still win wherever an AgentAccount exists; this is
+      // the floor for everyone else.
+      await tx.insert(spendPolicies).values({
+        agentId: agent!.id,
+        perTaskCap: String(chains[chainId]!.params.defaultPerTaskCap),
+        dailyCap: String(chains[chainId]!.params.defaultDailyCap),
+      });
+
+      const {key, keyId} = generateApiKey();
+      await tx.insert(apiKeys).values({
+        agentId: agent!.id,
+        keyId,
+        keyHash: hashApiKey(key),
+        scopes: ['client', 'worker'],
+      });
+
+      return {agent: agent!, key};
+    });
+
+    return reply.status(201).send({
+      agentId: created.agent.id,
+      chainId,
+      walletAddress: created.agent.walletAddress,
+      // Shown exactly once. Only a hash is stored, so it cannot be recovered.
+      apiKey: created.key,
+      warning: 'Store this key now — it is not recoverable.',
+    });
+  });
+
+  app.patch('/v1/agents/:id', async (request) => {
+    const caller = await authenticate(db, request);
+    const {id} = request.params as {id: string};
+    if (Number(id) !== caller.agentId) {
+      throw new PactoraError(ErrorCode.FORBIDDEN, 'an API key may only modify its own agent');
+    }
+    resolveChainId(request, caller, enabled);
+
+    const patch = UpdateAgentBody.parse(request.body);
+
+    const [updated] = await db
+      .update(agents)
+      .set({
+        ...(patch.pricePerTask !== undefined ? {pricePerTask: patch.pricePerTask} : {}),
+        ...(patch.active !== undefined ? {active: patch.active} : {}),
+        ...(patch.description !== undefined ? {description: patch.description} : {}),
+      })
+      .where(eq(agents.id, caller.agentId))
+      .returning();
+
+    return {agentId: updated!.id, pricePerTask: updated!.pricePerTask, active: updated!.active};
+  });
+
+  app.get('/v1/rank-modes', async () => ({modes: RANK_MODES}));
+}
+
+/** The chain's confidence floor: how much evidence a score needs before it moves fully. */
+function floorOf(chain: ChainConfig): number {
+  return Number(chain.params['confidenceFloor'] ?? 25);
+}
+
+/** Every response states its chain, so a client never has to infer it. */
+function present(a: AgentRow, chain: ChainConfig) {
+  const completed = Number(a.completed ?? 0);
+  const failed = Number(a.failed ?? 0);
+  const n = completed + failed;
+  return {
+    agentId: a.id,
+    chainId: a.chainId,
+    network: chain.name,
+    chainAgentId: a.chainAgentId,
+    name: a.name,
+    description: a.description,
+    capabilities: a.capabilities ?? [],
+    pricePerTask: a.pricePerTask,
+    priceDisplay: chain.formatToken(BigInt(a.pricePerTask)),
+    walletAddress: a.walletAddress,
+    score: Number(a.score ?? 50),
+    completed,
+    failed,
+    successRate: n === 0 ? null : Number((completed / n).toFixed(4)),
+    active: a.active,
+    explorerUrl: chain.explorerAddress(a.walletAddress),
+  };
+}
+
+/**
+ * Refuse an on-chain id the chain does not back.
+ *
+ * The owner check stops anyone claiming an identity — and the reputation
+ * attached to it — by naming its id; the wallet check is what the escrow pays,
+ * so a mismatch would send every payment somewhere other than where the
+ * registrant thinks.
+ */
+async function verifyIdentity(
+  read: IdentityReader | undefined,
+  chainId: number,
+  chainAgentId: bigint,
+  body: {ownerAddress: string; walletAddress: string},
+): Promise<void> {
+  if (!read) {
+    throw new PactoraError(
+      ErrorCode.INVALID_STATE,
+      'this API cannot read the identity registry, so it cannot verify chainAgentId — register without it',
+    );
+  }
+  const identity = await read({chainId, chainAgentId});
+  if (!identity) {
+    throw new PactoraError(
+      ErrorCode.INVALID_STATE,
+      `ERC-8004 identity ${chainAgentId} does not exist on chain ${chainId}`,
+    );
+  }
+  if (identity.owner.toLowerCase() !== body.ownerAddress.toLowerCase()) {
+    throw new PactoraError(
+      ErrorCode.INVALID_STATE,
+      `ERC-8004 identity ${chainAgentId} is owned by ${identity.owner}, not ${body.ownerAddress}`,
+    );
+  }
+  if (identity.wallet.toLowerCase() !== body.walletAddress.toLowerCase()) {
+    throw new PactoraError(
+      ErrorCode.INVALID_STATE,
+      `ERC-8004 identity ${chainAgentId} pays out to ${identity.wallet}, not ${body.walletAddress}`,
+    );
+  }
+}
