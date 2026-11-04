@@ -16,6 +16,6 @@
   },
   "dependencies": {
     "@pactora/shared": "workspace:*",
-    "viem": "^2.21.0"
+    "viem": "^2.57.14"
   }
 }
