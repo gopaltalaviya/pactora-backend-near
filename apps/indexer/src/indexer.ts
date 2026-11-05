@@ -1,14 +1,6 @@
-import {
-  createPublicClient,
-  hexToString,
-  http,
-  parseAbiItem,
-  type Abi,
-  type Log,
-  type PublicClient,
-} from 'viem';
-import {and, eq, gte, inArray, isNotNull, isNull, lte, sql} from 'drizzle-orm';
+import {and, asc, eq, inArray, isNull, sql} from 'drizzle-orm';
 import type {ChainConfig} from '@pactora/config';
+import {eventsOf, type BlockRead, type BlockSource, type ChainEvent} from '@pactora/near';
 import {
   type Db,
   OUTCOME_SUCCESS,
@@ -22,51 +14,53 @@ import {
   reputationScoreSql,
   tokenTransfers,
 } from '@pactora/db';
-
-/** ERC-20 Transfer, for the funding graph (v3). */
-const TRANSFER = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
+import {decodeFtTransfers, decodePactoraEvent, type DecodedJobEvent} from './events.js';
 
 /**
- * A decoded event field as text. Fields arrive as `unknown`; `String()` on an
- * object writes "[object Object]" into a column instead of failing, so only
- * the shapes an event can carry are accepted.
- */
-function text(v: unknown, fallback = ''): string {
-  if (typeof v === 'string') return v;
-  if (typeof v === 'bigint' || typeof v === 'number') return v.toString();
-  return fallback;
-}
-
-/** `ITaskEscrow.Outcome.SUCCESS`. Only this outcome earns reputation. */
-
-/** `JobRefunded.reason` is a left-aligned bytes32 string. */
-function refundReason(raw: unknown): string {
-  if (typeof raw !== 'string') return '';
-  if (!raw.startsWith('0x')) return raw;
-  try {
-    return hexToString(raw as `0x${string}`).replace(/\0+$/, '');
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Chain → Postgres, one worker per enabled chain.
+ * NEAR final blocks → Postgres, one worker per enabled chain
+ * (docs/NEAR-PORT.md §7).
  *
- * Two properties this is built around:
+ * Three properties this is built around:
  *
- * 1. **Re-runnable.** Every write is idempotent, guaranteed by
- *    `UNIQUE (chain_id, tx_hash, log_index)` on job_events rather than by
- *    application care. Replaying a block range is a no-op.
+ * 1. **Final blocks only, read in order.** Each tick reads the blocks after
+ *    the cursor up to the newest FINAL block. Final blocks do not reorg, so
+ *    there is no rewind: every block must name the previous one as its
+ *    parent, and a block that does not is a wrong source or a bug — the
+ *    indexer halts there (`ChainLinkError`) rather than index on top of it.
  *
- * 2. **Reorg-aware.** The cursor stores the hash of the last block it
- *    processed. If that hash no longer matches what the chain reports, the
- *    chain reorganised underneath us, so we rewind and replay. Without this a
- *    payment from an orphaned block stays in the database forever.
+ * 2. **One transaction per batch.** A batch's events, their effects on the
+ *    projection and the cursor that moves past them commit together, so a
+ *    crash anywhere replays the whole batch, and nothing of it is half-applied.
+ *
+ * 3. **Re-runnable.** Every write is idempotent, guaranteed by unique keys
+ *    rather than application care: job_events on (chain_id, receipt_id,
+ *    log_index), token_transfers likewise, payments on (chain_id, tx_hash,
+ *    job_id). A replayed batch adds nothing, and an event's effects run only
+ *    when its row is new.
  *
  * It only ever writes what the chain said. It never invents state, which is
  * why the UI can never show a payment that did not happen.
  */
+
+/**
+ * Blocks read per tick, at most. neardata serves one block per request, so a
+ * tick is this many HTTP reads (FETCH_CONCURRENCY at a time) and one
+ * transaction. 50 blocks is ~30 s of testnet (≈0.6 s a block), so a worker
+ * polling every 2 s catches up from a backlog about ten times faster than the
+ * chain grows, while a tick stays short enough that a failure retries little.
+ */
+export const MAX_BLOCKS_PER_TICK = 50;
+
+/** Block reads in flight at once. Polite to a public endpoint; the order of processing is unaffected. */
+const FETCH_CONCURRENCY = 5;
+
+/** `indexer_cursor.contract`: one cursor per chain, for everything this worker reads. */
+export const CURSOR_CONTRACT = 'Pactora';
+
+/** A block that does not follow the last one read. The indexer does not move past it. */
+export class ChainLinkError extends Error {
+  override name = 'ChainLinkError';
+}
 
 /**
  * A handle that is either the pool or an open transaction.
@@ -80,10 +74,9 @@ type Tx = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
 export interface IndexerDeps {
   db: Db;
   chain: ChainConfig;
-  abis: Record<string, Abi>;
+  /** Where final blocks come from: neardata on testnet/mainnet, RPC polling on the sandbox. */
+  source: BlockSource;
   logger?: {info: (o: unknown, m?: string) => void; warn: (o: unknown, m?: string) => void};
-  /** The chain client. Injected in tests; by default one for `chain.rpcUrl`. */
-  client?: PublicClient;
 }
 
 type JobState = 'created' | 'accepted' | 'submitted' | 'disputed' | 'settled' | 'refunded';
@@ -93,8 +86,8 @@ type JobState = 'created' | 'accepted' | 'submitted' | 'disputed' | 'settled' | 
  * earlier one, or the same one — the API often writes a state first, and the
  * event must still land its chain facts (the fee, the result hash). The
  * lifecycle only goes one way — created → accepted → submitted → disputed →
- * settled or refunded — with every step skippable (a directPay is created and
- * settled at once; an unaccepted offer is refunded).
+ * settled or refunded — with every step skippable (a direct_pay is created
+ * and settled at once; an unaccepted offer is refunded).
  */
 const AT_OR_BEFORE: Record<Exclude<JobState, 'created'>, JobState[]> = {
   accepted: ['created', 'accepted'],
@@ -104,310 +97,206 @@ const AT_OR_BEFORE: Record<Exclude<JobState, 'created'>, JobState[]> = {
   refunded: ['created', 'accepted', 'submitted', 'disputed', 'refunded'],
 };
 
+const STATE_OF: Record<string, Exclude<JobState, 'created'>> = {
+  accepted: 'accepted',
+  submitted: 'submitted',
+  disputed: 'disputed',
+  settled: 'settled',
+  refunded: 'refunded',
+};
+
+/** The kinds whose event names the spec hash and both parties — the ones that can link a job row. */
+const LINKING_KINDS = new Set(['created', 'direct_paid']);
+
+/** ft_transfer entries per log line that `256 × line + entry` can number without colliding. */
+const ENTRIES_PER_LINE = 256;
+
 export class Indexer {
-  private readonly client: PublicClient;
   private readonly log: NonNullable<IndexerDeps['logger']>;
+  private readonly pactora: ReadonlySet<string>;
+  private readonly token: ReadonlySet<string>;
 
-  /**
-   * How far behind the head to stay, and how far to rewind on a reorg.
-   *
-   * Taken from the network's declared `confirmations` rather than hardcoded:
-   * 1 on a local chain you can re-run, 2 on Monad testnet, 5 on mainnet. A
-   * fixed depth of 12 would mean a freshly-started chain with 7 blocks never
-   * indexes anything at all, because the safe head sits below block zero.
-   */
-  private readonly reorgDepth: bigint;
-  private readonly maxRange: bigint;
-
-  /** The last head read and the last block indexed to — see `progress()`. */
-  private lastHead: bigint | null = null;
-  private lastIndexed: bigint | null = null;
+  /** The last final height read and the block indexed up to — see `progress()`. */
+  private lastHead: number | null = null;
+  private lastIndexed: number | null = null;
 
   constructor(private readonly deps: IndexerDeps) {
-    this.client = deps.client ?? createPublicClient({transport: http(deps.chain.rpcUrl)});
     this.log = deps.logger ?? {info: () => {}, warn: () => {}};
-    this.reorgDepth = BigInt(deps.chain.confirmations);
-    // Public RPCs cap eth_getLogs. Monad's rejects anything over 100 blocks,
-    // which a 2000-block default discovers only in production, as an error
-    // rather than as a slow query.
-    this.maxRange = BigInt(deps.chain.maxLogRange);
+    this.pactora = new Set([deps.chain.contracts.Pactora]);
+    this.token = new Set([deps.chain.contracts.PaymentToken]);
   }
 
   /**
-   * How far the last tick got: the chain head it read and the block it has
+   * How far the last tick got: the final height it read and the block it has
    * indexed up to. Their difference is the lag an operator alerts on — a
    * tick can succeed every time while falling further behind a backlog.
    */
-  progress(): {headBlock: bigint | null; indexedBlock: bigint | null} {
+  progress(): {headBlock: number | null; indexedBlock: number | null} {
     return {headBlock: this.lastHead, indexedBlock: this.lastIndexed};
   }
 
-  /** Process one batch. Returns the block it advanced to. */
-  async tick(): Promise<bigint> {
+  /** Process one batch. Returns the height it has indexed up to. */
+  async tick(): Promise<number> {
     const to = await this.step();
     this.lastIndexed = to;
     return to;
   }
 
-  private async step(): Promise<bigint> {
-    const {chain} = this.deps;
-    const head = await this.client.getBlockNumber();
-    this.lastHead = head;
-    const safeHead = head > this.reorgDepth ? head - this.reorgDepth : 0n;
+  private async step(): Promise<number> {
+    const {chain, source} = this.deps;
+    const final = await source.finalHeight();
+    this.lastHead = final;
 
     const cursor = await this.readCursor();
-    let from = cursor ? BigInt(cursor.lastBlock) + 1n : BigInt(chain.startBlock);
+    const from = cursor ? cursor.lastBlock + 1 : chain.startBlock;
+    if (from > final) return from - 1;
+    const to = Math.min(final, from + MAX_BLOCKS_PER_TICK - 1);
 
-    if (cursor && (await this.hasReorged(cursor))) {
-      // Rewind past the reorg and replay. Safe because every write is keyed
-      // by (chain, tx, logIndex).
-      const back = this.reorgDepth * 2n; // rewind further than we trail
-      const rewindTo =
-        BigInt(cursor.lastBlock) > back ? BigInt(cursor.lastBlock) - back : BigInt(chain.startBlock);
-      this.log.warn(
-        {chainId: chain.chainId, from: cursor.lastBlock, rewindTo: rewindTo.toString()},
-        'reorg detected, rewinding',
-      );
-      // Throws — and so halts the indexer where it stands — if anything we
-      // recorded in the window is no longer on the chain at all.
-      await this.checkRewindWindow(rewindTo, BigInt(cursor.lastBlock));
-      // v3: the funding graph is a plain copy of the token's logs, with
-      // nothing derived from it — so unlike the job projection it can simply
-      // be re-read. Left in place, a transfer from an orphaned block could mark
-      // a payment self-funded on money that never moved. If the replay below
-      // fails, the cursor still names the orphaned block, so the next tick
-      // detects the reorg again and repeats this: it converges.
-      await this.deps.db
-        .delete(tokenTransfers)
-        .where(
-          and(eq(tokenTransfers.chainId, chain.chainId), gte(tokenTransfers.blockNumber, Number(rewindTo))),
+    const blocks = await this.readBlocks(from, to);
+
+    // Every block must follow the one before it, the first one the cursor's.
+    // Checked for the whole batch before anything is written. A height with
+    // no block (null) is skipped; the next block's parent is then the last
+    // real one, which is the hash the cursor keeps — so a source that wrongly
+    // reports a height empty is caught here too. '' is "no hash yet": a
+    // first batch, before any real block has been seen.
+    let parent = cursor?.lastBlockHash ?? '';
+    let parentHeight = cursor ? cursor.lastBlock : from - 1;
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i]!;
+      const height = from + i;
+      if (b === null) continue;
+      if (b.height !== height) {
+        throw new ChainLinkError(
+          `chain ${chain.chainId}: asked the ${source.kind} source for block height ${height}, got ${b.height}`,
         );
-      from = rewindTo;
+      }
+      if (parent !== '' && b.prevHash !== parent) {
+        throw new ChainLinkError(
+          `chain ${chain.chainId}: block ${height} (${b.hash}) has prev_hash ${b.prevHash}, but the last block ` +
+            `read, at or before ${parentHeight}, was ${parent}. Final blocks do not reorg: this is a wrong ` +
+            `${source.kind} source or a bug. Halting here; nothing past block ${parentHeight} is indexed.`,
+        );
+      }
+      parent = b.hash;
+      parentHeight = height;
     }
 
-    if (from > safeHead) return from - 1n;
+    const real = blocks.filter((b): b is BlockRead => b !== null);
+    const protocol = real.flatMap((b) => eventsOf(b.receipts, b, this.pactora));
+    const token = real.flatMap((b) => eventsOf(b.receipts, b, this.token));
+    // Decoded before the transaction, so an event this code cannot read
+    // fails the tick without opening one.
+    const decoded = protocol
+      .map((ev) => ({ev, d: decodePactoraEvent(ev)}))
+      .filter((x): x is {ev: ChainEvent; d: DecodedJobEvent} => x.d !== null);
 
-    const to = from + this.maxRange - 1n > safeHead ? safeHead : from + this.maxRange - 1n;
-    const escrow = chain.contracts['TaskEscrow'];
-    if (!escrow) throw new Error(`chain ${chain.chainId}: no TaskEscrow address in the deployment`);
-
-    const logs = await this.client.getLogs({
-      address: escrow as `0x${string}`,
-      fromBlock: from,
-      toBlock: to,
+    await this.deps.db.transaction(async (tx) => {
+      for (const {ev, d} of decoded) await this.handleEvent(tx, ev, d);
+      await this.recordTransfers(tx, token);
+      await this.writeCursor(tx, to, parent);
     });
 
-    for (const entry of logs) await this.handleLog(entry);
-
-    // v3: the funding graph, from the same chunk. Before the cursor moves, so
-    // a failed read retries the whole chunk rather than leaving a gap.
-    const paymentToken = chain.contracts['PaymentToken'];
-    if (paymentToken) await this.recordTransfers(paymentToken, from, to);
-
-    const toBlock = await this.client.getBlock({blockNumber: to});
-    await this.writeCursor('TaskEscrow', to, toBlock.hash);
-
-    if (logs.length > 0) {
-      this.log.info(
-        {chainId: chain.chainId, from: from.toString(), to: to.toString(), logs: logs.length},
-        'indexed',
-      );
+    if (decoded.length > 0) {
+      this.log.info({chainId: chain.chainId, from, to, events: decoded.length}, 'indexed');
     }
     return to;
   }
 
+  /** Blocks `from..to` in height order, FETCH_CONCURRENCY reads at a time. */
+  private async readBlocks(from: number, to: number): Promise<(BlockRead | null)[]> {
+    const n = to - from + 1;
+    const out = new Array<BlockRead | null>(n);
+    let next = 0;
+    let failed = false;
+    const worker = async () => {
+      while (!failed && next < n) {
+        const i = next++;
+        try {
+          out[i] = await this.deps.source.blockAt(from + i);
+        } catch (err) {
+          failed = true;
+          throw err;
+        }
+      }
+    };
+    await Promise.all(Array.from({length: Math.min(FETCH_CONCURRENCY, n)}, worker));
+    return out;
+  }
+
   /**
-   * Payment-token transfers in [from, to] that touch a known agent's wallet or
-   * owner, into `token_transfers` — what the trust check reads to tell a
-   * client the worker's side funded from one that paid with its own money.
+   * Payment-token transfers that touch a known agent's wallet or owner, into
+   * `token_transfers` — what the trust check reads to tell a client the
+   * worker's side funded from one that paid with its own money.
    *
    * Kept when EITHER side is known: a rater wallet funded before it
    * registered is still caught, because the worker's side was known. One
-   * extra `eth_getLogs` per chunk, filtered in memory; on a token with heavy
-   * traffic (mainnet USDC) this should move to topic filters on the known
-   * addresses. Idempotent on (chain, tx, logIndex), so a replay adds nothing.
+   * log line can list several transfers, so `log_index` is 256 × the log
+   * line + the entry (packages/db schema). Idempotent on (chain, receipt,
+   * log_index), so a replay adds nothing.
    */
-  private async recordTransfers(token: string, from: bigint, to: bigint): Promise<void> {
-    const {db, chain} = this.deps;
-    const logs = (await this.client.getLogs({
-      address: token as `0x${string}`,
-      event: TRANSFER,
-      fromBlock: from,
-      toBlock: to,
-    })) as unknown as {
-      args: {from?: string; to?: string; value?: bigint};
-      blockNumber: bigint | null;
-      logIndex: number | null;
-      transactionHash: string | null;
-    }[];
-    if (logs.length === 0) return;
+  private async recordTransfers(tx: Tx, events: ChainEvent[]): Promise<void> {
+    const {chain} = this.deps;
+    const transfers = events.flatMap((ev) =>
+      decodeFtTransfers(ev).map((t) => {
+        if (t.entry >= ENTRIES_PER_LINE) {
+          // Numbering it would collide with the next line's first entry and
+          // drop one of the two on the unique key.
+          throw new Error(
+            `chain ${chain.chainId}: ft_transfer in receipt ${ev.receiptId} log ${ev.logIndex} lists more than ` +
+              `${ENTRIES_PER_LINE} transfers; log_index cannot number them`,
+          );
+        }
+        return {ev, t};
+      }),
+    );
+    if (transfers.length === 0) return;
 
     const known = new Set<string>();
-    const rows = (await db.execute(
-      sql`SELECT lower(wallet_address) AS w, lower(owner_address) AS o FROM agents WHERE chain_id = ${chain.chainId}`,
+    const rows = (await tx.execute(
+      sql`SELECT wallet_address AS w, owner_address AS o FROM agents WHERE chain_id = ${chain.chainId}`,
     )) as unknown as {w: string; o: string}[];
     for (const r of rows) {
       known.add(r.w);
       known.add(r.o);
     }
 
-    const keep = logs
-      .map((l) => ({
-        from: String(l.args.from ?? '').toLowerCase(),
-        to: String(l.args.to ?? '').toLowerCase(),
-        value: l.args.value,
-        blockNumber: l.blockNumber,
-        logIndex: l.logIndex,
-        txHash: l.transactionHash,
-      }))
-      .filter(
-        (t) =>
-          (known.has(t.from) || known.has(t.to)) &&
-          t.value !== undefined &&
-          t.blockNumber !== null &&
-          t.logIndex !== null &&
-          t.txHash !== null,
-      );
+    const keep = transfers.filter(({t}) => known.has(t.from) || known.has(t.to));
     if (keep.length === 0) return;
 
-    await db
+    await tx
       .insert(tokenTransfers)
       .values(
-        keep.map((t) => ({
+        keep.map(({ev, t}) => ({
           chainId: chain.chainId,
-          blockNumber: Number(t.blockNumber),
-          txHash: t.txHash!,
-          logIndex: t.logIndex!,
+          blockNumber: ev.blockHeight,
+          txHash: ev.txHash,
+          receiptId: ev.receiptId,
+          logIndex: ev.logIndex * ENTRIES_PER_LINE + t.entry,
           fromAddress: t.from,
           toAddress: t.to,
-          amount: t.value!.toString(),
+          amount: t.amount,
         })),
       )
       .onConflictDoNothing();
   }
 
-  /**
-   * Is everything we recorded between `from` and `to` still on the chain?
-   *
-   * A transaction that was re-mined elsewhere has a receipt and the same
-   * effects, so replaying is correct. One that was DROPPED has no receipt, and
-   * its effects — a settlement, a reputation credit — are now false. They
-   * cannot be quietly undone: job_events is append-only by design, because it
-   * is the audit log. So the indexer stops here, names every orphaned
-   * transaction, and waits for an operator, rather than carrying a projection
-   * it knows to be wrong. The indexer trails the head by the network's
-   * confirmation depth, so this takes a reorg deeper than that.
-   */
-  private async checkRewindWindow(from: bigint, to: bigint): Promise<void> {
-    const {db, chain} = this.deps;
-    const recorded = await db
-      .selectDistinct({txHash: jobEvents.txHash})
-      .from(jobEvents)
-      .where(
-        and(
-          eq(jobEvents.chainId, chain.chainId),
-          isNotNull(jobEvents.txHash),
-          gte(jobEvents.blockNumber, Number(from)),
-          lte(jobEvents.blockNumber, Number(to)),
-        ),
-      );
-
-    const orphaned: string[] = [];
-    for (const {txHash} of recorded) {
-      // ONLY "not found" means the chain no longer has it. Any other error is
-      // the RPC failing to answer — it used to count as an orphan too, so one
-      // blip during this check halted the indexer as if for a reorg. Thrown
-      // instead: the tick fails and the loop retries it with backoff.
-      const receipt = await this.client
-        .getTransactionReceipt({hash: txHash as `0x${string}`})
-        .catch((err: unknown) => {
-          const e = err as {name?: string; message?: string};
-          if (e.name === 'TransactionReceiptNotFoundError' || /receipt not found/i.test(e.message ?? '')) {
-            return null;
-          }
-          throw err;
-        });
-      if (!receipt) orphaned.push(txHash!);
-    }
-
-    if (orphaned.length > 0) {
-      throw new Error(
-        `reorg dropped ${orphaned.length} transaction(s) this indexer had already applied: ${orphaned.join(', ')} — ` +
-          'their events are in the append-only log and their effects are in the projection; halting for an operator ' +
-          'to reconcile rather than indexing on top of state the chain no longer backs',
-      );
-    }
-  }
-
-  /**
-   * The chain is trusted; our record of it is not. If the block we last
-   * processed no longer hashes the same, it was orphaned.
-   */
-  private async hasReorged(cursor: {lastBlock: number; lastBlockHash: string}): Promise<boolean> {
-    try {
-      const block = await this.client.getBlock({blockNumber: BigInt(cursor.lastBlock)});
-      return block.hash !== cursor.lastBlockHash;
-    } catch {
-      // The block is gone entirely — that is a reorg too.
-      return true;
-    }
-  }
-
-  private async handleLog(entry: Log): Promise<void> {
-    const {db, chain} = this.deps;
-    const decoded = await this.decode(entry);
-    if (!decoded) return;
-
-    // A log with no block is a pending one. We only ever query a range below
-    // the safe head, so this should not happen — and if it ever does, an
-    // unmined event has no place in a record of settled payments.
-    if (entry.blockNumber === null) {
-      this.log.warn({kind: decoded.kind}, 'skipping a pending log with no block number');
-      return;
-    }
-    const blockNumber = entry.blockNumber;
-
+  private async handleEvent(tx: Tx, ev: ChainEvent, decoded: DecodedJobEvent): Promise<void> {
+    const {chain} = this.deps;
     const {kind, chainJobId, payload} = decoded;
 
-    let job = await db.query.jobs.findFirst({
+    let job = await tx.query.jobs.findFirst({
       where: and(eq(jobs.chainId, chain.chainId), eq(jobs.chainJobId, chainJobId)),
     });
 
-    // No chainJobId yet.
+    // No chain_job_id yet.
     //
-    // The API cannot know it: the signer returns as soon as the transaction is
-    // BROADCAST, and the id is only assigned when the contract runs. Waiting
-    // for a receipt would make every hire cost a block of latency.
-    //
-    // So the first event a job ever emits carries its specHash, and that is
-    // what links the two. Matching on the hash of the work — rather than on an
-    // id neither side knew in advance — is also self-healing: it works no
-    // matter which of the two writes landed first.
-    if (!job && payload['specHash']) {
-      const candidate = await db.query.jobs.findFirst({
-        where: and(
-          eq(jobs.chainId, chain.chainId),
-          eq(jobs.specHash, text(payload['specHash'])),
-          isNull(jobs.chainJobId),
-        ),
-      });
-      // The hash alone is not enough. It is scoped to this database's job id,
-      // and ids repeat when a database is rebuilt or two deployments share a
-      // chain — a live run linked an unaccepted escrow job to an OLD run's
-      // fast-path payment, called it settled, and credited the worker. The
-      // event names both parties; they must be this row's.
-      job = candidate && (await this.samePartiesAs(candidate, payload)) ? candidate : undefined;
-      if (candidate && !job) {
-        this.log.warn(
-          {jobId: candidate.id, chainJobId, specHash: payload['specHash']},
-          'spec hash matched a job between different agents — not linked',
-        );
-      }
-      if (job) {
-        await db.update(jobs).set({chainJobId}).where(eq(jobs.id, job.id));
-        this.log.info({jobId: job.id, chainJobId}, 'linked job to its on-chain id');
-      }
-    }
+    // The API cannot know it in advance: the contract assigns it when the
+    // call runs. So the first event a job emits carries its spec hash and
+    // both parties, and that is what links the two. Matching on the hash of
+    // the work — rather than on an id neither side knew — is self-healing: it
+    // works whichever of the two writes landed first.
+    if (!job && LINKING_KINDS.has(kind)) job = await this.linkBySpecHash(tx, chainJobId, payload);
 
     // A job the API did not create — someone called the contract directly.
     // The chain is the source of truth, so this is expected, not an error.
@@ -416,210 +305,149 @@ export class Indexer {
       return;
     }
 
-    // Recording the event and applying it are ONE transaction, and the
-    // insert's own uniqueness decides whether the rest runs.
-    //
-    // This is what makes a replay safe. Replays are ordinary: the cursor is
-    // written after a batch is processed, so a restart mid-batch re-reads it,
-    // and every reorg deliberately rewinds 2x the confirmation depth. The
-    // event and payment rows were already idempotent, but the reputation bump
-    // is `completed + 1` — so before this, each replay credited the worker
-    // again, with no payment behind it. That inflates the exact number this
-    // project claims only a settled payment can write.
-    //
-    // One transaction also closes the narrower window: a crash between
-    // recording an event and applying it would otherwise leave the event
-    // stored and its effect skipped forever on replay.
-    const jobRow = job;
-    await db.transaction(async (tx) => {
-      // A transaction re-mined in a later block keeps its hash but can move
-      // position, and logIndex is block-level — so the unique key below sees
-      // a new event, and a settlement would be credited twice. One
-      // transaction emits at most one event of a kind for a job; if this one
-      // is already recorded, it is the same event, wherever it now sits.
-      const seen = await tx.query.jobEvents.findFirst({
-        where: and(
-          eq(jobEvents.chainId, chain.chainId),
-          eq(jobEvents.txHash, entry.transactionHash ?? ''),
-          eq(jobEvents.jobId, jobRow.id),
-          eq(jobEvents.kind, kind),
-        ),
-      });
-      if (seen) return;
+    // The insert's own uniqueness decides whether the effects run: an event
+    // already recorded has its effects in the projection already. This is
+    // what keeps a replay from crediting the worker twice — the reputation
+    // bump is `completed + 1`.
+    const [recorded] = await tx
+      .insert(jobEvents)
+      .values({
+        chainId: chain.chainId,
+        jobId: job.id,
+        kind,
+        payload,
+        txHash: ev.txHash,
+        receiptId: ev.receiptId,
+        blockNumber: ev.blockHeight,
+        logIndex: ev.logIndex,
+      })
+      .onConflictDoNothing()
+      .returning({id: jobEvents.id});
+    if (!recorded) return;
 
-      const [recorded] = await tx
-        .insert(jobEvents)
-        .values({
-          chainId: chain.chainId,
-          jobId: jobRow.id,
-          kind,
-          payload,
-          txHash: entry.transactionHash,
-          blockNumber: Number(blockNumber),
-          logIndex: entry.logIndex,
-        })
-        .onConflictDoNothing()
-        .returning({id: jobEvents.id});
-
-      // Already seen. Its effects are already in the projection.
-      if (!recorded) return;
-
-      await this.applyStateChange(tx, jobRow.id, kind, payload, blockNumber, entry.transactionHash ?? '');
-    });
+    await this.applyStateChange(tx, job.id, kind, payload, ev);
   }
 
-  /** Whether an event's client and worker are this job row's, by ERC-8004 id. */
-  private async samePartiesAs(
-    job: {clientAgentId: number; workerAgentId: number},
-    payload: Record<string, unknown>,
-  ): Promise<boolean> {
+  /**
+   * The job row this job_created / direct_paid belongs to: same spec hash, no
+   * chain id yet, and the same two parties.
+   *
+   * The hash alone is not enough. A spec can repeat — the same work hired
+   * twice, a database rebuilt, two deployments sharing a chain — and an EVM
+   * live run once linked an unaccepted escrow job to an OLD fast-path
+   * payment, called it settled, and credited the worker. The event names
+   * both parties by contract agent id; they must be this row's.
+   */
+  private async linkBySpecHash(tx: Tx, chainJobId: string, payload: Record<string, unknown>) {
+    const {chain} = this.deps;
+    const specHash = payload['specHash'];
     const client = payload['clientAgentId'];
     const worker = payload['workerAgentId'];
-    // Every event that carries a specHash also names both parties. One that
-    // did not could not be checked, and an unchecked link is how the wrong
-    // job gets paid for.
-    if (client === undefined || worker === undefined) return false;
-    const [c, w] = await Promise.all([
-      this.deps.db.query.agents.findFirst({where: eq(agents.id, job.clientAgentId)}),
-      this.deps.db.query.agents.findFirst({where: eq(agents.id, job.workerAgentId)}),
-    ]);
-    return text(c?.chainAgentId) === text(client) && text(w?.chainAgentId) === text(worker);
+    if (typeof specHash !== 'string' || typeof client !== 'string' || typeof worker !== 'string') {
+      return undefined;
+    }
+    const candidates = await tx.query.jobs.findMany({
+      where: and(eq(jobs.chainId, chain.chainId), eq(jobs.specHash, specHash), isNull(jobs.chainJobId)),
+      orderBy: [asc(jobs.id)],
+    });
+    for (const candidate of candidates) {
+      if (await this.samePartiesAs(tx, candidate, client, worker)) {
+        await tx.update(jobs).set({chainJobId}).where(eq(jobs.id, candidate.id));
+        this.log.info({jobId: candidate.id, chainJobId}, 'linked job to its on-chain id');
+        return {...candidate, chainJobId};
+      }
+    }
+    if (candidates.length > 0) {
+      this.log.warn(
+        {jobIds: candidates.map((c) => c.id), chainJobId, specHash},
+        'spec hash matched a job between different agents — not linked',
+      );
+    }
+    return undefined;
   }
 
-  private async decode(
-    entry: Log,
-  ): Promise<{kind: string; chainJobId: string; payload: Record<string, unknown>} | null> {
-    const {decodeEventLog} = await import('viem');
-    const abi = this.deps.abis['TaskEscrow'];
-    if (!abi) return null;
-
-    try {
-      const ev = decodeEventLog({abi, data: entry.data, topics: entry.topics});
-      const args = (ev.args ?? {}) as Record<string, unknown>;
-      const jobId = args['jobId'];
-      if (jobId === undefined) return null;
-
-      const kindOf: Record<string, string> = {
-        JobCreated: 'created',
-        JobAccepted: 'accepted',
-        ResultSubmitted: 'submitted',
-        JobSettled: 'settled',
-        JobRefunded: 'refunded',
-        JobDisputed: 'disputed',
-        DisputeResolved: 'dispute_resolved',
-        DirectPaid: 'direct_paid',
-        FeedbackFailed: 'feedback_failed',
-        // v2: a dispute nobody ruled on, and a payment held for its recipient.
-        DisputeExpired: 'dispute_expired',
-        PaymentDeferred: 'payment_deferred',
-        // v3: the worker's bond paid to the client, and the dispute bond paid
-        // to whoever the ruling favoured.
-        BondSeized: 'bond_seized',
-        DisputeBondSettled: 'dispute_bond_settled',
-        // Audit M-1: a refused review was written later (retryFeedback).
-        FeedbackRetried: 'feedback_retried',
-      };
-      const kind = ev.eventName ? kindOf[ev.eventName] : undefined;
-      if (!kind) return null;
-
-      return {
-        kind,
-        chainJobId: text(jobId),
-        // bigints do not survive JSON, and these are money.
-        payload: JSON.parse(
-          JSON.stringify(args, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)),
-        ) as Record<string, unknown>,
-      };
-    } catch {
-      return null;
-    }
+  /** Whether the event's client and worker (contract agent ids) are this job row's. */
+  private async samePartiesAs(
+    tx: Tx,
+    job: {clientAgentId: number; workerAgentId: number},
+    client: string,
+    worker: string,
+  ): Promise<boolean> {
+    const [c, w] = await Promise.all([
+      tx.query.agents.findFirst({where: eq(agents.id, job.clientAgentId)}),
+      tx.query.agents.findFirst({where: eq(agents.id, job.workerAgentId)}),
+    ]);
+    return c?.chainAgentId === client && w?.chainAgentId === worker;
   }
 
   /** Project the event onto the job row and the reputation counters. */
   private async applyStateChange(
-    db: Tx,
+    tx: Tx,
     jobId: number,
     kind: string,
     payload: Record<string, unknown>,
-    blockNumber: bigint,
-    txHash: string,
+    ev: ChainEvent,
   ): Promise<void> {
-    const stateOf: Record<string, 'accepted' | 'submitted' | 'settled' | 'refunded' | 'disputed'> = {
-      accepted: 'accepted',
-      submitted: 'submitted',
-      settled: 'settled',
-      refunded: 'refunded',
-      disputed: 'disputed',
-    };
-    const next = stateOf[kind];
+    const blockTime = new Date(ev.blockTimestamp * 1000);
+    const next = STATE_OF[kind];
     if (next) {
       // Forward only. The API advances a job when its transaction is
-      // broadcast, and this indexer trails the head by its confirmations — so
-      // it routinely reaches an event older than the state already written.
-      // Projecting that walked the job backwards: a delivered job read
-      // "accepted" again and the client's approve was refused. A reorg that
-      // drops an applied event halts the indexer instead (checkRewindWindow),
-      // so there is no legitimate backwards move to allow.
-      await db
+      // broadcast, and this indexer reads final blocks, so it routinely
+      // reaches an event older than the state already written. Projecting
+      // that walked the job backwards: a delivered job read "accepted" again
+      // and the client's approve was refused.
+      await tx
         .update(jobs)
         .set({
           state: next,
-          ...(next === 'settled' ? {settledAt: new Date(), fee: text(payload['fee'], '0')} : {}),
-          ...(kind === 'submitted' ? {resultHash: text(payload['resultHash'])} : {}),
+          // The block's time: a backfill must not date a payment by when it was indexed.
+          ...(next === 'settled' ? {settledAt: blockTime, fee: payload['fee'] as string} : {}),
+          ...(kind === 'submitted' ? {resultHash: payload['resultHash'] as string} : {}),
         })
         .where(and(eq(jobs.id, jobId), inArray(jobs.state, AT_OR_BEFORE[next])));
     }
 
-    // ONLY on 'settled'. directPay emits DirectPaid *and* JobSettled for the
-    // same job, so counting both double-credits every fast-path payment —
-    // which would inflate exactly the reputation this project claims is
-    // trustworthy. JobSettled is emitted on both paths, so it alone is
-    // complete as well as correct.
+    // ONLY on 'settled'. direct_pay emits direct_paid *and* job_settled for
+    // the same job, so counting both double-credits every fast-path payment.
+    // job_settled is emitted on both paths, so it alone is complete as well
+    // as correct.
     if (kind === 'settled') {
-      const job = await db.query.jobs.findFirst({where: eq(jobs.id, jobId)});
+      const job = await tx.query.jobs.findFirst({where: eq(jobs.id, jobId)});
       if (!job) return;
+      const fee = payload['fee'] as string;
+      // What the chain moved: the worker's pay plus the protocol fee.
+      const amount = (BigInt(payload['paid'] as string) + BigInt(fee)).toString();
 
-      await db
+      await tx
         .insert(payments)
         .values({
           chainId: job.chainId,
           jobId: job.id,
           fromAgentId: job.clientAgentId,
           toAgentId: job.workerAgentId,
-          amount: job.amount,
-          fee: text(payload['fee'], '0'),
-          // From the log. No event carries a tx hash in its arguments, so
-          // reading one from the payload stored '' on every payment row.
-          txHash,
-          // The real block, not 0. A payment row that claims block zero is a
-          // payment nobody can find again on the chain it came from.
-          blockNumber: Number(blockNumber),
-          confirmedAt: new Date(),
+          amount,
+          fee,
+          txHash: ev.txHash,
+          blockNumber: ev.blockHeight,
+          confirmedAt: blockTime,
         })
         .onConflictDoNothing();
 
       // An UNRESOLVED settlement — a dispute that timed out — pays the worker
-      // but earns nothing: the escrow writes no feedback for it, and the
+      // but earns nothing: the contract writes no review for it, and the
       // projection must not credit what the chain did not. Money moved, so
       // the payment row above still stands.
-      if (Number(payload['outcome'] ?? OUTCOME_SUCCESS) === OUTCOME_SUCCESS) {
-        await this.bumpReputation(db, job.workerAgentId, true, job.amount);
+      if (payload['outcome'] === OUTCOME_SUCCESS) {
+        await this.bumpReputation(tx, job.workerAgentId, true, amount);
       }
     }
 
-    if (kind === 'refunded') {
-      const job = await db.query.jobs.findFirst({where: eq(jobs.id, jobId)});
-      // Only what the contract itself records as the worker's failure:
-      // accepted and never delivered, or a dispute the worker lost. A client
-      // cancelling, or an offer nobody accepted, is not the worker's fault —
-      // and the contract writes no feedback for either.
-      //
-      // This tested `reason !== undefined`, which is always true: the event
-      // always carries a reason, as bytes32. So every refund, a client's own
-      // cancel included, was counted against the worker.
-      if (job && WORKER_FAULT.has(refundReason(payload['reason']))) {
-        await this.bumpReputation(db, job.workerAgentId, false, '0');
-      }
+    // Only what the contract itself records as the worker's failure:
+    // accepted and never delivered, or a dispute the worker lost. A client
+    // cancelling, or an offer nobody accepted, is not the worker's fault.
+    if (kind === 'refunded' && WORKER_FAULT.has(payload['reason'] as string)) {
+      const job = await tx.query.jobs.findFirst({where: eq(jobs.id, jobId)});
+      if (job) await this.bumpReputation(tx, job.workerAgentId, false, '0');
     }
   }
 
@@ -628,8 +456,8 @@ export class Indexer {
    * volume-damped, so a fresh agent is 50 (unknown) rather than 0 or 100, and
    * one lucky job cannot outrank a proven record.
    */
-  private async bumpReputation(db: Tx, agentId: number, success: boolean, amount: string): Promise<void> {
-    await db
+  private async bumpReputation(tx: Tx, agentId: number, success: boolean, amount: string): Promise<void> {
+    await tx
       .insert(agentStats)
       .values({
         agentId,
@@ -650,75 +478,62 @@ export class Indexer {
       });
 
     // The floor is per chain: more evidence is demanded where a reputation is
-    // worth more to fake. This was a literal 25, so mainnet's 50 did nothing.
-    const floor = Number(this.deps.chain.params['confidenceFloor'] ?? 25);
-    // The formula is shared with discovery's per-skill scores (@pactora/db).
-    await db.execute(sql`
+    // worth more to fake. The formula is shared with discovery's per-skill
+    // scores (@pactora/db).
+    const floor = this.deps.chain.params.confidenceFloor;
+    await tx.execute(sql`
       UPDATE agent_stats SET score = ${reputationScoreSql(sql`completed`, sql`failed`, floor)}
       WHERE agent_id = ${agentId}
     `);
   }
 
   /**
-   * Start here, not at the deployment block.
+   * Start at the newest final block, not at the deployment block.
    *
    * With no cursor `tick()` begins at `startBlock` and backfills every block
    * since. That is right for production — the history IS the record — and
-   * catastrophic for anything that needs to see a transaction it just sent.
-   * On Monad testnet the deployment sits ~1.6 million blocks behind the head
-   * and `eth_getLogs` is capped at 100 blocks a call: about two hours of
-   * backfill before the indexer reaches the present.
-   *
-   * The demo truncated the cursor on startup and then waited ninety seconds
-   * for its own events. They were never going to arrive. Nothing settled, no
-   * reputation was ever written, and five runs were misread as the agents
-   * failing.
+   * wrong for a new deployment whose database holds none of that history, or
+   * a demo that needs to see a transaction it just sent. A transaction sent
+   * a moment ago is not final yet, so it is still ahead of this cursor.
    *
    * An existing cursor is left alone. A restart that skipped its backlog
-   * would drop real payments on the floor — this is for a FIRST start only,
-   * and it is the same thing an operator wants when adding a chain whose
-   * history they do not need.
+   * would drop real payments on the floor — this is for a FIRST start only.
    *
-   * @returns the block seeded to, or null if a cursor already existed.
+   * @returns the height seeded to, or null if a cursor already existed.
    */
-  async seedCursorToHead(): Promise<bigint | null> {
+  async seedCursorToHead(): Promise<number | null> {
     if (await this.readCursor()) return null;
-
-    const head = await this.client.getBlockNumber();
-    // Seed BELOW the safe head, so the first tick has a range to read rather
-    // than an empty one — and so a transaction sent a moment ago is still
-    // ahead of the cursor rather than behind it.
-    const from = head > this.reorgDepth ? head - this.reorgDepth : 0n;
-    const block = await this.client.getBlock({blockNumber: from});
-
-    await this.writeCursor('TaskEscrow', from, block.hash);
+    const final = await this.deps.source.finalHeight();
+    const block = await this.deps.source.blockAt(final);
+    if (!block) throw new Error(`chain ${this.deps.chain.chainId}: final block ${final} is missing`);
+    await this.writeCursor(this.deps.db, final, block.hash);
     this.log.info(
-      {chainId: this.deps.chain.chainId, block: from.toString()},
-      'seeded the cursor at the head; history before this block is not indexed',
+      {chainId: this.deps.chain.chainId, block: final},
+      'seeded the cursor at the final head; history before this block is not indexed',
     );
-    return from;
+    return final;
   }
 
   private async readCursor() {
     const {db, chain} = this.deps;
     return db.query.indexerCursor.findFirst({
-      where: and(eq(indexerCursor.chainId, chain.chainId), eq(indexerCursor.contract, 'TaskEscrow')),
+      where: and(eq(indexerCursor.chainId, chain.chainId), eq(indexerCursor.contract, CURSOR_CONTRACT)),
     });
   }
 
-  private async writeCursor(contract: string, block: bigint, hash: string): Promise<void> {
-    const {db, chain} = this.deps;
-    await db
+  /**
+   * `last_block` is the last height read; `last_block_hash` the hash of the
+   * last block that existed at or before it — the parent the next block must
+   * name. After skipped heights the two refer to different heights, on purpose.
+   */
+  private async writeCursor(tx: Tx, block: number, hash: string): Promise<void> {
+    const {chain} = this.deps;
+    await tx
       .insert(indexerCursor)
-      .values({
-        chainId: chain.chainId,
-        contract,
-        lastBlock: Number(block),
-        lastBlockHash: hash,
-      })
+      .values({chainId: chain.chainId, contract: CURSOR_CONTRACT, lastBlock: block, lastBlockHash: hash})
       .onConflictDoUpdate({
         target: [indexerCursor.chainId, indexerCursor.contract],
-        set: {lastBlock: Number(block), lastBlockHash: hash, updatedAt: new Date()},
+        set: {lastBlock: block, lastBlockHash: hash, updatedAt: new Date()},
       });
   }
 }
