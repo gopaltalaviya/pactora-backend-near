@@ -1,22 +1,21 @@
 import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
-import {fileURLToPath} from 'node:url';
 import {sql} from 'drizzle-orm';
-import {loadConfig, loadAbis} from '@pactora/config';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {Indexer} from '../src/indexer.js';
+import {FakeChain, GOLDEN, log, receipt, sandboxChain} from './near-fixtures.js';
+import {CLIENT, DB_URL, WORKER, reset, seedAgents} from './db.js';
 
 /**
- * v3: the indexer records payment-token transfers that touch a known agent's
- * wallet or owner — the funding graph the trust check reads. Read from the
- * token's own Transfer logs in the same 100-block chunks as the escrow's.
+ * The funding graph: payment-token NEP-141 `ft_transfer` events that touch a
+ * known agent's wallet or owner, into token_transfers — what the trust check
+ * reads to tell a client funded by the worker's side from one that paid with
+ * its own money. Read from the token's receipts in the same blocks as the
+ * protocol's.
  */
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
-const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
-});
-const chain = config.chain(31337);
-const token = chain.contracts['PaymentToken']!.toLowerCase();
+const chain = sandboxChain();
+const TOKEN = chain.contracts.PaymentToken;
+const STRANGER_A = 'stranger-a.test.near';
+const STRANGER_B = 'stranger-b.test.near';
 
 let db: Db;
 beforeAll(() => {
@@ -26,137 +25,136 @@ afterAll(async () => {
   await closeDb(db);
 });
 beforeEach(async () => {
-  await db.execute(sql`TRUNCATE indexer_cursor, agents, token_transfers RESTART IDENTITY CASCADE`);
+  await reset(db);
 });
-
-const OWNER = '0xAAAA000000000000000000000000000000000001';
-const WALLET = '0xbbbb000000000000000000000000000000000002';
-const STRANGER_A = '0x' + 'c1'.repeat(20);
-const STRANGER_B = '0x' + 'c2'.repeat(20);
-
-interface FakeTransfer {
-  from: string;
-  to: string;
-  value: bigint;
-  blockNumber: bigint;
-  logIndex: number;
-}
-
-/** A chain with escrow logs none, and the given token transfers. */
-function fakeChain(head: bigint, transfers: FakeTransfer[]) {
-  const asked: string[] = [];
-  const client = {
-    getBlockNumber: async () => head,
-    getBlock: async ({blockNumber}: {blockNumber: bigint}) => ({
-      number: blockNumber,
-      hash: `0x${blockNumber.toString(16).padStart(64, '0')}`,
-    }),
-    getLogs: async ({address, fromBlock, toBlock}: {address: string; fromBlock: bigint; toBlock: bigint}) => {
-      asked.push(address.toLowerCase());
-      if (address.toLowerCase() !== token) return [];
-      return transfers
-        .filter((t) => t.blockNumber >= fromBlock && t.blockNumber <= toBlock)
-        .map((t) => ({
-          address: token,
-          args: {from: t.from, to: t.to, value: t.value},
-          blockNumber: t.blockNumber,
-          logIndex: t.logIndex,
-          transactionHash: `0x${t.blockNumber.toString(16).padStart(60, '0')}${t.logIndex.toString(16).padStart(4, '0')}`,
-          eventName: 'Transfer',
-        }));
-    },
-  };
-  return {client, asked};
-}
-
-async function knownAgent(): Promise<void> {
-  await db.execute(sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
-      VALUES (31337, ${OWNER}, ${WALLET}, 'Known', 20000)`);
-}
 
 const rows = async () =>
   (await db.execute(
-    sql`SELECT from_address, to_address, amount::text, block_number::int AS block_number FROM token_transfers ORDER BY id`,
-  )) as unknown as {from_address: string; to_address: string; amount: string; block_number: number}[];
+    sql`SELECT from_address, to_address, amount::text, block_number::int, tx_hash, receipt_id, log_index
+        FROM token_transfers ORDER BY id`,
+  )) as unknown as {
+    from_address: string;
+    to_address: string;
+    amount: string;
+    block_number: number;
+    tx_hash: string;
+    receipt_id: string;
+    log_index: number;
+  }[];
 
 describe('funding transfers', () => {
-  it('keeps transfers that touch a known wallet or owner, lower-cased, and nothing else', async () => {
-    await knownAgent();
-    const start = BigInt(chain.startBlock);
-    const {client, asked} = fakeChain(start + 50n, [
-      {from: OWNER, to: STRANGER_A, value: 1_000_000n, blockNumber: start + 1n, logIndex: 0},
-      {from: STRANGER_B, to: WALLET, value: 20_000n, blockNumber: start + 2n, logIndex: 1},
-      {from: STRANGER_A, to: STRANGER_B, value: 5n, blockNumber: start + 3n, logIndex: 2},
-    ]);
-    const indexer = new Indexer({db, chain, abis: loadAbis() as never, client: client as never});
-    await indexer.tick();
+  it('keeps transfers that touch a known wallet or owner, and nothing else', async () => {
+    await seedAgents(db);
+    const src = new FakeChain(chain.startBlock);
+    const b1 = src.block(
+      receipt({
+        executor: TOKEN,
+        receiptId: 'RT1',
+        txHash: 'TT1',
+        logs: [log.ftTransfer([{from: WORKER.owner, to: STRANGER_A, amount: 1_000_000}])],
+      }),
+    );
+    const b2 = src.block(
+      receipt({
+        executor: TOKEN,
+        receiptId: 'RT2',
+        txHash: 'TT2',
+        logs: [log.ftTransfer([{from: STRANGER_B, to: CLIENT.wallet, amount: 20_000, memo: 'hi'}])],
+      }),
+    );
+    src.block(
+      receipt({
+        executor: TOKEN,
+        logs: [log.ftTransfer([{from: STRANGER_A, to: STRANGER_B, amount: 5}])],
+      }),
+    );
+    await new Indexer({db, chain, source: src}).tick();
 
-    expect(asked).toContain(token);
     expect(await rows()).toEqual([
       {
-        from_address: OWNER.toLowerCase(),
+        from_address: WORKER.owner,
         to_address: STRANGER_A,
         amount: '1000000',
-        block_number: Number(start + 1n),
+        block_number: b1,
+        tx_hash: 'TT1',
+        receipt_id: 'RT1',
+        log_index: 0,
       },
-      {from_address: STRANGER_B, to_address: WALLET, amount: '20000', block_number: Number(start + 2n)},
+      {
+        from_address: STRANGER_B,
+        to_address: CLIENT.wallet,
+        amount: '20000',
+        block_number: b2,
+        tx_hash: 'TT2',
+        receipt_id: 'RT2',
+        log_index: 0,
+      },
     ]);
   });
 
-  it('records each transfer once, however often the range is read', async () => {
-    await knownAgent();
-    const start = BigInt(chain.startBlock);
-    const transfers = [{from: OWNER, to: STRANGER_A, value: 7n, blockNumber: start + 1n, logIndex: 0}];
-    const first = new Indexer({
-      db,
-      chain,
-      abis: loadAbis() as never,
-      client: fakeChain(start + 50n, transfers).client as never,
-    });
-    await first.tick();
-    await db.execute(sql`TRUNCATE indexer_cursor`); // force a replay of the same blocks
-    const again = new Indexer({
-      db,
-      chain,
-      abis: loadAbis() as never,
-      client: fakeChain(start + 50n, transfers).client as never,
-    });
-    await again.tick();
+  it('numbers each entry 256 × log line + entry, as the schema documents', async () => {
+    await seedAgents(db);
+    const src = new FakeChain(chain.startBlock);
+    src.block(
+      receipt({
+        executor: TOKEN,
+        receiptId: 'RT9',
+        logs: [
+          'not an event',
+          log.ftTransfer([
+            {from: STRANGER_A, to: STRANGER_B, amount: 1},
+            {from: WORKER.wallet, to: CLIENT.wallet, amount: 2},
+            {from: CLIENT.owner, to: STRANGER_A, amount: 3},
+          ]),
+        ],
+      }),
+    );
+    await new Indexer({db, chain, source: src}).tick();
+    expect((await rows()).map((r) => [r.amount, r.log_index])).toEqual([
+      ['2', 256 + 1],
+      ['3', 256 + 2],
+    ]);
+  });
+
+  it('records each transfer once, however often the blocks are read', async () => {
+    await seedAgents(db);
+    const src = new FakeChain(chain.startBlock);
+    src.block(
+      receipt({executor: TOKEN, logs: [log.ftTransfer([{from: WORKER.owner, to: STRANGER_A, amount: 7}])]}),
+    );
+    await new Indexer({db, chain, source: src}).tick();
+    await db.execute(sql`TRUNCATE indexer_cursor`);
+    await new Indexer({db, chain, source: src}).tick();
     expect(await rows()).toHaveLength(1);
   });
-});
 
-/**
- * v3: the funding graph after a reorg. A transfer from an orphaned block is
- * not on the chain any more; left in the table it could mark a payment
- * self-funded on money that never moved. Transfers are a plain copy of the
- * token's logs with nothing derived from them, so a rewind drops them and the
- * replay reads the canonical ones back.
- */
-describe('funding transfers after a reorg', () => {
-  it('drops a transfer from an orphaned block and keeps the canonical one', async () => {
-    await knownAgent();
-    const start = BigInt(chain.startBlock);
-    const head = start + 50n; // safe head start+49; a reorg rewinds to start+47
-    const orphaned = {from: OWNER, to: STRANGER_A, value: 111n, blockNumber: start + 48n, logIndex: 0};
-    // A different transaction: its own position, so its own hash in the fake.
-    const canonical = {from: OWNER, to: STRANGER_B, value: 222n, blockNumber: start + 48n, logIndex: 1};
+  it('ignores mints: a mint has no sender, so it cannot be one side funding the other', async () => {
+    await seedAgents(db);
+    const src = new FakeChain(chain.startBlock);
+    src.block(receipt({executor: TOKEN, logs: [log.ftMint(CLIENT.wallet, 1_000_000)]}));
+    await new Indexer({db, chain, source: src}).tick();
+    expect(await rows()).toEqual([]);
+  });
 
-    const forkA = fakeChain(head, [orphaned]).client;
-    await new Indexer({db, chain, abis: loadAbis() as never, client: forkA as never}).tick();
-    expect((await rows()).map((r) => r.amount)).toEqual(['111']);
+  it('ignores ft_transfer logged by any account but the payment token, and failed receipts', async () => {
+    await seedAgents(db);
+    const src = new FakeChain(chain.startBlock);
+    const line = log.ftTransfer([{from: WORKER.owner, to: CLIENT.wallet, amount: 9}]);
+    src.block(receipt({executor: 'other-token.test.near', logs: [line]}));
+    src.block(receipt({executor: chain.contracts.Pactora, logs: [line]}));
+    src.block(receipt({executor: TOKEN, ok: false, logs: [line]}));
+    await new Indexer({db, chain, source: src}).tick();
+    expect(await rows()).toEqual([]);
+  });
 
-    // The chain reorganises from start+47: new hashes, the other transfer.
-    const forkB = fakeChain(head, [canonical]).client;
-    const reorged = {
-      ...forkB,
-      getBlock: async ({blockNumber}: {blockNumber: bigint}) => ({
-        number: blockNumber,
-        hash: `0x${(blockNumber >= start + 47n ? 'b' : '0').repeat(4)}${blockNumber.toString(16).padStart(60, '0')}`,
-      }),
-    };
-    await new Indexer({db, chain, abis: loadAbis() as never, client: reorged as never}).tick();
-
-    expect((await rows()).map((r) => r.amount)).toEqual(['222']);
+  it('reads the line near-contract-standards really emits', async () => {
+    await db.execute(sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
+        VALUES ('near:sandbox', 'alice.test.near', 'alice-agent.test.near', 'A', '1')`);
+    const src = new FakeChain(chain.startBlock);
+    src.block(receipt({executor: TOKEN, logs: [GOLDEN.ftTransferMemo]}));
+    await new Indexer({db, chain, source: src}).tick();
+    expect((await rows()).map((r) => [r.from_address, r.to_address, r.amount])).toEqual([
+      ['alice.test.near', 'bob.test.near', '100'],
+    ]);
   });
 });

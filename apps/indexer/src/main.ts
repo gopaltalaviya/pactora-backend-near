@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import {sql} from 'drizzle-orm';
 import {z} from 'zod';
-import {loadConfig, loadAbis} from '@pactora/config';
+import {loadConfig, type ChainConfig} from '@pactora/config';
 import {closeDb, createDb} from '@pactora/db';
 import {
   buildInfo,
@@ -14,24 +14,26 @@ import {
   serviceLogger,
   serviceOptions,
 } from '@pactora/service';
-import {Indexer} from './indexer.js';
+import {blockRpc, nearClient, neardataSource, rpcSource, type BlockSource} from '@pactora/near';
+import {ChainLinkError, Indexer} from './indexer.js';
 import {runIndexerLoop} from './loop.js';
 
 /**
  * One indexer worker per enabled chain, all in one process.
  *
  * Running testnet and mainnet together is a config value, not a second
- * deployment — `ENABLED_CHAIN_IDS=10143,143` and both are watched.
+ * deployment — `ENABLED_CHAINS=near:testnet,near:mainnet` and both are watched.
+ * Each reads final blocks from the network's `blockSource`: neardata on
+ * testnet and mainnet, RPC polling on the local sandbox (docs/NEAR-PORT.md §3).
  */
 const Env = z.object({
   DATABASE_URL: env.postgresUrl(),
   INDEXER_POLL_MS: env.positiveInt(2_000),
   INDEXER_MAX_BACKOFF_MS: env.positiveInt(60_000),
   /**
-   * A FIRST start begins at the chain head instead of the deployment block —
-   * ~1.6 M blocks and about two hours of backfill on Monad testnet. For a new
-   * deployment whose database holds none of that history anyway. An existing
-   * cursor is never moved.
+   * A FIRST start begins at the newest final block instead of the deployment
+   * block. For a new deployment whose database holds none of that history
+   * anyway. An existing cursor is never moved.
    */
   INDEXER_START_AT_HEAD: env.flag(),
   /** Optional: serve /health, /ready and /metrics. A worker has no other face. */
@@ -45,7 +47,6 @@ const cfg = loadEnv(Env);
 const logger = serviceLogger('indexer', cfg.LOG_LEVEL);
 
 const config = loadConfig();
-const abis = loadAbis() as Record<string, never>;
 const db = createDb(cfg.DATABASE_URL, {max: cfg.DB_POOL_MAX});
 
 const metrics = createMetrics('indexer');
@@ -63,7 +64,7 @@ const indexedBlock = metrics.gauge('indexer_indexed_block', 'The block the index
 const lagBlocks = metrics.gauge('indexer_lag_blocks', 'Blocks between the chain head and the indexed block', [
   'chain',
 ]);
-const lastSuccess = new Map<number, number>();
+const lastSuccess = new Map<string, number>();
 const build = buildInfo({service: 'indexer', packageJsonUrl: new URL('../package.json', import.meta.url)});
 
 const health = cfg.INDEXER_HEALTH_PORT ? Fastify({...serviceOptions(), logger: false}) : null;
@@ -78,15 +79,45 @@ const shutdown = installShutdown({
   ],
 });
 
+/**
+ * The chain's block source, after checking it is the network the config names.
+ *
+ * The RPC must answer `status.chain_id` = `nearNetworkId`; and on neardata the
+ * final block it serves must be the block the RPC has at that height — a
+ * mainnet neardata URL beside a testnet RPC would otherwise index the wrong
+ * network without a single error.
+ */
+async function openSource(chain: ChainConfig): Promise<BlockSource> {
+  const client = nearClient(chain.rpcUrl);
+  const network = await client.networkId();
+  if (network !== chain.nearNetworkId) {
+    throw new Error(
+      `chain ${chain.chainId}: RPC ${chain.rpcUrl} is network "${network}", the config says "${chain.nearNetworkId}"`,
+    );
+  }
+  const rpc = blockRpc(chain.rpcUrl);
+  if (chain.blockSource.kind === 'rpc') return rpcSource(rpc);
+
+  const source = neardataSource(chain.blockSource.url);
+  // A height both have as final: the lower of the two heads, a real block on either.
+  const height = Math.min(await source.finalHeight(), (await client.finalBlock()).height);
+  const [served, onRpc] = await Promise.all([source.blockAt(height), rpc.block(height)]);
+  if (!served || !onRpc || served.hash !== onRpc.header.hash) {
+    throw new Error(
+      `chain ${chain.chainId}: neardata ${chain.blockSource.url} block ${height} is ${served?.hash ?? 'missing'}, ` +
+        `RPC ${chain.rpcUrl} has ${onRpc?.header.hash ?? 'no block'} — not the same network`,
+    );
+  }
+  return source;
+}
+
 const workersDone = Promise.all(
   Object.values(config.chains).map(async (chain) => {
-    const indexer = new Indexer({db, chain, abis, logger});
+    const source = await openSource(chain);
+    const indexer = new Indexer({db, chain, source, logger});
     if (cfg.INDEXER_START_AT_HEAD) {
       const at = await indexer.seedCursorToHead();
-      logger.info(
-        {chainId: chain.chainId, seededAt: at?.toString() ?? 'existing cursor kept'},
-        'start at head',
-      );
+      logger.info({chainId: chain.chainId, seededAt: at ?? 'existing cursor kept'}, 'start at head');
     }
     logger.info({chainId: chain.chainId, name: chain.name, startBlock: chain.startBlock}, 'indexer started');
 
@@ -95,9 +126,9 @@ const workersDone = Promise.all(
         await indexer.tick();
         const {headBlock: head, indexedBlock: indexed} = indexer.progress();
         const label = String(chain.chainId);
-        if (head !== null) headBlock.labels(label).set(Number(head));
-        if (indexed !== null) indexedBlock.labels(label).set(Number(indexed));
-        if (head !== null && indexed !== null) lagBlocks.labels(label).set(Number(head - indexed));
+        if (head !== null) headBlock.labels(label).set(head);
+        if (indexed !== null) indexedBlock.labels(label).set(indexed);
+        if (head !== null && indexed !== null) lagBlocks.labels(label).set(head - indexed);
         const now = Date.now();
         lastSuccess.set(chain.chainId, now);
         lastOk.labels(String(chain.chainId)).set(Math.floor(now / 1000));
@@ -117,7 +148,11 @@ const workersDone = Promise.all(
             failures,
             retryingInMs: nextDelayMs,
           };
-          if (failures >= 5) logger.error(line, 'indexer is failing');
+          // A broken block chain is not an outage that passes: it never
+          // indexes past it, so it is an error from the first time.
+          if (err instanceof ChainLinkError)
+            logger.error(line, 'indexer halted: block does not follow the cursor');
+          else if (failures >= 5) logger.error(line, 'indexer is failing');
           else logger.warn(line, 'tick failed, retrying');
         },
         onRecovered: (afterFailures) =>
