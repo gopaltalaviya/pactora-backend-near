@@ -5,7 +5,7 @@ import {agents, apiKeys, keyChallenges, type Db} from '@pactora/db';
 import {PactoraError, ErrorCode} from '@pactora/shared';
 import {authenticate, generateApiKey, hashApiKey} from '../auth.js';
 import type {IdentityReader} from '../chain-reads.js';
-import {CHALLENGE_TTL_MS, LIVE_PER_REQUESTER, newNonce, signedBy} from '../challenges.js';
+import {CHALLENGE_TTL_MS, LIVE_PER_REQUESTER, NONCE_RE, newNonce, type OwnerVerifier} from '../challenges.js';
 
 /** Live challenges tried when a re-issue does not say which one it signed. */
 const MAX_TRIED = 20;
@@ -14,6 +14,8 @@ export interface KeyRouteDeps {
   db: Db;
   /** Omitted, re-issue trusts the owner recorded at registration. */
   readIdentity?: IdentityReader;
+  /** NEP-413 with a full-access key of the owner (challenges.ts). */
+  verifyOwner: OwnerVerifier;
 }
 
 /**
@@ -22,19 +24,18 @@ export interface KeyRouteDeps {
  */
 
 /**
- * The owner's signature over the re-issue challenge — and, preferably, the
- * nonce it signed. Without the nonce each live challenge is tried in turn.
+ * The owner's NEP-413 signature over the re-issue challenge, the public key
+ * that made it — and, preferably, the nonce it signed. Without the nonce each
+ * live challenge is tried in turn.
  */
 export const ReissueBody = z.object({
-  signature: z.string().regex(/^0x[0-9a-fA-F]+$/),
-  nonce: z
-    .string()
-    .regex(/^[0-9a-f]{32}$/)
-    .optional(),
+  publicKey: z.string().regex(/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,50}$/, 'publicKey is ed25519:<base58>'),
+  signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, 'signature is base64'),
+  nonce: z.string().regex(NONCE_RE).optional(),
 });
 
 export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps): Promise<void> {
-  const {db, readIdentity} = deps;
+  const {db, readIdentity, verifyOwner} = deps;
 
   /** Swap the presented key for a new one. The old one is revoked in the same transaction. */
   app.post('/v1/keys/rotate', async (request) => {
@@ -98,7 +99,7 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
   app.post('/v1/agents/:id/keys', async (request, reply) => {
     const agent = await loadAgent(db, (request.params as {id: string}).id);
     // A ZodError becomes a 422 that names the field (errors.ts).
-    const {signature, nonce} = ReissueBody.parse(request.body);
+    const {publicKey, signature, nonce} = ReissueBody.parse(request.body);
 
     // The one it names, or every live one for this agent, newest first.
     const live = await db
@@ -132,7 +133,17 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
 
     let challenge: (typeof live)[number] | undefined;
     for (const c of live) {
-      if (await signedBy(owner, challengeMessage(agent.id, agent.chainId, c.nonce), signature)) {
+      const message = challengeMessage(agent.id, agent.chainId, c.nonce);
+      if (
+        await verifyOwner({
+          chainId: agent.chainId,
+          accountId: owner,
+          publicKey,
+          signature,
+          message,
+          nonce: c.nonce,
+        })
+      ) {
         challenge = c;
         break;
       }
@@ -140,7 +151,7 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
     if (!challenge) {
       throw new PactoraError(
         ErrorCode.UNAUTHORIZED,
-        `the signature is not from the agent's on-chain owner ${owner}`,
+        `the signature is not from a full-access key of the agent's on-chain owner ${owner}`,
       );
     }
 
@@ -167,7 +178,7 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
 }
 
 /** What the owner signs. Names the agent, the chain and the nonce, in words. */
-function challengeMessage(agentId: number, chainId: number, nonce: string): string {
+function challengeMessage(agentId: number, chainId: string, nonce: string): string {
   return [
     'Pactora: issue a new API key, revoking every existing one.',
     `Agent: ${agentId}`,

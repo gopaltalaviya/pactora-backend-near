@@ -5,6 +5,7 @@ import type {FastifyInstance} from 'fastify';
 import {loadConfig} from '@pactora/config';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {createMetrics} from '@pactora/service';
+import {chainDeps} from './helpers/register.js';
 import {buildApp, EventBus} from '../src/app.js';
 import {streamEvents} from '../src/events.js';
 
@@ -14,8 +15,8 @@ import {streamEvents} from '../src/events.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 let db: Db;
@@ -28,9 +29,10 @@ afterAll(async () => {
 
 const build = (over: Record<string, unknown> = {}) =>
   buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     submit: async () => ({txHash: '0x'}),
     ...over,
   });

@@ -36,7 +36,7 @@ export interface ClientOptions {
    * used instead — which changes when the key is rotated.
    */
   agentId?: number;
-  chainId?: number;
+  chainId?: string;
   fetchImpl?: typeof fetch;
   /** Total attempts for transient failures. Budget errors are never retried. */
   maxRetries?: number;
@@ -44,7 +44,7 @@ export interface ClientOptions {
 
 export interface AgentSummary {
   agentId: number;
-  chainId: number;
+  chainId: string;
   network: string;
   name: string;
   description: string | null;
@@ -76,7 +76,7 @@ export interface SkillStat {
 export interface JobReceipt {
   jobId: string;
   chainJobId: string | null;
-  chainId: number;
+  chainId: string;
   network: string;
   state: JobState | 'settled';
   path: 'direct' | 'escrow';
@@ -97,23 +97,26 @@ export interface JobDetail extends Omit<JobReceipt, 'txHash' | 'explorerUrl'> {
   events: {kind: string; txHash: string | null; explorerUrl: string | null; occurredAt: string}[];
   /** The hired worker said no, off-chain, and why. Null when it has not. */
   declined?: {reason: string; at: string} | null;
-  /** v3: the client's dispute — the reason, and the hash committed on chain (keccak256 of canonicalize({reason})). */
+  /** v3: the client's dispute — the reason, and the hash committed on chain (sha256 of canonicalize({reason})). */
   dispute?: {reason: string; reasonHash: string; at: string} | null;
 }
 
+/** `GET /v1/network` (docs/NEAR-PORT.md §4). */
 export interface NetworkInfo {
-  chainId: number;
+  /** CAIP-2, e.g. `near:testnet`. */
+  chainId: string;
+  nearNetworkId: string;
   name: string;
   shortName: string;
   testnet: boolean;
   nativeCurrency: {name: string; symbol: string; decimals: number};
-  paymentToken: {symbol: string; decimals: number; address: string | null};
+  paymentToken: {symbol: string; decimals: number; accountId: string | null};
+  /** `Pactora`, `PaymentToken`, `Arbiter` account ids. */
   contracts: Record<string, string>;
-  erc8004: Record<string, string>;
+  rpcUrls: string[];
   explorerBaseUrl: string | null;
   faucetUrls: string[];
-  confirmations: number;
-  windows: {accept: number; work: number; review: number};
+  windows: {accept: number; work: number; review: number; dispute: number};
   fastPathMax: BaseUnits;
   fastPathMaxDisplay: string;
   protocolFeeBps: number;
@@ -127,12 +130,12 @@ export interface NetworkInfo {
   defaultDailyCap?: BaseUnits;
   minStake?: BaseUnits;
   withdrawDelaySeconds?: number;
-  enabledChains: number[];
+  enabledChains: string[];
 }
 
 export interface Budget {
   agentId: string;
-  chainId: number;
+  chainId: string;
   network: string;
   testnet: boolean;
   /** 'chain' is authoritative; 'cache' may be stale. */
@@ -161,7 +164,7 @@ export interface Budget {
 /** GET /v1/agents/:id/trust — the verdict, its reasons and the numbers behind them. */
 export interface TrustReport {
   agentId: string;
-  chainId: number;
+  chainId: string;
   verdict: 'trusted' | 'new' | 'concentrated' | 'self-funded' | 'failing';
   reasons: string[];
   metrics: {
@@ -186,7 +189,7 @@ export interface TrustReport {
  */
 export interface ActionReceipt {
   jobId: string;
-  chainId: number;
+  chainId: string;
   state: JobState | 'settled';
   txHash: string;
   explorerUrl: string;
@@ -196,7 +199,7 @@ export interface ActionReceipt {
 export interface JobSummary {
   jobId: string;
   chainJobId: string | null;
-  chainId: number;
+  chainId: string;
   state: JobState;
   path: 'direct' | 'escrow';
   amount: BaseUnits;
@@ -250,7 +253,7 @@ export class PactoraClient {
   private readonly apiKey: string;
   /** Who this client is, for the keys it derives — never the secret half of the API key. */
   private readonly identity: string;
-  private readonly chainId: number | undefined;
+  private readonly chainId: string | undefined;
   private readonly doFetch: typeof fetch;
   private readonly maxRetries: number;
 
@@ -272,7 +275,7 @@ export class PactoraClient {
   async discover(q: DiscoverQuery = {}): Promise<AgentSummary[]> {
     const params = new URLSearchParams();
     for (const [k, v] of Object.entries(q)) if (v !== undefined) params.set(k, String(v));
-    if (this.chainId) params.set('chainId', String(this.chainId));
+    if (this.chainId) params.set('chainId', this.chainId);
 
     const {agents} = await this.request<{agents: AgentSummary[]}>('GET', `/v1/agents?${params.toString()}`, {
       auth: false,
@@ -295,7 +298,7 @@ export class PactoraClient {
 
   /** Which chain, and whether its money is real. Needs no credentials. */
   async network(): Promise<NetworkInfo> {
-    const q = this.chainId ? `?chainId=${this.chainId}` : '';
+    const q = this.chainId ? `?chainId=${encodeURIComponent(this.chainId)}` : '';
     return this.request<NetworkInfo>('GET', `/v1/network${q}`, {auth: false});
   }
 
@@ -717,8 +720,10 @@ const backoff = (attempt: number) => 2 ** attempt * 250 + Math.random() * 250;
  */
 async function deriveKey(identity: string, workerAgentId: number, spec: JobSpec): Promise<string> {
   const {canonicalize} = await import('@pactora/shared');
-  const {keccak256, toHex} = await import('viem');
-  return keccak256(toHex(`${identity}:${workerAgentId}:${canonicalize(spec)}`)).slice(2, 34);
+  // sha256 via Web Crypto (Node and browsers alike); the first 16 bytes, hex.
+  const bytes = new TextEncoder().encode(`${identity}:${workerAgentId}:${canonicalize(spec)}`);
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes));
+  return Array.from(digest.subarray(0, 16), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 export {PactoraError, ErrorCode};

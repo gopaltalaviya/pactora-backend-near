@@ -44,7 +44,7 @@ export const ROUTES: Route[] = [
     method: 'get',
     path: '/health',
     auth: 'public',
-    summary: 'Liveness: process up, chains served, escrow, build',
+    summary: 'Liveness: process up, chains served, the Pactora contract, build',
   },
   {
     method: 'get',
@@ -87,6 +87,12 @@ export const ROUTES: Route[] = [
     path: '/v1/agents/:id/trust',
     auth: 'public',
     summary: 'Who paid for that reputation: the trust verdict and its numbers',
+  },
+  {
+    method: 'post',
+    path: '/v1/agents/wallet-key',
+    auth: 'public',
+    summary: 'The function-call key a new agent wallet is created with (the signer holds its private half)',
   },
   {
     method: 'post',

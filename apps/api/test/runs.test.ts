@@ -6,7 +6,7 @@ import {sql} from 'drizzle-orm';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
 import type {RunContext, RunExecutor, RunResult} from '../src/runs.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * Orchestrator runs over HTTP.
@@ -28,16 +28,17 @@ let execute: RunExecutor = async () => DELIVERED;
 const DELIVERED: RunResult = {answer: 'done', spent: '20000', steps: [], delivered: true};
 
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     runExecutor: (ctx) => execute(ctx),
     submit: async () => ({txHash: `0x${'ef'.repeat(32)}`, chainJobId: '1'}),
@@ -361,9 +362,10 @@ describe('the trace', () => {
 describe('a deployment with no model', () => {
   it('serves everything else and refuses to start a run with a real error', async () => {
     const bare = await buildApp({
+      ...chainDeps(config),
       db,
       chains: config.chains,
-      defaultChainId: 31337,
+      defaultChainId: 'near:sandbox',
       bus: new EventBus(),
       submit: async () => ({txHash: '0x', chainJobId: '1'}),
     });
@@ -413,9 +415,10 @@ describe('when the live stream says "finished"', () => {
 
     const steps = [{capability: 'market-research', status: 'settled', detail: 'ok'}];
     const slow = await buildApp({
+      ...chainDeps(config),
       db: slowDb,
       chains: config.chains,
-      defaultChainId: 31337,
+      defaultChainId: 'near:sandbox',
       runExecutor: async () => {
         await new Promise((r) => setTimeout(r, 300)); // let the subscriber connect first
         return {...DELIVERED, answer: 'the answer', steps} as unknown as RunResult;
@@ -461,9 +464,10 @@ describe('a daily run cap per orchestrator', () => {
   // end. The cap is per AGENT, over a rolling 24 hours.
   it('refuses the run past the cap with 429 RATE_LIMITED and retry-after; other agents are unaffected', async () => {
     const capped = await buildApp({
+      ...chainDeps(config),
       db,
       chains: config.chains,
-      defaultChainId: 31337,
+      defaultChainId: 'near:sandbox',
       runExecutor: async () => DELIVERED,
       runsPerDay: 2,
       submit: async () => ({txHash: `0x${'ef'.repeat(32)}`, chainJobId: '1'}),

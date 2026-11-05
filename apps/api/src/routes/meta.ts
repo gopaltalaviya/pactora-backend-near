@@ -24,26 +24,21 @@ const Bps = z.number().int().min(0).max(10_000).describe('Basis points: 100 = 1%
  * The `GET /v1/network` response. The only response whose shape the OpenAPI
  * document states exactly: it is what a client reads before it spends, and a
  * test holds the live response to it. The fee and limit fields come from
- * `chain/config/params.<chainId>.json`, which the drift checker keeps equal to
- * the contracts. Those added in v3 are optional so a client also copes with
- * an older API that does not send them.
+ * `chain/config/params.<slug>.json`, whose `onchain` half is what the
+ * contract was deployed with. Shape: docs/NEAR-PORT.md §4.
  */
 export const NetworkResponse = z.object({
-  chainId: z.number().int(),
+  chainId: z.string().describe('CAIP-2 chain id, e.g. near:testnet'),
+  nearNetworkId: z.string().describe('What the RPC `status` reports as chain_id'),
   name: z.string(),
   shortName: z.string(),
   testnet: z.boolean().describe('Whether the money is play money'),
   nativeCurrency: z.object({name: z.string(), symbol: z.string(), decimals: z.number().int()}),
-  paymentToken: z.object({symbol: z.string(), decimals: z.number().int(), address: z.string().nullable()}),
-  contracts: z.record(z.string(), z.string()),
-  erc8004: z
-    .object({referenceImplementation: z.boolean()})
-    .catchall(z.union([z.string(), z.boolean()]))
-    .describe('Registry addresses by name, and which registry ABI the chain has'),
-  rpcUrls: z.array(z.string()).describe('The public endpoints, never an RPC_URL_<chainId> override'),
+  paymentToken: z.object({symbol: z.string(), decimals: z.number().int(), accountId: z.string().nullable()}),
+  contracts: z.record(z.string(), z.string()).describe('Pactora, PaymentToken and Arbiter account ids'),
+  rpcUrls: z.array(z.string()).describe('The public endpoints, never an RPC_URL_<SLUG> override'),
   explorerBaseUrl: z.string().nullable(),
   faucetUrls: z.array(z.string()),
-  confirmations: z.number().int(),
   windows: z
     .object({
       accept: z.number().int(),
@@ -57,38 +52,38 @@ export const NetworkResponse = z.object({
   fastPathMax: BaseUnits,
   fastPathMaxDisplay: z.string(),
   protocolFeeBps: Bps,
-  bondBps: Bps.optional().describe("The worker's per-job bond, as a share of the job"),
-  minBond: BaseUnits.optional().describe("The floor on the worker's bond"),
-  disputeBondBps: Bps.optional().describe('What disputing costs the client, as a share of the job'),
-  minDisputeBond: BaseUnits.optional().describe('The floor on the dispute bond'),
-  maxJobAmount: BaseUnits.optional().describe('The largest escrow job'),
-  defaultPerTaskCap: BaseUnits.optional().describe("A new agent's per-hire cap, until its owner sets one"),
-  defaultDailyCap: BaseUnits.optional().describe("A new agent's rolling 24 h cap, until its owner sets one"),
-  minStake: BaseUnits.optional().describe('The smallest stake the registry accepts'),
-  withdrawDelaySeconds: z.number().int().optional().describe('How long a stake withdrawal waits, in seconds'),
-  enabledChains: z.array(z.number().int()),
+  bondBps: Bps.describe("The worker's per-job bond, as a share of the job"),
+  minBond: BaseUnits.describe("The floor on the worker's bond"),
+  disputeBondBps: Bps.describe('What disputing costs the client, as a share of the job'),
+  minDisputeBond: BaseUnits.describe('The floor on the dispute bond'),
+  maxJobAmount: BaseUnits.describe('The largest escrow job'),
+  defaultPerTaskCap: BaseUnits.describe("A new agent's per-hire cap, until its owner sets one"),
+  defaultDailyCap: BaseUnits.describe("A new agent's rolling 24 h cap, until its owner sets one"),
+  minStake: BaseUnits.describe('The smallest stake that makes an agent hireable'),
+  withdrawDelaySeconds: z.number().int().describe('How long a stake withdrawal waits, in seconds'),
+  enabledChains: z.array(z.string()),
 });
 export type NetworkResponse = z.infer<typeof NetworkResponse>;
 
 export interface MetaRouteDeps {
   db: Db;
-  chains: Record<number, ChainConfig>;
-  defaultChainId: number;
+  chains: Record<string, ChainConfig>;
+  defaultChainId: string;
   readBudget?: BudgetReader;
 }
 
 export async function registerMetaRoutes(app: FastifyInstance, deps: MetaRouteDeps): Promise<void> {
   const {db, chains, defaultChainId, readBudget} = deps;
-  const enabled = Object.keys(chains).map(Number);
+  const enabled = Object.keys(chains);
 
   /** Public: a client should be able to check the network before holding a key. */
   app.get('/v1/network', async (request): Promise<NetworkResponse> => {
     const asked = (request.query as {chainId?: string}).chainId;
-    const chainId = asked === undefined ? defaultChainId : Number(asked);
-    const chain = chains[chainId] ?? chains[defaultChainId]!;
+    const chain = (asked !== undefined ? chains[asked] : undefined) ?? chains[defaultChainId]!;
 
     return {
       chainId: chain.chainId,
+      nearNetworkId: chain.nearNetworkId,
       name: chain.name,
       shortName: chain.network.shortName,
       /** The field that matters most to an agent about to spend. */
@@ -97,36 +92,18 @@ export async function registerMetaRoutes(app: FastifyInstance, deps: MetaRouteDe
       paymentToken: {
         symbol: chain.network.paymentToken.symbol,
         decimals: chain.network.paymentToken.decimals,
-        address: chain.network.paymentToken.address,
+        accountId: chain.network.paymentToken.accountId,
       },
-      contracts: chain.contracts,
-      erc8004: {
-        ...chain.erc8004,
-        /**
-         * Which registry ABI this chain has.
-         *
-         * The reference implementation takes `register(uri, wallet)`; the
-         * canonical registry takes `register(uri)` and resolves the payout
-         * wallet separately. A client that guesses wrong sends a transaction
-         * that reverts, and on mainnet it pays for the privilege — so the
-         * network states it rather than leaving it to be inferred from a
-         * chain id.
-         */
-        referenceImplementation: chain.network.erc8004.deployWithProtocol,
-      },
+      contracts: {...chain.contracts},
       /**
        * The PUBLIC endpoints from networks.json — deliberately not
-       * `chain.rpcUrl`, which `RPC_URL_<chainId>` may have replaced with a
-       * keyed private endpoint. Publishing the resolved value would hand that
-       * key to every browser that loads the page.
-       *
-       * A browser needs these to add the chain to a wallet: Monad is in no
-       * wallet's default list.
+       * `chain.rpcUrl`, which `RPC_URL_<SLUG>` may have replaced with a keyed
+       * private endpoint. Publishing the resolved value would hand that key
+       * to every browser that loads the page.
        */
       rpcUrls: chain.network.rpcUrls,
       explorerBaseUrl: chain.network.blockExplorerUrls[0] ?? null,
       faucetUrls: chain.network.faucetUrls,
-      confirmations: chain.confirmations,
       /** Windows an agent must plan against, in seconds. */
       windows: {
         accept: Number(chain.params.acceptWindowSeconds),
@@ -139,7 +116,7 @@ export async function registerMetaRoutes(app: FastifyInstance, deps: MetaRouteDe
       minJobAmount: String(chain.params.minJobAmount),
       minFee: String(chain.params.minFee),
       fastPathMax: String(chain.params.fastPathMax),
-      fastPathMaxDisplay: chain.formatToken(chain.params.fastPathMax as bigint),
+      fastPathMaxDisplay: chain.formatToken(chain.params.fastPathMax),
       protocolFeeBps: Number(chain.params.protocolFeeBps),
       /** The worker's bond: a share of the job, with a floor. */
       bondBps: Number(chain.params.bondBps),

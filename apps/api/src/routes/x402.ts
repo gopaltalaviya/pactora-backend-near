@@ -1,9 +1,9 @@
 import type {FastifyInstance} from 'fastify';
 import {and, eq} from 'drizzle-orm';
 import {z} from 'zod';
-import type {Hex} from 'viem';
 import {agents, jobEvents, jobs, x402Redemptions, type Db} from '@pactora/db';
 import {
+  ChainId,
   PactoraError,
   ErrorCode,
   PaymentPayload,
@@ -43,8 +43,8 @@ import {hire, requiredIdempotencyKey, type JobRouteDeps} from './jobs.js';
  * says what the API asked for; only the receipt says what the escrow did.
  */
 
-/** CAIP-2. Unambiguous across chains in a way a display name is not. */
-export const x402Network = (chainId: number) => `eip155:${chainId}`;
+/** The x402 `network` is the CAIP-2 chain id itself (docs/NEAR-PORT.md §1). */
+export const x402Network = (chainId: string): ChainId => ChainId.parse(chainId);
 
 export const SettleBody = z.object({paymentRequirements: PaymentRequirements});
 
@@ -61,7 +61,7 @@ export const VerifyBody = z
   });
 
 export interface X402RouteDeps extends Pick<JobRouteDeps, 'db' | 'submit'> {
-  chains: Record<number, ChainConfig>;
+  chains: Record<string, ChainConfig>;
   bus: EventBus;
   /** Omitted, nothing can be verified — and nothing is ever reported valid. */
   readPayment?: PaymentReader;
@@ -69,7 +69,7 @@ export interface X402RouteDeps extends Pick<JobRouteDeps, 'db' | 'submit'> {
 
 export async function registerX402Routes(app: FastifyInstance, deps: X402RouteDeps): Promise<void> {
   const {db, chains, bus, submit} = deps;
-  const enabled = Object.keys(chains).map(Number);
+  const enabled = Object.keys(chains);
 
   app.post('/v1/x402/settle', async (request, reply) => {
     const caller = await authenticate(db, request);
@@ -86,7 +86,7 @@ export async function registerX402Routes(app: FastifyInstance, deps: X402RouteDe
     if (escrowed) {
       // v3: the money waits in the escrow, so there is no fast-path cap —
       // only the escrow's own ceiling on one job.
-      const maxJobAmount = chain.params.maxJobAmount as bigint;
+      const maxJobAmount = chain.params.maxJobAmount;
       if (asked > maxJobAmount) {
         throw new PactoraError(
           ErrorCode.PRICE_ABOVE_MAX,
@@ -97,7 +97,7 @@ export async function registerX402Routes(app: FastifyInstance, deps: X402RouteDe
       // Pay-first by definition: there is no escrow to hold the money while the
       // worker works, so a quote above the fast-path cap cannot be paid this
       // way at all. Said here, before the signer, rather than as a revert.
-      const fastPathMax = chain.params.fastPathMax as bigint;
+      const fastPathMax = chain.params.fastPathMax;
       if (asked > fastPathMax) {
         throw new PactoraError(
           ErrorCode.PRICE_ABOVE_MAX,
@@ -226,7 +226,7 @@ async function checkQuote(db: Db, chain: ChainConfig, req: PaymentRequirements):
 async function check(
   deps: X402RouteDeps,
   caller: Caller,
-  chainId: number,
+  chainId: string,
   req: PaymentRequirements,
   payment: PaymentPayload,
 ): Promise<{verdict: VerifyResponse; jobRowId?: number}> {
@@ -282,7 +282,8 @@ async function check(
     where: and(eq(jobEvents.jobId, job.id), eq(jobEvents.kind, 'job.created')),
   });
   const recordedTx = (created?.payload as {txHash?: string} | undefined)?.txHash;
-  if (!recordedTx || recordedTx.toLowerCase() !== payment.payload.txHash.toLowerCase()) {
+  // Exact: a NEAR transaction hash is base58, where case is part of the value.
+  if (!recordedTx || recordedTx !== payment.payload.txHash) {
     return {
       verdict: invalid(
         'transaction_mismatch',
@@ -303,28 +304,35 @@ async function check(
     };
   }
   const worker = await db.query.agents.findFirst({where: eq(agents.id, job.workerAgentId)});
-  const reading = await deps.readPayment({chainId, txHash: payment.payload.txHash as Hex});
+  // NEAR finds a transaction by hash AND signer: the paying agent's wallet signed it.
+  const client = await db.query.agents.findFirst({where: eq(agents.id, job.clientAgentId)});
+  if (!client) return {verdict: invalid('unknown_payment', 'the paying agent no longer exists', payer)};
+  const reading = await deps.readPayment({
+    chainId,
+    txHash: payment.payload.txHash,
+    signerId: client.walletAddress,
+  });
   if (reading.status === 'pending')
     return {verdict: invalid('payment_pending', 'not yet confirmed on chain — retry shortly', payer)};
   if (reading.status === 'reverted')
     return {verdict: invalid('payment_reverted', 'the payment transaction reverted', payer)};
 
-  // The escrow's own event for this worker and this job: DirectPaid for a
-  // direct payment, JobCreated (money locked, v3) for an escrow-backed one.
+  // The contract's own event for this worker and this job: direct_paid for a
+  // direct payment, job_created (money locked) for an escrow-backed one.
   const events = escrowed ? (reading.jobCreated ?? []) : reading.directPaid;
   const paid = events.some(
     (e) =>
       worker?.chainAgentId !== null &&
       worker?.chainAgentId !== undefined &&
       e.workerAgentId === BigInt(worker.chainAgentId) &&
-      e.specHash.toLowerCase() === job.specHash.toLowerCase() &&
+      e.specHash === job.specHash &&
       e.amount >= required,
   );
   if (!paid) {
     return {
       verdict: invalid(
         'transaction_mismatch',
-        `the escrow emitted no ${escrowed ? 'JobCreated' : 'DirectPaid'} for this worker and job`,
+        `the contract emitted no ${escrowed ? 'job_created' : 'direct_paid'} for this worker and job`,
         payer,
       ),
     };

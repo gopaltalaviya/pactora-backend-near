@@ -1,5 +1,5 @@
-import {createPublicClient, http, parseEventLogs, type Abi, type Hex, type PublicClient} from 'viem';
-import {loadAbis, type PactoraConfig} from '@pactora/config';
+import {nearClient, type NearClient} from '@pactora/near';
+import type {PactoraConfig} from '@pactora/config';
 
 /**
  * Reads of on-chain state the API reports but does not own.
@@ -9,80 +9,79 @@ import {loadAbis, type PactoraConfig} from '@pactora/config';
  * supplied the route falls back to the cached policy and SAYS SO — an agent
  * planning a spend is entitled to know whether the number it is planning
  * against came from the chain or from our copy of it.
+ *
+ * On NEAR every one of these is a view call on the one Pactora contract
+ * (docs/NEAR-PORT.md): the registry, the purses (caps and balance) and the
+ * jobs all live there.
  */
 
 export interface BudgetReading {
   perTaskCap: bigint;
   dailyCap: bigint;
   dailyRemaining: bigint;
+  /** Always false on NEAR: the contract has no allowlist mode. Kept so the response shape is unchanged. */
   allowlistOnly: boolean;
+  /** The agent's spendable balance in the contract (its purse), in token base units. */
   tokenBalance: bigint;
   /**
    * Unix seconds at which the oldest counted spend leaves the rolling window
-   * and capacity next returns; 0 when nothing is counted. v3's cap ROLLS (no
+   * and capacity next returns; 0 when nothing is counted. The cap ROLLS (no
    * 24 hours may exceed it), so there is no single reset time — reporting
    * one would tell an agent to wait for a moment that changes nothing.
    */
   nextReleaseAt: bigint;
 }
 
-export type BudgetReader = (args: {chainId: number; walletAddress: string}) => Promise<BudgetReading | null>;
+export type BudgetReader = (args: {chainId: string; walletAddress: string}) => Promise<BudgetReading | null>;
+
+/** One client per RPC URL, so readers share connections. */
+function clients(config: PactoraConfig): (chainId: string) => NearClient {
+  const cache = new Map<string, NearClient>();
+  return (chainId) => {
+    const url = config.chain(chainId).rpcUrl;
+    let c = cache.get(url);
+    if (!c) {
+      c = nearClient(url);
+      cache.set(url, c);
+    }
+    return c;
+  };
+}
+
+interface PurseView {
+  balance: string;
+  per_task_cap: string;
+  daily_cap: string;
+  spent_today: string;
+  daily_remaining: string;
+  next_release_at: number;
+}
 
 /**
- * Real reader, against `AgentAccount`.
+ * Real reader, against the contract's purse for the agent that wallet signs for.
  *
- * Returns `null` rather than throwing when the wallet is not an AgentAccount
- * (a plain EOA has no policy) or the RPC is unreachable. A budget lookup that
- * fails should degrade to the cache, never 500 — an agent that cannot read its
- * budget will otherwise fall back to discovering it by hitting 402s, which is
- * exactly the retry storm `my_budget` exists to prevent.
+ * Returns `null` rather than throwing when the wallet is no agent's or the RPC
+ * is unreachable. A budget lookup that fails should degrade to the cache,
+ * never 500 — an agent that cannot read its budget will otherwise fall back
+ * to discovering it by hitting 402s, which is exactly the retry storm
+ * `my_budget` exists to prevent.
  */
-export function makeBudgetReader(config: PactoraConfig, abis?: Record<string, Abi>): BudgetReader {
-  const loaded = abis ?? (loadAbis() as unknown as Record<string, Abi>);
-  const accountAbi = loaded['AgentAccount'];
-  const erc20Abi = loaded['IERC20'] ?? MINIMAL_ERC20;
-
-  const clients = new Map<number, PublicClient>();
-  const clientFor = (chainId: number): PublicClient => {
-    let client = clients.get(chainId);
-    if (!client) {
-      client = createPublicClient({transport: http(config.chain(chainId).rpcUrl)});
-      clients.set(chainId, client);
-    }
-    return client;
-  };
-
+export function makeBudgetReader(config: PactoraConfig, clientFor = clients(config)): BudgetReader {
   return async ({chainId, walletAddress}) => {
-    if (!accountAbi) return null;
-    const chain = config.chain(chainId);
-    const token = chain.network.paymentToken.address;
-    const address = walletAddress as Hex;
-    const pub = clientFor(chainId);
-
     try {
-      const [policy, dailyRemaining, nextReleaseAt, tokenBalance] = await Promise.all([
-        pub.readContract({address, abi: accountAbi, functionName: 'policy'}) as Promise<
-          readonly [bigint, bigint, boolean]
-        >,
-        pub.readContract({address, abi: accountAbi, functionName: 'dailyRemaining'}) as Promise<bigint>,
-        pub.readContract({address, abi: accountAbi, functionName: 'nextReleaseAt'}) as Promise<bigint>,
-        token
-          ? (pub.readContract({
-              address: token as Hex,
-              abi: erc20Abi,
-              functionName: 'balanceOf',
-              args: [address],
-            }) as Promise<bigint>)
-          : Promise.resolve(0n),
-      ]);
-
+      const pactora = config.chain(chainId).contracts.Pactora;
+      const client = clientFor(chainId);
+      const id = await client.view<number | null>(pactora, 'agent_of_wallet', {wallet: walletAddress});
+      if (id === null) return null;
+      const purse = await client.view<PurseView | null>(pactora, 'purse_of', {agent_id: id});
+      if (!purse) return null;
       return {
-        perTaskCap: policy[0],
-        dailyCap: policy[1],
-        allowlistOnly: policy[2],
-        dailyRemaining,
-        nextReleaseAt,
-        tokenBalance,
+        perTaskCap: BigInt(purse.per_task_cap),
+        dailyCap: BigInt(purse.daily_cap),
+        dailyRemaining: BigInt(purse.daily_remaining),
+        allowlistOnly: false,
+        tokenBalance: BigInt(purse.balance),
+        nextReleaseAt: BigInt(purse.next_release_at),
       };
     } catch {
       return null;
@@ -90,73 +89,53 @@ export function makeBudgetReader(config: PactoraConfig, abis?: Record<string, Ab
   };
 }
 
-const MINIMAL_ERC20 = [
-  {
-    type: 'function',
-    name: 'balanceOf',
-    stateMutability: 'view',
-    inputs: [{name: 'account', type: 'address'}],
-    outputs: [{name: '', type: 'uint256'}],
-  },
-] as const satisfies Abi;
-
-/** An ERC-8004 identity as the registry reports it. */
+/**
+ * An agent as the contract's registry reports it.
+ *
+ * `wallet` is the accepted wallet, `pendingWallet` the one proposed and not
+ * yet accepted (docs/NEAR-PORT.md §5: the signer accepts for it at
+ * registration).
+ */
 export interface IdentityReading {
   owner: string;
-  wallet: string;
+  wallet: string | null;
+  pendingWallet: string | null;
+  frozen: boolean;
 }
 
 export type IdentityReader = (args: {
-  chainId: number;
+  chainId: string;
   chainAgentId: bigint;
 }) => Promise<IdentityReading | null>;
 
-const IDENTITY_ABI = [
-  {
-    type: 'function',
-    name: 'ownerOf',
-    stateMutability: 'view',
-    inputs: [{name: 'agentId', type: 'uint256'}],
-    outputs: [{name: '', type: 'address'}],
-  },
-  {
-    type: 'function',
-    name: 'getAgentWallet',
-    stateMutability: 'view',
-    inputs: [{name: 'agentId', type: 'uint256'}],
-    outputs: [{name: '', type: 'address'}],
-  },
-] as const satisfies Abi;
+interface AgentView {
+  id: number;
+  owner: string;
+  wallet: string | null;
+  pending_wallet: string | null;
+  card_uri: string;
+  frozen: boolean;
+  registered_at: number;
+}
 
 /**
- * Real reader, against the chain's ERC-8004 Identity Registry.
+ * Real reader, against the contract's `get_agent`.
  *
- * `null` for an id that does not exist (ownerOf reverts) — and for an
- * unreachable RPC, since a registration that cannot be verified must not be
- * recorded as verified.
+ * `null` for an id that does not exist — and for an unreachable RPC, since a
+ * registration that cannot be verified must not be recorded as verified.
  */
-export function makeIdentityReader(config: PactoraConfig): IdentityReader {
+export function makeIdentityReader(config: PactoraConfig, clientFor = clients(config)): IdentityReader {
   return async ({chainId, chainAgentId}) => {
-    const chain = config.chain(chainId);
-    const registry = chain.erc8004['identityRegistry'] as Hex | undefined;
-    if (!registry) return null;
-    const pub = createPublicClient({transport: http(chain.rpcUrl)});
     try {
-      const [owner, wallet] = await Promise.all([
-        pub.readContract({
-          address: registry,
-          abi: IDENTITY_ABI,
-          functionName: 'ownerOf',
-          args: [chainAgentId],
-        }),
-        pub.readContract({
-          address: registry,
-          abi: IDENTITY_ABI,
-          functionName: 'getAgentWallet',
-          args: [chainAgentId],
-        }),
-      ]);
-      return {owner, wallet};
+      const a = await clientFor(chainId).view<AgentView | null>(
+        config.chain(chainId).contracts.Pactora,
+        'get_agent',
+        {
+          agent_id: Number(chainAgentId),
+        },
+      );
+      if (!a) return null;
+      return {owner: a.owner, wallet: a.wallet, pendingWallet: a.pending_wallet, frozen: a.frozen};
     } catch {
       return null;
     }
@@ -164,34 +143,28 @@ export function makeIdentityReader(config: PactoraConfig): IdentityReader {
 }
 
 /**
- * A job's dispute bond, as the escrow captured it at creation (v3). `null`
- * when it cannot be read: the caller then declares no spend and leaves the
- * cap to the contract, which enforces it either way.
+ * A job's dispute bond, as the contract fixed it when the job was created.
+ * `null` when it cannot be read: the caller then declares no spend and leaves
+ * the cap to the contract, which enforces it either way.
  */
-export type DisputeBondReader = (args: {chainId: number; chainJobId: bigint}) => Promise<bigint | null>;
+export type DisputeBondReader = (args: {chainId: string; chainJobId: bigint}) => Promise<bigint | null>;
 
-export function makeDisputeBondReader(config: PactoraConfig, abis?: Record<string, Abi>): DisputeBondReader {
-  const escrowAbi = (abis ?? (loadAbis() as unknown as Record<string, Abi>))['TaskEscrow'];
+export function makeDisputeBondReader(config: PactoraConfig, clientFor = clients(config)): DisputeBondReader {
   return async ({chainId, chainJobId}) => {
-    const chain = config.chain(chainId);
-    const escrow = chain.contracts['TaskEscrow'] as Hex | undefined;
-    if (!escrow || !escrowAbi) return null;
     try {
-      const pub = createPublicClient({transport: http(chain.rpcUrl)});
-      const job = (await pub.readContract({
-        address: escrow,
-        abi: escrowAbi,
-        functionName: 'getJob',
-        args: [chainJobId],
-      })) as {disputeBond?: bigint};
-      return typeof job.disputeBond === 'bigint' ? job.disputeBond : null;
+      const job = await clientFor(chainId).view<{dispute_bond?: string} | null>(
+        config.chain(chainId).contracts.Pactora,
+        'get_job',
+        {job_id: Number(chainJobId)},
+      );
+      return job && typeof job.dispute_bond === 'string' ? BigInt(job.dispute_bond) : null;
     } catch {
       return null;
     }
   };
 }
 
-/** A `DirectPaid` event, as a transaction's receipt carries it. */
+/** A `direct_paid` event, as a transaction's receipts carry it. */
 export interface DirectPaidLog {
   clientAgentId: bigint;
   workerAgentId: bigint;
@@ -199,7 +172,7 @@ export interface DirectPaidLog {
   specHash: string;
 }
 
-/** A `JobCreated` event (v3: an escrow-backed x402 payment), as a receipt carries it. */
+/** A `job_created` event (an escrow-backed x402 payment), as a transaction's receipts carry it. */
 export interface JobCreatedLog {
   clientAgentId: bigint;
   workerAgentId: bigint;
@@ -212,83 +185,73 @@ export type PaymentReading =
   | {status: 'reverted'}
   | {status: 'success'; directPaid: DirectPaidLog[]; jobCreated?: JobCreatedLog[]};
 
-export type PaymentReader = (args: {chainId: number; txHash: Hex}) => Promise<PaymentReading>;
+/**
+ * NEAR's transaction status needs the signer as well as the hash: it is how
+ * the node finds the shard. The x402 route knows it — the paying agent's wallet.
+ */
+export type PaymentReader = (args: {
+  chainId: string;
+  txHash: string;
+  signerId: string;
+}) => Promise<PaymentReading>;
 
-const DIRECT_PAID_ABI = [
-  {
-    type: 'event',
-    name: 'DirectPaid',
-    inputs: [
-      {name: 'jobId', type: 'uint256', indexed: true},
-      {name: 'clientAgentId', type: 'uint256', indexed: true},
-      {name: 'workerAgentId', type: 'uint256', indexed: true},
-      {name: 'amount', type: 'uint128', indexed: false},
-      {name: 'fee', type: 'uint128', indexed: false},
-      {name: 'specHash', type: 'bytes32', indexed: false},
-    ],
-  },
-  {
-    type: 'event',
-    name: 'JobCreated',
-    inputs: [
-      {name: 'jobId', type: 'uint256', indexed: true},
-      {name: 'clientAgentId', type: 'uint256', indexed: true},
-      {name: 'workerAgentId', type: 'uint256', indexed: true},
-      {name: 'amount', type: 'uint128', indexed: false},
-      {name: 'fee', type: 'uint128', indexed: false},
-      {name: 'specHash', type: 'bytes32', indexed: false},
-      {name: 'acceptDeadline', type: 'uint64', indexed: false},
-    ],
-  },
-] as const satisfies Abi;
+interface PaidEventData {
+  client: number;
+  worker: number;
+  amount: string;
+  spec_hash: string;
+}
 
 /**
- * Real reader: what a payment's transaction actually did.
+ * Real reader: the transaction's outcome, and the Pactora events in its
+ * receipts.
  *
- * An x402 receipt names a transaction, and a transaction hash proves only
- * that something was broadcast. What the worker is owed an answer to is
- * whether THE ESCROW paid THIS worker, for THIS job — so only `DirectPaid`
- * events emitted by the chain's own `TaskEscrow` are returned. The same
- * event from any other contract is a forgery with the right shape.
- *
- * No receipt yet is `pending`, not an error: Monad finalises in about a
- * second, and a worker asked a moment too early should say "retry", not
- * "unpaid". An unreachable RPC throws, because "could not check" must never
- * read as either answer.
+ * Only events logged by the configured Pactora contract count: anyone can log
+ * a line that looks like ours from a contract of their own. A failed
+ * transaction is `reverted`, whatever it logged before failing (NEAR rolls a
+ * failed receipt's state back, so its logs record nothing that happened).
  */
-export function makePaymentReader(config: PactoraConfig): PaymentReader {
-  return async ({chainId, txHash}) => {
-    const chain = config.chain(chainId);
-    const escrow = chain.contracts['TaskEscrow']?.toLowerCase();
-    const pub = createPublicClient({transport: http(chain.rpcUrl)});
+export function makePaymentReader(config: PactoraConfig, clientFor = clients(config)): PaymentReader {
+  return async ({chainId, txHash, signerId}) => {
+    const pactora = config.chain(chainId).contracts.Pactora;
+    const out = await clientFor(chainId).txOutcome(txHash, signerId);
+    if (out.status === 'pending') return {status: 'pending'};
+    if (out.status === 'failure') return {status: 'reverted'};
 
-    let receipt;
-    try {
-      receipt = await pub.getTransactionReceipt({hash: txHash});
-    } catch (err) {
-      if (err instanceof Error && err.name === 'TransactionReceiptNotFoundError') return {status: 'pending'};
-      throw err;
+    const directPaid: DirectPaidLog[] = [];
+    const jobCreated: JobCreatedLog[] = [];
+    for (const r of out.receipts) {
+      if (!r.ok || r.executorId !== pactora) continue;
+      for (const line of r.logs) {
+        const e = parseLine(line);
+        if (!e) continue;
+        const target = e.event === 'direct_paid' ? directPaid : e.event === 'job_created' ? jobCreated : null;
+        if (!target) continue;
+        for (const d of e.data) {
+          target.push({
+            clientAgentId: BigInt(d.client),
+            workerAgentId: BigInt(d.worker),
+            amount: BigInt(d.amount),
+            specHash: d.spec_hash,
+          });
+        }
+      }
     }
-    if (receipt.status !== 'success') return {status: 'reverted'};
-
-    const ours = receipt.logs.filter((l) => l.address.toLowerCase() === escrow);
-    const directPaid = parseEventLogs({abi: DIRECT_PAID_ABI, logs: ours, eventName: 'DirectPaid'}).map(
-      (e) => ({
-        clientAgentId: e.args.clientAgentId,
-        workerAgentId: e.args.workerAgentId,
-        amount: e.args.amount,
-        specHash: e.args.specHash,
-      }),
-    );
-    // v3: an escrow-backed payment is a createJob; its proof is JobCreated.
-    const jobCreated = parseEventLogs({abi: DIRECT_PAID_ABI, logs: ours, eventName: 'JobCreated'}).map(
-      (e) => ({
-        clientAgentId: e.args.clientAgentId,
-        workerAgentId: e.args.workerAgentId,
-        amount: e.args.amount,
-        specHash: e.args.specHash,
-      }),
-    );
     return {status: 'success', directPaid, jobCreated};
   };
+}
+
+function parseLine(line: string): {event: string; data: PaidEventData[]} | null {
+  if (!line.startsWith('EVENT_JSON:')) return null;
+  try {
+    const v = JSON.parse(line.slice('EVENT_JSON:'.length)) as {
+      standard?: unknown;
+      event?: unknown;
+      data?: unknown;
+    };
+    if (v.standard !== 'pactora' || typeof v.event !== 'string' || !Array.isArray(v.data)) return null;
+    return {event: v.event, data: v.data as PaidEventData[]};
+  } catch {
+    return null;
+  }
 }

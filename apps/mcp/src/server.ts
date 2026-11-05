@@ -17,7 +17,7 @@ import {buildTools, describeError, type ToolContext, type ToolDefinition} from '
 export interface ServerOptions {
   baseUrl: string;
   apiKey: string;
-  chainId?: number;
+  chainId?: string;
   client?: PactoraClient;
 }
 

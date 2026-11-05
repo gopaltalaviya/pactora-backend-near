@@ -4,6 +4,7 @@ import type {FastifyInstance} from 'fastify';
 import {sql} from 'drizzle-orm';
 import {loadConfig} from '@pactora/config';
 import {createDb, closeDb, type Db} from '@pactora/db';
+import {chainDeps} from './helpers/register.js';
 import {buildApp, EventBus} from '../src/app.js';
 
 /**
@@ -14,8 +15,8 @@ import {buildApp, EventBus} from '../src/app.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 let db: Db;
@@ -33,9 +34,10 @@ beforeEach(async () => {
 
 const replica = async (store?: 'postgres') => {
   const app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     submit: async () => ({txHash: '0x'}),
     rateLimitPerMinute: 3,

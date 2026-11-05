@@ -5,6 +5,7 @@ import type {FastifyInstance} from 'fastify';
 import {sql} from 'drizzle-orm';
 import {loadConfig} from '@pactora/config';
 import {createDb, closeDb, type Db} from '@pactora/db';
+import {chainDeps} from './helpers/register.js';
 import {buildApp, EventBus} from '../src/app.js';
 
 /**
@@ -15,8 +16,8 @@ import {buildApp, EventBus} from '../src/app.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 let app: FastifyInstance;
@@ -26,9 +27,10 @@ let base: string;
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     submit: async () => ({txHash: '0x'}),
   });
@@ -47,8 +49,11 @@ beforeEach(async () => {
 async function runWithEvents(): Promise<{publicId: string; ids: number[]}> {
   const [a] =
     (await db.execute(sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
-      VALUES (31337, '0xo', ${'0x' + 'e1'.repeat(20)}, 'O', 0) RETURNING id`)) as unknown as {id: number}[];
-  const [r] = (await db.execute(sql`INSERT INTO runs (chain_id, agent_id, goal) VALUES (31337, ${a!.id}, 'g')
+      VALUES ('near:sandbox', '0xo', ${'0x' + 'e1'.repeat(20)}, 'O', 0) RETURNING id`)) as unknown as {
+      id: number;
+    }[];
+  const [r] =
+    (await db.execute(sql`INSERT INTO runs (chain_id, agent_id, goal) VALUES ('near:sandbox', ${a!.id}, 'g')
       RETURNING id, public_id`)) as unknown as {id: number; public_id: string}[];
   const ids: number[] = [];
   for (const kind of ['planned', 'discovered', 'selected']) {

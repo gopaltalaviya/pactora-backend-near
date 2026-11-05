@@ -20,8 +20,8 @@ function fakeClient(over: Partial<Record<string, unknown>> = {}): PactoraClient 
     network: async () => TESTNET,
     budget: async () => ({
       agentId: '1',
-      chainId: 10143,
-      network: 'Monad Testnet',
+      chainId: 'near:testnet',
+      network: 'NEAR Testnet',
       testnet: true,
       source: 'chain',
       perTaskCap: '50000',
@@ -42,19 +42,31 @@ function fakeClient(over: Partial<Record<string, unknown>> = {}): PactoraClient 
     hire: async () => ({
       jobId: '7',
       chainJobId: '7',
-      chainId: 10143,
-      network: 'Monad Testnet',
+      chainId: 'near:testnet',
+      network: 'NEAR Testnet',
       state: 'created',
       path: 'escrow',
       amount: '20000',
       amountDisplay: '0.02 USDC',
       specHash: '0x' + 'ee'.repeat(32),
-      txHash: '0x' + 'ff'.repeat(32),
-      explorerUrl: 'https://testnet.monadexplorer.com/tx/0x',
+      txHash: 'Tx1' + 'ff'.repeat(32),
+      explorerUrl: 'https://testnet.nearblocks.io/txns/Tx1',
     }),
     getJob: async () => ({jobId: '7', state: 'submitted'}),
-    approve: async () => ({jobId: '7', chainId: 10143, state: 'settled', txHash: '0x', explorerUrl: 'u'}),
-    dispute: async () => ({jobId: '7', chainId: 10143, state: 'disputed', txHash: '0x', explorerUrl: 'u'}),
+    approve: async () => ({
+      jobId: '7',
+      chainId: 'near:testnet',
+      state: 'settled',
+      txHash: 'Tx1',
+      explorerUrl: 'u',
+    }),
+    dispute: async () => ({
+      jobId: '7',
+      chainId: 'near:testnet',
+      state: 'disputed',
+      txHash: 'Tx1',
+      explorerUrl: 'u',
+    }),
     awaitResult: async () => ({jobId: '7', state: 'settled'}),
     ...over,
   } as unknown as PactoraClient;
@@ -148,7 +160,7 @@ describe('hire_agent', () => {
     )) as {testnet: boolean; network: string; nextStep: string};
 
     expect(out.testnet).toBe(true);
-    expect(out.network).toBe('Monad Testnet');
+    expect(out.network).toBe('NEAR Testnet');
   });
 
   it('says what to do next, which differs by path', async () => {

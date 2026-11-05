@@ -22,7 +22,7 @@ export interface SkillStat {
 
 export async function skillStats(
   db: Db,
-  chainId: number,
+  chainId: string,
   agentIds: number[],
   floor: number,
 ): Promise<Map<number, SkillStat[]>> {

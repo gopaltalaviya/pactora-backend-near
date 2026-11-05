@@ -5,7 +5,7 @@ import {loadConfig} from '@pactora/config';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {createMetrics} from '@pactora/service';
 import {buildApp} from '../src/app.js';
-import {addr} from './helpers/register.js';
+import {addr, chainDeps} from './helpers/register.js';
 
 /**
  * GET /v1/openapi.json — generated from the zod schemas the handlers validate
@@ -14,8 +14,8 @@ import {addr} from './helpers/register.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 const BUILD = {service: 'api', version: '9.9.9', commit: 'a1b2c3d4e5f6', builtAt: '2026-10-25T12:00:00Z'};
 
@@ -39,9 +39,10 @@ const served = new Set<string>();
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 2});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     submit: async () => ({txHash: '0x'}),
     build: BUILD,
     metrics: createMetrics('api-openapi'),

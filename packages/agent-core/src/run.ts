@@ -1,6 +1,6 @@
 import type {z} from 'zod';
 import {PactoraClient} from '@pactora/sdk';
-import {X402Scheme, X402_SCHEME, assertNoLegacyEnv} from '@pactora/shared';
+import {ChainId, X402Scheme, X402_SCHEME, assertNoLegacyEnv} from '@pactora/shared';
 import {buildBrain} from './factory.js';
 import {serveX402} from './x402.js';
 import {Worker, type WorkerEvent} from './worker.js';
@@ -39,7 +39,7 @@ export async function runWorker<T>(config: RunWorkerConfig<T>): Promise<void> {
     new PactoraClient({
       baseUrl: env['PACTORA_API_URL'] ?? 'http://127.0.0.1:8080',
       apiKey: apiKey!,
-      ...(env['PACTORA_CHAIN_ID'] ? {chainId: Number(env['PACTORA_CHAIN_ID'])} : {}),
+      ...(env['PACTORA_CHAIN_ID'] ? {chainId: env['PACTORA_CHAIN_ID']} : {}),
     });
 
   const worker = new Worker({
@@ -83,7 +83,8 @@ export async function runWorker<T>(config: RunWorkerConfig<T>): Promise<void> {
       throw new Error(`${config.capability}: X402_PORT needs PACTORA_AGENT_ID — the id the facilitator pays`);
     }
     const [agent, net] = await Promise.all([client.getAgent(agentId), client.network()]);
-    if (!net.paymentToken.address) throw new Error(`${config.capability}: this network has no payment token`);
+    const token = net.paymentToken.accountId;
+    if (!token) throw new Error(`${config.capability}: this network has no payment token`);
     const schemes = X402Scheme.array()
       .min(1)
       .parse((env['X402_SCHEMES'] ?? X402_SCHEME).split(',').map((s) => s.trim()));
@@ -96,8 +97,9 @@ export async function runWorker<T>(config: RunWorkerConfig<T>): Promise<void> {
       agentId,
       price: agent.pricePerTask,
       payTo: agent.walletAddress,
-      asset: net.paymentToken.address,
-      network: `eip155:${net.chainId}`,
+      asset: token,
+      // CAIP-2: the x402 network is the chain id itself (docs/NEAR-PORT.md §1).
+      network: ChainId.parse(net.chainId),
       schemes,
       log: (e) => log(`x402 ${e.kind} ${JSON.stringify(e)}`),
     });

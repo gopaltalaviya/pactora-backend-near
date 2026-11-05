@@ -298,7 +298,7 @@ export const signerTxs = pgTable(
       .references(() => agents.id),
     idempotencyKey: text('idempotency_key').notNull(),
     /**
-     * keccak256(target ‖ data ‖ spend) of the call this key was first used
+     * sha256 of the call (method, args, spend) this key was first used
      * for. NULL only on rows from before it existed, which never replay.
      */
     payloadHash: text('payload_hash'),

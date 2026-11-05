@@ -5,7 +5,7 @@ import {loadConfig} from '@pactora/config';
 import {sql} from 'drizzle-orm';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * Reputation per skill. An agent that is excellent at trade analysis and has
@@ -16,21 +16,21 @@ import {addr, signedRegistration} from './helpers/register.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
-const hex = (s: string) => `0x${Buffer.from(s).toString('hex').padEnd(64, '0')}`;
 
 let app: FastifyInstance;
 let db: Db;
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
-    submit: async () => ({txHash: `0x${'ab'.repeat(32)}`, chainJobId: '1'}),
+    submit: async () => ({txHash: '4yJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz', chainJobId: '1'}),
   });
 });
 afterAll(async () => {
@@ -55,7 +55,6 @@ async function register(name: string, capabilities: string[], wallet: string) {
   const id = Number(res.json().agentId);
   // Stand in for the chain confirming the ERC-8004 id: since v3 discovery
   // lists only confirmed agents (an unconfirmed one can never be hired).
-  await db.execute(sql`UPDATE agents SET chain_agent_id = ${id + 1000} WHERE id = ${id}`);
   return id;
 }
 
@@ -69,11 +68,11 @@ async function job(
 ) {
   const [row] = (await db.execute(sql`
     INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, state, amount, spec, spec_hash)
-    VALUES (31337, ${client}, ${worker}, 'escrow', ${kind}, '20000',
-            ${JSON.stringify({capability, input: {}})}::jsonb, '0x')
+    VALUES ('near:sandbox', ${client}, ${worker}, 'escrow', ${kind}, '20000',
+            ${JSON.stringify({capability, input: {}})}::jsonb, '')
     RETURNING id`)) as unknown as {id: number}[];
   await db.execute(sql`INSERT INTO job_events (chain_id, job_id, kind, payload)
-    VALUES (31337, ${row!.id}, ${kind}, ${JSON.stringify(payload)}::jsonb)`);
+    VALUES ('near:sandbox', ${row!.id}, ${kind}, ${JSON.stringify(payload)}::jsonb)`);
 }
 /** The overall figures the indexer keeps, as it would have after those jobs. */
 const stats = (agent: number, completed: number, failed: number, score: number) =>
@@ -87,8 +86,10 @@ describe('per-skill reputation', () => {
     const client = await register('Client', ['planning'], addr('01'));
     const generalist = await register('Generalist', ['market-research', 'trade-analysis'], addr('02'));
     const specialist = await register('Specialist', ['market-research'], addr('03'));
-    for (let i = 0; i < 12; i++) await job(generalist, client, 'trade-analysis', 'settled', {outcome: 0});
-    for (let i = 0; i < 6; i++) await job(specialist, client, 'market-research', 'settled', {outcome: 0});
+    for (let i = 0; i < 12; i++)
+      await job(generalist, client, 'trade-analysis', 'settled', {outcome: 'Success'});
+    for (let i = 0; i < 6; i++)
+      await job(specialist, client, 'market-research', 'settled', {outcome: 'Success'});
     await stats(generalist, 12, 0, 74);
     await stats(specialist, 6, 0, 61);
 
@@ -124,11 +125,11 @@ describe('per-skill reputation', () => {
   it('counts what the indexer counts, and nothing else', async () => {
     const client = await register('Client', ['planning'], addr('01'));
     const worker = await register('Worker', ['market-research'], addr('04'));
-    await job(worker, client, 'market-research', 'settled', {outcome: 0}); // paid: counts
-    await job(worker, client, 'market-research', 'settled', {outcome: 1}); // unresolved: no review
-    await job(worker, client, 'market-research', 'refunded', {reason: hex('undelivered')}); // worker's fault
+    await job(worker, client, 'market-research', 'settled', {outcome: 'Success'}); // paid: counts
+    await job(worker, client, 'market-research', 'settled', {outcome: 'Unresolved'}); // unresolved: no review
+    await job(worker, client, 'market-research', 'refunded', {reason: 'undelivered'}); // worker's fault
     await job(worker, client, 'market-research', 'refunded', {reason: 'dispute'}); // worker's fault
-    await job(worker, client, 'market-research', 'refunded', {reason: hex('cancelled')}); // client's own cancel
+    await job(worker, client, 'market-research', 'refunded', {reason: 'cancelled'}); // client's own cancel
 
     const [a] = (await app.inject({url: '/v1/agents?capability=market-research'})).json().agents;
     expect(a.skill).toMatchObject({completed: 1, failed: 2});
@@ -137,7 +138,7 @@ describe('per-skill reputation', () => {
   it('lists every skill on the profile', async () => {
     const client = await register('Client', ['planning'], addr('01'));
     const agent = await register('Both', ['market-research', 'trade-analysis'], addr('05'));
-    await job(agent, client, 'trade-analysis', 'settled', {outcome: 0});
+    await job(agent, client, 'trade-analysis', 'settled', {outcome: 'Success'});
     const profile = (await app.inject({url: `/v1/agents/${agent}`})).json();
     expect(profile.skills).toEqual([
       {capability: 'market-research', completed: 0, failed: 0, successRate: null, score: 50},

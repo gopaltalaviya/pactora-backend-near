@@ -2,11 +2,17 @@ import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
 import {fileURLToPath} from 'node:url';
 import type {FastifyInstance} from 'fastify';
 import {sql} from 'drizzle-orm';
-import {generatePrivateKey, privateKeyToAccount} from 'viem/accounts';
 import {loadConfig} from '@pactora/config';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {
+  addr,
+  chainDeps,
+  fakeReadIdentity,
+  functionCallOnly,
+  signChallenge,
+  signedRegistration,
+} from './helpers/register.js';
 
 /**
  * API keys after issue (v3). docs/17 had rotation and revocation as "SQL
@@ -19,8 +25,8 @@ import {addr, signedRegistration} from './helpers/register.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 let app: FastifyInstance;
@@ -31,12 +37,17 @@ let chainOwner: string | null = null;
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
-    submit: async () => ({txHash: `0x${'ab'.repeat(32)}`}),
-    readIdentity: async () => (chainOwner ? {owner: chainOwner, wallet: addr('11')} : null),
+    submit: async () => ({txHash: '4yJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz'}),
+    // The registry, unless a test has the agent change hands on chain.
+    readIdentity: async (a) =>
+      chainOwner
+        ? {owner: chainOwner, wallet: addr('11'), pendingWallet: null, frozen: false}
+        : fakeReadIdentity(a),
   });
 });
 afterAll(async () => {
@@ -45,24 +56,21 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   chainOwner = null;
+  functionCallOnly.clear();
   await db.execute(sql`TRUNCATE agents, api_keys, key_challenges, agent_stats RESTART IDENTITY CASCADE`);
 });
 
-const owner = privateKeyToAccount(generatePrivateKey());
-const stranger = privateKeyToAccount(generatePrivateKey());
+const owner = addr('key-owner');
+const stranger = addr('key-stranger');
 
 async function register(): Promise<{agentId: number; apiKey: string}> {
-  const res = await signedRegistration(
-    app,
-    {
-      name: 'K',
-      capabilities: ['market-research'],
-      pricePerTask: '20000',
-      walletAddress: addr('11'),
-      ownerAddress: owner.address,
-    },
-    {ownerKey: owner},
-  );
+  const res = await signedRegistration(app, {
+    name: 'K',
+    capabilities: ['market-research'],
+    pricePerTask: '20000',
+    walletAddress: addr('11'),
+    ownerAddress: owner,
+  });
   expect(res.statusCode).toBe(201);
   return res.json();
 }
@@ -98,17 +106,16 @@ describe('POST /v1/keys/revoke', () => {
 });
 
 describe('re-issue by the owner', () => {
-  async function challenge(agentId: number): Promise<string> {
+  async function challenge(agentId: number): Promise<{message: string; nonce: string}> {
     const res = await post(`/v1/agents/${agentId}/keys/challenge`);
     expect(res.statusCode).toBe(200);
-    return res.json().message as string;
+    return res.json() as {message: string; nonce: string};
   }
 
   it('issues a new key for a signature over the challenge, and revokes every old one', async () => {
     const {agentId, apiKey} = await register();
-    const message = await challenge(agentId);
-    const signature = await owner.signMessage({message});
-    const res = await post(`/v1/agents/${agentId}/keys`, undefined, {signature});
+    const signed = await signChallenge(owner, await challenge(agentId));
+    const res = await post(`/v1/agents/${agentId}/keys`, undefined, signed);
     expect(res.statusCode).toBe(201);
     expect((await whoAmI(res.json().apiKey)).statusCode).toBe(200);
     expect((await whoAmI(apiKey)).statusCode).toBe(401);
@@ -116,28 +123,39 @@ describe('re-issue by the owner', () => {
 
   it('refuses anyone but the owner', async () => {
     const {agentId} = await register();
-    const message = await challenge(agentId);
-    const res = await post(`/v1/agents/${agentId}/keys`, undefined, {
-      signature: await stranger.signMessage({message}),
-    });
+    const res = await post(
+      `/v1/agents/${agentId}/keys`,
+      undefined,
+      await signChallenge(stranger, await challenge(agentId)),
+    );
     expect(res.statusCode).toBe(401);
+  });
+
+  /** A function-call key, which is what an agent holds, cannot speak for its owner. */
+  it('refuses the owner account signing with a function-call key, even with a valid signature', async () => {
+    const {agentId} = await register();
+    functionCallOnly.add(owner);
+    const res = await post(
+      `/v1/agents/${agentId}/keys`,
+      undefined,
+      await signChallenge(owner, await challenge(agentId)),
+    );
+    expect(res.statusCode).toBe(401);
+    expect(res.json().detail).toMatch(/full-access key/);
   });
 
   it('accepts a challenge once: a replayed signature gets nothing', async () => {
     const {agentId} = await register();
-    const message = await challenge(agentId);
-    const signature = await owner.signMessage({message});
-    expect((await post(`/v1/agents/${agentId}/keys`, undefined, {signature})).statusCode).toBe(201);
-    expect((await post(`/v1/agents/${agentId}/keys`, undefined, {signature})).statusCode).toBe(401);
+    const signed = await signChallenge(owner, await challenge(agentId));
+    expect((await post(`/v1/agents/${agentId}/keys`, undefined, signed)).statusCode).toBe(201);
+    expect((await post(`/v1/agents/${agentId}/keys`, undefined, signed)).statusCode).toBe(401);
   });
 
   it('refuses an expired challenge', async () => {
     const {agentId} = await register();
-    const message = await challenge(agentId);
+    const c = await challenge(agentId);
     await db.execute(sql`UPDATE key_challenges SET expires_at = now() - interval '1 second'`);
-    const res = await post(`/v1/agents/${agentId}/keys`, undefined, {
-      signature: await owner.signMessage({message}),
-    });
+    const res = await post(`/v1/agents/${agentId}/keys`, undefined, await signChallenge(owner, c));
     expect(res.statusCode).toBe(401);
   });
 
@@ -145,11 +163,12 @@ describe('re-issue by the owner', () => {
   it("checks the signer against the agent's CURRENT on-chain owner", async () => {
     const {agentId} = await register();
     await db.execute(sql`UPDATE agents SET chain_agent_id = 77 WHERE id = ${agentId}`);
-    chainOwner = stranger.address;
-    const message = await challenge(agentId);
-    const res = await post(`/v1/agents/${agentId}/keys`, undefined, {
-      signature: await owner.signMessage({message}),
-    });
+    chainOwner = stranger;
+    const res = await post(
+      `/v1/agents/${agentId}/keys`,
+      undefined,
+      await signChallenge(owner, await challenge(agentId)),
+    );
     expect(res.statusCode).toBe(401);
     expect(res.json().detail).toMatch(/on-chain owner/);
   });
@@ -166,7 +185,7 @@ describe('re-issue by the owner', () => {
       url: `/v1/agents/${agentId}/keys/challenge`,
       remoteAddress: '198.51.100.10',
     });
-    const {message, nonce} = mine.json() as {message: string; nonce: string};
+    const mineChallenge = mine.json() as {message: string; nonce: string};
     for (let i = 0; i < 5; i++) {
       await app.inject({
         method: 'POST',
@@ -175,19 +194,17 @@ describe('re-issue by the owner', () => {
       });
     }
     const res = await post(`/v1/agents/${agentId}/keys`, undefined, {
-      signature: await owner.signMessage({message}),
-      nonce,
+      ...(await signChallenge(owner, mineChallenge)),
+      nonce: mineChallenge.nonce,
     });
     expect(res.statusCode).toBe(201);
   });
 
   it('finds the signed challenge among several live ones even without its nonce', async () => {
     const {agentId} = await register();
-    const message = await challenge(agentId);
+    const first = await challenge(agentId);
     await challenge(agentId);
-    const res = await post(`/v1/agents/${agentId}/keys`, undefined, {
-      signature: await owner.signMessage({message}),
-    });
+    const res = await post(`/v1/agents/${agentId}/keys`, undefined, await signChallenge(owner, first));
     expect(res.statusCode).toBe(201);
   });
 

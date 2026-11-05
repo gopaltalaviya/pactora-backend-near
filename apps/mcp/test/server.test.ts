@@ -75,7 +75,7 @@ describe('an MCP session against the server', () => {
     const res = await client.callTool({name: 'get_network', arguments: {}});
 
     const text = (res.content as {type: string; text: string}[])[0]!.text;
-    expect(JSON.parse(text).chainId).toBe(10143);
+    expect(JSON.parse(text).chainId).toBe('near:testnet');
     await client.close();
   });
 

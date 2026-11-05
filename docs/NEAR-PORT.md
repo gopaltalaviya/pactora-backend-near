@@ -97,27 +97,39 @@ Explorer links: `${explorer}/txns/<hash>` and `${explorer}/address/<account>`.
 
 ## 5. Sign-in and registration (NEP-413)
 
-The owner proves control with a NEP-413 signed message, not EIP-191.
+The owner proves control with a NEP-413 signed message, not EIP-191. Four
+steps, in this order, because the wallet's key must exist before the wallet
+account does, and the agent id exists only after `register_agent`:
 
-1. `POST /v1/agents/challenge` with body `{ownerAddress, walletAddress, chainAgentId, chainId?}`. It answers:
-   ```
-   {nonce, message, recipient, expiresAt, walletPublicKey}
-   ```
-   - `nonce` is 32 random bytes as 64 hex characters. NEP-413 needs exactly 32 bytes; the wallet is given them as base64.
-   - `recipient` is `PACTORA_SIGN_RECIPIENT`, default `pactora`.
-   - `walletPublicKey` is the `ed25519:…` key the signer holds for `walletAddress`. It is created on first request.
-2. The owner's wallet signs `{message, recipient, nonce}` (wallet `signMessage`) and returns `{accountId, publicKey, signature}`. `signature` is base64.
-3. `POST /v1/agents` carries `{…, nonce, publicKey, signature}`. The API checks four things:
-   - **(a)** the NEP-413 signature is valid for `publicKey`;
-   - **(b)** RPC `view_access_key(ownerAddress, publicKey)` is a **FullAccess** key, so a function-call key cannot register on its owner's behalf;
-   - **(c)** `get_agent(chainAgentId)` has `owner == ownerAddress`, and `wallet == walletAddress` or `pending_wallet == walletAddress`;
-   - **(d)** if the wallet is still pending, the API has the signer call `accept_wallet` with the wallet's own key.
+1. `POST /v1/agents/wallet-key` `{walletAddress, chainId?}` → `{walletPublicKey}`
+   — the `ed25519:…` key the signer holds for that wallet (created on first
+   request, the same one every time after). No credentials: a public key is
+   harmless, and only the signer holds the private half.
+2. The owner's wallet sends two transactions:
+   - **tx 1** to `<wallet>`: `CreateAccount`, `Transfer` (gas money for the
+     agent), `AddKey(walletPublicKey, FunctionCall{receiver: Pactora,
+     methods: [], allowance})`;
+   - **tx 2** to `Pactora`: `register_agent({wallet, card_uri, per_task_cap?,
+     daily_cap?})` with a deposit for storage. Its return value is the agent id.
+3. `POST /v1/agents/challenge` `{ownerAddress, walletAddress, chainAgentId, chainId?}`
+   → `{nonce, message, recipient, expiresAt}`. `nonce` is 32 random bytes as
+   64 hex (NEP-413 needs exactly 32; the wallet is given them as bytes);
+   `recipient` is `PACTORA_SIGN_RECIPIENT` (default `pactora`). The owner's
+   wallet signs `{message, recipient, nonce}` (`signMessage`) and returns
+   `{accountId, publicKey, signature}` (`signature` base64).
+4. `POST /v1/agents` `{…, chainAgentId, nonce, publicKey, signature}`. The API checks:
+   (a) the NEP-413 signature is valid for `publicKey`; (b) RPC
+   `view_access_key(ownerAddress, publicKey)` is **FullAccess** — a
+   function-call key cannot register on its owner's behalf; (c) `get_agent
+   (chainAgentId)` has `owner == ownerAddress`, is not frozen, and has
+   `wallet == walletAddress` or `pending_wallet == walletAddress`; (d) if
+   pending, the signer accepts first (`POST /keys/accept`, §6). Only then is
+   the agent row written and the API key issued.
 
-   `chainAgentId` is now required: an agent that isn't on chain can't be hired, and the old `walletSignature` path is gone. Key re-issue uses the same NEP-413 check.
-
-What the owner's wallet sends before step 3:
-- **tx 1** to `<wallet>`: `CreateAccount`, then `Transfer` (gas money for the agent), then `AddKey(walletPublicKey, FunctionCall{receiver: Pactora, methods: [], allowance})`.
-- **tx 2** to `Pactora`: `register_agent({wallet, card_uri, per_task_cap?, daily_cap?})`, with a deposit for storage.
+`chainAgentId` is required (an agent not on chain cannot be hired); the old
+`walletSignature` path is gone. Key re-issue (`POST /v1/agents/:id/keys`) takes
+`{publicKey, signature, nonce?}` and makes the same full-access check against
+the agent's current on-chain owner.
 
 ## 6. Signer HTTP API
 
@@ -157,6 +169,7 @@ How every call is sent:
 
 Two more endpoints:
 - `POST /keys` `{walletAddress}` → `{publicKey}`. It creates the key if missing and is idempotent.
+- `POST /keys/accept` `{chainId, walletAddress, chainAgentId}` → `{txHash, alreadyAccepted}`: signs the wallet's `accept_wallet` with its key, before the API has an agent row.
 - `GET /health` reports each signing account's NEAR balance in yocto (`balanceYocto`).
 
 ## 7. Events (NEP-297, `standard: "pactora"`, `version: "1.0.0"`)

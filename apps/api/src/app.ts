@@ -19,17 +19,25 @@ import {registerStatusRoutes, type StatusDeps} from './routes/status.js';
 import {registerX402Routes} from './routes/x402.js';
 import {RunService, type RunExecutor} from './runs.js';
 import type {BudgetReader, DisputeBondReader, IdentityReader, PaymentReader} from './chain-reads.js';
+import type {OwnerVerifier} from './challenges.js';
+import type {WalletKeys} from './routes/agents.js';
 
 export interface AppDeps {
   db: Db;
-  chains: Record<number, ChainConfig>;
-  defaultChainId: number;
+  chains: Record<string, ChainConfig>;
+  defaultChainId: string;
   submit: JobRouteDeps['submit'];
   bus?: EventBus;
   /** Omitted, /v1/budget answers from the cached policy and says so. */
   readBudget?: BudgetReader;
-  /** Omitted, a registration that names an on-chain id is refused: it cannot be verified. */
+  /** Omitted, every registration is refused: it cannot be verified. */
   readIdentity?: IdentityReader;
+  /** NEP-413 owner signatures, checked to be full-access keys (challenges.ts). */
+  verifyOwner: OwnerVerifier;
+  /** The signer's agent keys; omitted, registration cannot create or accept wallets. */
+  walletKeys?: WalletKeys;
+  /** NEP-413 recipient; default `pactora`. */
+  signRecipient?: string;
   /** Omitted, the x402 facilitator can settle but never confirms a payment. */
   readPayment?: PaymentReader;
   /** Omitted, a dispute declares no spend and the contract alone enforces the cap. */
@@ -212,7 +220,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       chainId: c.chainId,
       name: c.name,
       testnet: c.testnet,
-      escrow: c.contracts['TaskEscrow'] ?? null,
+      contract: c.contracts.Pactora,
     })),
     defaultChainId: deps.defaultChainId,
     subscribers: bus.subscriberCount + runBus.subscriberCount,
@@ -239,10 +247,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     chains: deps.chains,
     defaultChainId: deps.defaultChainId,
     ...(deps.readIdentity ? {readIdentity: deps.readIdentity} : {}),
+    verifyOwner: deps.verifyOwner,
+    ...(deps.walletKeys ? {walletKeys: deps.walletKeys} : {}),
+    ...(deps.signRecipient ? {signRecipient: deps.signRecipient} : {}),
     requirePublicHttpsEndpoints: deps.requirePublicHttpsEndpoints ?? false,
   });
   await registerKeyRoutes(app, {
     db: deps.db,
+    verifyOwner: deps.verifyOwner,
     ...(deps.readIdentity ? {readIdentity: deps.readIdentity} : {}),
   });
   await registerJobRoutes(app, {

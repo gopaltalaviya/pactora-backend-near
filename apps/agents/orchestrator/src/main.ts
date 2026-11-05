@@ -39,7 +39,7 @@ if (!apiKey) {
 const client = new PactoraClient({
   baseUrl: process.env['PACTORA_API_URL'] ?? 'http://127.0.0.1:8080',
   apiKey,
-  ...(process.env['PACTORA_CHAIN_ID'] ? {chainId: Number(process.env['PACTORA_CHAIN_ID'])} : {}),
+  ...(process.env['PACTORA_CHAIN_ID'] ? {chainId: process.env['PACTORA_CHAIN_ID']} : {}),
 });
 
 const brain = buildBrain({role: 'orchestrator'});

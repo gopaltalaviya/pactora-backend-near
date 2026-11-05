@@ -13,7 +13,7 @@ import {
   DEFAULT_WINDOW_BLOCKS,
   type Db,
 } from '@pactora/db';
-import {PactoraError, BaseUnits, Capability, ErrorCode} from '@pactora/shared';
+import {AccountId, PactoraError, BaseUnits, Capability, ChainId, ErrorCode} from '@pactora/shared';
 import type {ChainConfig} from '@pactora/config';
 import {authenticate, generateApiKey, hashApiKey, resolveChainId} from '../auth.js';
 import {noHistory, skillStats, type SkillStat} from '../skills.js';
@@ -22,21 +22,22 @@ import type {AgentRow} from '../types.js';
 import type {IdentityReader} from '../chain-reads.js';
 import {
   CHALLENGE_TTL_MS,
+  DEFAULT_SIGN_RECIPIENT,
   LIVE_PER_REQUESTER,
+  NONCE_RE,
   newNonce,
   registrationMessage,
-  signedBy,
+  type OwnerVerifier,
 } from '../challenges.js';
 
-const Address = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
-const Signature = z.string().regex(/^0x[0-9a-fA-F]+$/);
+const ChainAgentId = z.string().regex(/^[1-9]\d{0,19}$/, 'chainAgentId is the contract agent id (a u64)');
 
 /** What a registration will claim, so the challenge can name it. */
 export const RegisterChallengeBody = z.object({
-  ownerAddress: Address,
-  walletAddress: Address,
-  chainId: z.number().int().optional(),
-  chainAgentId: z.string().regex(/^\d+$/).optional(),
+  ownerAddress: AccountId,
+  walletAddress: AccountId,
+  chainId: ChainId.optional(),
+  chainAgentId: ChainAgentId,
 });
 
 export const RegisterBody = z.object({
@@ -45,21 +46,20 @@ export const RegisterBody = z.object({
   capabilities: z.array(Capability).min(1).max(16),
   pricePerTask: BaseUnits,
   endpointUrl: z.string().url().optional(),
-  walletAddress: Address,
-  ownerAddress: Address,
-  chainId: z.number().int().optional(),
-  /** The ERC-8004 id, when the identity is already registered. Verified on-chain before it is stored. */
-  chainAgentId: z.string().regex(/^\d+$/).optional(),
-  /** From `POST /v1/agents/challenge`: the nonce the signatures cover. */
-  nonce: z.string().regex(/^[0-9a-f]{32}$/, 'nonce comes from POST /v1/agents/challenge'),
-  /** The owner's EIP-191 signature over the challenge message. */
-  signature: Signature,
+  walletAddress: AccountId,
+  ownerAddress: AccountId,
+  chainId: ChainId.optional(),
   /**
-   * The wallet's signature over the same message. Needed only when there is
-   * no `chainAgentId` (nothing on chain ties the wallet to the owner) and the
-   * wallet is not the owner itself.
+   * The contract agent id `register_agent` returned. Required: an agent that
+   * is not on chain can never be hired. Verified on chain before it is stored.
    */
-  walletSignature: Signature.optional(),
+  chainAgentId: ChainAgentId,
+  /** From `POST /v1/agents/challenge`: the nonce the signature covers. */
+  nonce: z.string().regex(NONCE_RE, 'nonce comes from POST /v1/agents/challenge'),
+  /** The owner's key that made the NEP-413 signature — it must be a full-access key. */
+  publicKey: z.string().regex(/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,50}$/, 'publicKey is ed25519:<base58>'),
+  /** The owner's NEP-413 signature (base64) over the challenge message. */
+  signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, 'signature is base64'),
 });
 
 export const UpdateAgentBody = z.object({
@@ -74,14 +74,33 @@ export const DiscoverQuery = z.object({
   minScore: z.coerce.number().int().min(0).max(100).optional(),
   rank: z.enum(['balanced', 'quality', 'cheapest', 'fastest']).default('balanced'),
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  chainId: z.coerce.number().int().optional(),
+  chainId: ChainId.optional(),
 });
+
+/**
+ * The agent keys the signer holds (docs/NEAR-PORT.md §5–6): the public key a
+ * new agent wallet is created with, and the wallet's `accept_wallet`, signed
+ * with that key.
+ */
+export interface WalletKeys {
+  publicKeyFor(args: {chainId: string; walletAddress: string}): Promise<string>;
+  accept(args: {
+    chainId: string;
+    walletAddress: string;
+    chainAgentId: string;
+  }): Promise<{txHash: string; alreadyAccepted: boolean}>;
+}
 
 export interface RouteDeps {
   db: Db;
-  chains: Record<number, ChainConfig>;
-  defaultChainId: number;
+  chains: Record<string, ChainConfig>;
+  defaultChainId: string;
   readIdentity?: IdentityReader;
+  /** NEP-413 with a full-access key of the owner (challenges.ts). */
+  verifyOwner: OwnerVerifier;
+  walletKeys?: WalletKeys;
+  /** NEP-413 `recipient`; defaults to `pactora`. */
+  signRecipient?: string;
   /**
    * Refuse endpoint URLs that are not public https. Nothing fetches them
    * today; the first thing that does must not be pointable at plain http, a
@@ -106,7 +125,8 @@ export function isPublicHttpsUrl(raw: string): boolean {
 
 export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
   const {db, chains, defaultChainId} = deps;
-  const enabled = Object.keys(chains).map(Number);
+  const enabled = Object.keys(chains);
+  const recipient = deps.signRecipient ?? DEFAULT_SIGN_RECIPIENT;
 
   /**
    * Discovery.
@@ -263,7 +283,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
 
     const reading = await readTrust(db, {chainId: agent.chainId, agentId: agent.id, floor: floorOf(chain)});
     const cursor = await db.query.indexerCursor.findFirst({
-      where: and(eq(indexerCursor.chainId, agent.chainId), eq(indexerCursor.contract, 'TaskEscrow')),
+      where: and(eq(indexerCursor.chainId, agent.chainId), eq(indexerCursor.contract, 'Pactora')),
     });
     return {
       agentId: String(agent.id),
@@ -277,13 +297,34 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
   });
 
   /**
+   * The key a new agent wallet is created with (docs/NEAR-PORT.md §5, step 1).
+   *
+   * The signer generates it on first request and holds the private half; the
+   * owner's wallet adds the public half to the new account as a
+   * function-call key scoped to the Pactora contract. Unauthenticated: a
+   * public key is harmless, and asking twice returns the same key.
+   */
+  app.post('/v1/agents/wallet-key', async (request) => {
+    const body = z.object({walletAddress: AccountId, chainId: ChainId.optional()}).parse(request.body);
+    const chainId = body.chainId ?? defaultChainId;
+    if (!enabled.includes(chainId)) {
+      throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${chainId} is not enabled`);
+    }
+    if (!deps.walletKeys) {
+      throw new PactoraError(ErrorCode.INVALID_STATE, 'this API has no signer, so it cannot hold agent keys');
+    }
+    const walletPublicKey = await deps.walletKeys.publicKeyFor({chainId, walletAddress: body.walletAddress});
+    return {chainId, walletAddress: body.walletAddress, walletPublicKey};
+  });
+
+  /**
    * Start a registration: a message for the owner to sign (audit M1).
    *
-   * Body `{ownerAddress, walletAddress, chainAgentId?, chainId?}` — the same
-   * values the registration will carry. Answers `{nonce, message, expiresAt}`.
-   * The owner signs `message` (EIP-191 personal_sign), as does the wallet
-   * when it must, and both go back with the registration and the nonce.
-   * Single-use, five minutes; each requester address keeps its newest few.
+   * Body `{ownerAddress, walletAddress, chainAgentId, chainId?}` — the same
+   * values the registration will carry. Answers `{nonce, message, recipient,
+   * expiresAt}`. The owner's wallet signs it with NEP-413 `signMessage`
+   * (`nonce` is the 32 bytes, hex-encoded here). Single-use, five minutes;
+   * each requester address keeps its newest few.
    */
   app.post('/v1/agents/challenge', async (request) => {
     const body = RegisterChallengeBody.parse(request.body);
@@ -291,7 +332,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
     if (!enabled.includes(chainId)) {
       throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${chainId} is not enabled`);
     }
-    const ownerAddress = body.ownerAddress.toLowerCase();
+    const ownerAddress = body.ownerAddress;
     const nonce = newNonce();
     const expiresAt = new Date(Date.now() + CHALLENGE_TTL_MS);
     const requester = request.ip;
@@ -309,6 +350,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
     return {
       nonce,
       message: registrationMessage({...body, chainId, nonce}),
+      recipient,
       expiresAt: expiresAt.toISOString(),
     };
   });
@@ -316,29 +358,23 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
   /**
    * Register an agent.
    *
-   * The on-chain ERC-8004 registration and the stake are done by the owner's
-   * own wallet; this records the off-chain half (capabilities, endpoint,
-   * searchable price) and issues the API key.
+   * The on-chain registration (`register_agent`, with the storage deposit) is
+   * done by the owner's own wallet; this records the off-chain half
+   * (capabilities, endpoint, searchable price) and issues the API key.
    *
    * It proves control first (audit M1). Matching public chain data proves
    * nothing — anyone can read it — and the first registration of an agent
-   * receives its only API key. So `signature` must be the owner's over the
-   * challenge from `POST /v1/agents/challenge`, which names this chain,
-   * owner, wallet and ERC-8004 id. With no ERC-8004 id, nothing on chain ties
-   * the wallet to the owner, so the wallet signs too (`walletSignature`)
-   * unless it is the owner: otherwise anyone could claim a stranger's wallet,
-   * and the stranger's own registration would then hit the unique index.
+   * receives its only API key. So `signature` must be a NEP-413 signature by
+   * a FULL-ACCESS key of `ownerAddress` over the challenge from
+   * `POST /v1/agents/challenge`, which names this chain, owner, wallet and
+   * agent id. An agent's own function-call key cannot pass.
    *
-   * `chainAgentId` links the two, and without it the agent can never be
-   * hired: the escrow addresses agents by their ERC-8004 id. This used to say
-   * the id "stays NULL until the indexer observes the registration", but the
-   * indexer only watches TaskEscrow, so nothing ever set it — every agent
-   * registered through the API or the /register page was unhireable, and only
-   * the demo scripts worked, by writing the column with raw SQL.
-   *
-   * So the caller names the id and the chain confirms it: the id must exist,
-   * be owned by `ownerAddress`, and pay out to `walletAddress`. The database
-   * still never claims an on-chain fact the chain has not confirmed.
+   * Then the chain confirms the rest: the agent id exists, is owned by
+   * `ownerAddress`, is not frozen, and names `walletAddress` as its wallet —
+   * accepted, or proposed and accepted now by the signer with the wallet's
+   * own key (an agent cannot claim someone else's account, and the contract
+   * enforces that). The database never claims an on-chain fact the chain
+   * has not confirmed.
    */
   app.post('/v1/agents', async (request, reply) => {
     const body = RegisterBody.parse(request.body);
@@ -360,7 +396,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
       !challenge ||
       challenge.expiresAt.getTime() <= Date.now() ||
       challenge.chainId !== chainId ||
-      challenge.ownerAddress !== body.ownerAddress.toLowerCase()
+      challenge.ownerAddress !== body.ownerAddress
     ) {
       throw new PactoraError(
         ErrorCode.UNAUTHORIZED,
@@ -368,22 +404,34 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
       );
     }
     const message = registrationMessage({...body, chainId});
-    if (!(await signedBy(body.ownerAddress, message, body.signature))) {
+    const signed = await deps.verifyOwner({
+      chainId,
+      accountId: body.ownerAddress,
+      publicKey: body.publicKey,
+      signature: body.signature,
+      message,
+      nonce: body.nonce,
+    });
+    if (!signed) {
       throw new PactoraError(
         ErrorCode.UNAUTHORIZED,
-        `the signature is not ${body.ownerAddress}'s over this registration's challenge`,
+        `the signature is not a full-access key of ${body.ownerAddress} over this registration's challenge`,
       );
     }
 
-    if (body.chainAgentId !== undefined) {
-      await verifyIdentity(deps.readIdentity, chainId, BigInt(body.chainAgentId), body);
-    } else if (body.walletAddress.toLowerCase() !== body.ownerAddress.toLowerCase()) {
-      if (!body.walletSignature || !(await signedBy(body.walletAddress, message, body.walletSignature))) {
+    const pending = await verifyIdentity(deps.readIdentity, chainId, BigInt(body.chainAgentId), body);
+    if (pending) {
+      if (!deps.walletKeys) {
         throw new PactoraError(
-          ErrorCode.UNAUTHORIZED,
-          'with no chainAgentId, a wallet that is not the owner must sign the same challenge (walletSignature)',
+          ErrorCode.INVALID_STATE,
+          `agent ${body.chainAgentId}'s wallet has not accepted, and this API has no signer to accept for it`,
         );
       }
+      await deps.walletKeys.accept({
+        chainId,
+        walletAddress: body.walletAddress,
+        chainAgentId: body.chainAgentId,
+      });
     }
 
     const created = await db.transaction(async (tx) => {
@@ -400,8 +448,8 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
         .insert(agents)
         .values({
           chainId,
-          ownerAddress: body.ownerAddress.toLowerCase(),
-          walletAddress: body.walletAddress.toLowerCase(),
+          ownerAddress: body.ownerAddress,
+          walletAddress: body.walletAddress,
           name: body.name,
           description: body.description ?? null,
           endpointUrl: body.endpointUrl ?? null,
@@ -510,42 +558,43 @@ function present(a: AgentRow, chain: ChainConfig) {
 }
 
 /**
- * Refuse an on-chain id the chain does not back.
+ * Refuse an on-chain id the chain does not back. Answers whether the wallet
+ * is still only proposed (and so must accept before the agent can work).
  *
  * The owner check stops anyone claiming an identity — and the reputation
- * attached to it — by naming its id; the wallet check is what the escrow pays,
- * so a mismatch would send every payment somewhere other than where the
- * registrant thinks.
+ * attached to it — by naming its id; the wallet check is who the contract
+ * lets act for the agent, so a mismatch would hand the agent to someone
+ * other than the registrant thinks.
  */
 async function verifyIdentity(
   read: IdentityReader | undefined,
-  chainId: number,
+  chainId: string,
   chainAgentId: bigint,
   body: {ownerAddress: string; walletAddress: string},
-): Promise<void> {
+): Promise<boolean> {
   if (!read) {
     throw new PactoraError(
       ErrorCode.INVALID_STATE,
-      'this API cannot read the identity registry, so it cannot verify chainAgentId — register without it',
+      'this API cannot read the contract, so it cannot verify chainAgentId',
     );
   }
   const identity = await read({chainId, chainAgentId});
   if (!identity) {
+    throw new PactoraError(ErrorCode.INVALID_STATE, `agent ${chainAgentId} does not exist on ${chainId}`);
+  }
+  if (identity.owner !== body.ownerAddress) {
     throw new PactoraError(
       ErrorCode.INVALID_STATE,
-      `ERC-8004 identity ${chainAgentId} does not exist on chain ${chainId}`,
+      `agent ${chainAgentId} is owned by ${identity.owner}, not ${body.ownerAddress}`,
     );
   }
-  if (identity.owner.toLowerCase() !== body.ownerAddress.toLowerCase()) {
-    throw new PactoraError(
-      ErrorCode.INVALID_STATE,
-      `ERC-8004 identity ${chainAgentId} is owned by ${identity.owner}, not ${body.ownerAddress}`,
-    );
+  if (identity.frozen) {
+    throw new PactoraError(ErrorCode.INVALID_STATE, `agent ${chainAgentId} is frozen by its owner`);
   }
-  if (identity.wallet.toLowerCase() !== body.walletAddress.toLowerCase()) {
-    throw new PactoraError(
-      ErrorCode.INVALID_STATE,
-      `ERC-8004 identity ${chainAgentId} pays out to ${identity.wallet}, not ${body.walletAddress}`,
-    );
-  }
+  if (identity.wallet === body.walletAddress) return false;
+  if (identity.pendingWallet === body.walletAddress) return true;
+  throw new PactoraError(
+    ErrorCode.INVALID_STATE,
+    `agent ${chainAgentId}'s wallet is ${identity.wallet ?? identity.pendingWallet ?? 'unset'}, not ${body.walletAddress}`,
+  );
 }

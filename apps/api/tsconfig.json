@@ -23,6 +23,9 @@
     },
     {
       "path": "../../packages/service"
+    },
+    {
+      "path": "../../packages/near"
     }
   ]
 }

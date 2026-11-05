@@ -48,8 +48,8 @@ const JOB = '5f0c1a9e-2b7d-4c3e-9a61-0d8e4f7b2c11';
 const HEADER = encodePaymentHeader({
   x402Version: 1,
   scheme: X402_SCHEME,
-  network: 'eip155:10143',
-  payload: {jobId: JOB, txHash: `0x${'ab'.repeat(32)}`},
+  network: 'near:testnet',
+  payload: {jobId: JOB, txHash: 'TxAbzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'},
 });
 
 interface Seen {
@@ -90,9 +90,9 @@ async function start(verdicts: VerifyResponse[]) {
     publicUrl: 'http://127.0.0.1:9402',
     agentId: 2,
     price: '20000',
-    payTo: '0x' + '11'.repeat(20),
-    asset: '0x' + '22'.repeat(20),
-    network: 'eip155:10143',
+    payTo: 'worker.pactora.testnet',
+    asset: 'musdc.pactora.testnet',
+    network: 'near:testnet',
     confirmWaitMs: 3_000,
   });
   return {seen, brain, url: server.url};
@@ -146,8 +146,8 @@ describe('the paid endpoint', () => {
     );
     expect(receipt).toEqual({
       success: true,
-      transaction: `0x${'ab'.repeat(32)}`,
-      network: 'eip155:10143',
+      transaction: 'TxAbzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',
+      network: 'near:testnet',
       payer: 1,
     });
   });
@@ -194,7 +194,7 @@ describe('the job loop, beside the paid endpoint', () => {
     const paidByX402: JobSummary = {
       jobId: '9',
       chainJobId: '9',
-      chainId: 10143,
+      chainId: 'near:testnet',
       state: 'settled',
       path: 'direct',
       amount: '20000',
@@ -204,7 +204,7 @@ describe('the job loop, beside the paid endpoint', () => {
         input: {x402: {resource: 'http://127.0.0.1:9402/market-research', nonce: 'n'}},
         deadlineSeconds: 300,
       },
-      specHash: '0x',
+      specHash: '',
       role: 'worker',
       hasResult: false,
       clientAgentId: '1',
@@ -236,9 +236,9 @@ describe('the job loop, beside the paid endpoint', () => {
 describe('the escrow-backed scheme (agentx-escrow)', () => {
   const ESCROW_HEADER = encodePaymentHeader({
     x402Version: 1,
-    scheme: 'agentx-escrow',
-    network: 'eip155:10143',
-    payload: {jobId: JOB, txHash: `0x${'cd'.repeat(32)}`},
+    scheme: 'pactora-escrow',
+    network: 'near:testnet',
+    payload: {jobId: JOB, txHash: 'TxCdzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'},
   });
 
   async function startEscrow(brainFails = false) {
@@ -293,10 +293,10 @@ describe('the escrow-backed scheme (agentx-escrow)', () => {
       publicUrl: 'http://127.0.0.1:9402',
       agentId: 2,
       price: '20000',
-      payTo: '0x' + '11'.repeat(20),
-      asset: '0x' + '22'.repeat(20),
-      network: 'eip155:10143',
-      schemes: ['agentx-directpay', 'agentx-escrow'],
+      payTo: 'worker.pactora.testnet',
+      asset: 'musdc.pactora.testnet',
+      network: 'near:testnet',
+      schemes: ['pactora-directpay', 'pactora-escrow'],
       confirmWaitMs: 3_000,
     });
     return {order, seen, url: server.url};
@@ -305,7 +305,7 @@ describe('the escrow-backed scheme (agentx-escrow)', () => {
   it('offers both schemes in the quote when asked to', async () => {
     const {url} = await startEscrow();
     const body = (await (await post(url)).json()) as {accepts: {scheme: string}[]};
-    expect(body.accepts.map((a) => a.scheme)).toEqual(['agentx-directpay', 'agentx-escrow']);
+    expect(body.accepts.map((a) => a.scheme)).toEqual(['pactora-directpay', 'pactora-escrow']);
   });
 
   it('works first, then accepts and submits on chain, then answers', async () => {
@@ -313,7 +313,7 @@ describe('the escrow-backed scheme (agentx-escrow)', () => {
     const res = await post(url, {'x-payment': ESCROW_HEADER});
     expect(res.status).toBe(200);
     expect(order).toEqual(['redeem', 'work', `accept:${JOB}`, `submit:${JOB}`]);
-    expect(seen.redeemed[0]!.req.scheme).toBe('agentx-escrow');
+    expect(seen.redeemed[0]!.req.scheme).toBe('pactora-escrow');
   });
 
   it('declines without accepting when the work fails, and says how to get the refund', async () => {

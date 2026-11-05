@@ -5,7 +5,7 @@ import {loadConfig} from '@pactora/config';
 import {sql} from 'drizzle-orm';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * API-key authentication, under load and under attack.
@@ -17,8 +17,8 @@ import {addr, signedRegistration} from './helpers/register.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 let app: FastifyInstance;
@@ -27,11 +27,12 @@ let db: Db;
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
-    submit: async () => ({txHash: `0x${'ab'.repeat(32)}`}),
+    submit: async () => ({txHash: '4yJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz'}),
   });
 });
 

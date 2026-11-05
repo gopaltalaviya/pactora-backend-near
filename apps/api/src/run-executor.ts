@@ -16,7 +16,7 @@ import type {RunExecutor} from './runs.js';
  */
 export async function makeRunExecutor(opts: {
   baseUrl: string;
-  chainId: number;
+  chainId: string;
   brain?: Brain;
 }): Promise<RunExecutor | null> {
   const brain = opts.brain ?? buildBrain({role: 'orchestrator'});

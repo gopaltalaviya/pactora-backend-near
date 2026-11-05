@@ -8,7 +8,7 @@ import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
 import {streamEvents, type StreamEvent} from '../src/events.js';
 import {listenForEvents} from '../src/live.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * Live events across processes (v3). An SSE stream used to carry only what
@@ -19,8 +19,8 @@ import {addr, signedRegistration} from './helpers/register.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 /** Two replicas on one database, each with its own pool — and a third connection playing the indexer. */
@@ -30,9 +30,10 @@ let baseA: string, baseB: string;
 
 async function replica(db: Db): Promise<{app: FastifyInstance; base: string}> {
   const app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     submit: async () => ({txHash: '0x'}),
   });
@@ -75,7 +76,7 @@ async function seedJob(): Promise<{id: number; publicId: string; workerKey: stri
   const worker = await register(addr('a2'));
   const [row] =
     (await dbA.execute(sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-      VALUES (31337, ${client.agentId}, ${worker.agentId}, 'escrow', 20000, '{}'::jsonb, '0x01')
+      VALUES ('near:sandbox', ${client.agentId}, ${worker.agentId}, 'escrow', 20000, '{}'::jsonb, '0x01')
       RETURNING id, public_id`)) as unknown as {id: number; public_id: string}[];
   return {id: Number(row!.id), publicId: row!.public_id, workerKey: worker.apiKey};
 }
@@ -120,7 +121,7 @@ describe('live events across processes', () => {
       // As the indexer writes it: a separate connection, inside a transaction.
       const [row] = (await indexer.transaction((tx) =>
         tx.execute(sql`INSERT INTO job_events (chain_id, job_id, kind, payload, tx_hash, block_number, log_index)
-          VALUES (31337, ${job.id}, 'job.funded', '{"amount":"20000"}'::jsonb, '0xfeed', 7, 0) RETURNING id`),
+          VALUES ('near:sandbox', ${job.id}, 'job.funded', '{"amount":"20000"}'::jsonb, '0xfeed', 7, 0) RETURNING id`),
       )) as unknown as {id: number}[];
 
       const seen = await stream.until(/event: job\.funded/);
@@ -174,9 +175,9 @@ describe('live events across processes', () => {
   it('delivers a run event the database commits to a stream that is already open', async () => {
     const [a] =
       (await dbA.execute(sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
-        VALUES (31337, '0xo', ${addr('e1')}, 'O', 0) RETURNING id`)) as unknown as {id: number}[];
+        VALUES ('near:sandbox', '0xo', ${addr('e1')}, 'O', 0) RETURNING id`)) as unknown as {id: number}[];
     const [r] =
-      (await dbA.execute(sql`INSERT INTO runs (chain_id, agent_id, goal) VALUES (31337, ${a!.id}, 'g')
+      (await dbA.execute(sql`INSERT INTO runs (chain_id, agent_id, goal) VALUES ('near:sandbox', ${a!.id}, 'g')
         RETURNING id, public_id`)) as unknown as {id: number; public_id: string}[];
 
     const stream = open(`${baseB}/v1/runs/${r!.public_id}/events`);
@@ -206,7 +207,7 @@ describe('the listener', () => {
       await new Promise((r) => setTimeout(r, 1_000));
 
       await indexer.execute(sql`INSERT INTO job_events (chain_id, job_id, kind, payload)
-        VALUES (31337, ${job.id}, 'job.accepted', '{}'::jsonb)`);
+        VALUES ('near:sandbox', ${job.id}, 'job.accepted', '{}'::jsonb)`);
       expect(await stream.until(/event: job\.accepted/)).toMatch(/event: job\.accepted/);
     } finally {
       stream.close();
@@ -255,7 +256,7 @@ describe('the listener', () => {
       await new Promise((r) => setTimeout(r, 3_000)); // the driver's own retry, with backoff
 
       await indexer.execute(sql`INSERT INTO job_events (chain_id, job_id, kind, payload)
-        VALUES (31337, ${job.id}, 'job.accepted', '{}'::jsonb)`);
+        VALUES ('near:sandbox', ${job.id}, 'job.accepted', '{}'::jsonb)`);
       const deadline = Date.now() + 3_000;
       while (heard.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
       expect(heard.map((e) => e.event)).toEqual(['job.accepted']);

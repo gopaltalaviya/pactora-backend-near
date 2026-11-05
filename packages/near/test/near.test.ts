@@ -85,7 +85,10 @@ describe('NEP-297 parsing', () => {
 });
 
 describe('parseOutcome', () => {
-  const receipt = (status: unknown) => ({id: 'r', outcome: {executor_id: 'c', logs: [], status}});
+  const receipt = (status: Record<string, unknown>) => ({
+    id: 'r',
+    outcome: {executor_id: 'c', logs: [] as string[], status},
+  });
 
   it('decodes the JSON return value', () => {
     const raw = {

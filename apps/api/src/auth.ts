@@ -48,7 +48,7 @@ export function keyIdOf(key: string): string | null {
 
 export interface Caller {
   agentId: number;
-  chainId: number;
+  chainId: string;
   scopes: string[];
   /** The public id of the key that authenticated this request (rotate/revoke act on it alone). */
   keyId: string;
@@ -95,11 +95,11 @@ export async function authenticate(db: Db, request: FastifyRequest): Promise<Cal
 }
 
 /** The chain a request operates on: explicit `?chainId=`, else the caller's. */
-export function resolveChainId(request: FastifyRequest, caller: Caller, enabled: number[]): number {
+export function resolveChainId(request: FastifyRequest, caller: Caller, enabled: string[]): string {
   const q = (request.query as {chainId?: string}).chainId;
   if (q === undefined) return caller.chainId;
 
-  const asked = Number(q);
+  const asked = q;
   if (!enabled.includes(asked)) {
     throw new PactoraError(
       ErrorCode.CHAIN_NOT_ENABLED,

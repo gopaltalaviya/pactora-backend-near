@@ -90,7 +90,7 @@ export class RunService {
    * halfway through.
    */
   async start(args: {
-    chainId: number;
+    chainId: string;
     agentId: number;
     apiKey: string;
     goal: string;

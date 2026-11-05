@@ -29,7 +29,7 @@ export interface StatusDeps {
   /** Resolves when the signer answers its /health. Omitted: 'unknown'. */
   signer?: () => Promise<unknown>;
   /** The chain head, per chain. Omitted: 'unknown'. */
-  headBlock?: (chainId: number) => Promise<bigint>;
+  headBlock?: (chainId: string) => Promise<bigint>;
   /** Blocks the indexer may trail the head before it is 'degraded'. Default 150. */
   maxIndexerLagBlocks?: number;
   /**
@@ -45,7 +45,7 @@ export interface StatusDeps {
 }
 
 interface ChainStatus {
-  chainId: number;
+  chainId: string;
   name: string;
   testnet: boolean;
   rpc: ComponentStatus;
@@ -90,7 +90,7 @@ export interface StatusReport {
 export interface GasStatus {
   state: 'ok' | 'low' | 'unknown';
   checkedAt: string | null;
-  wallets: {address: string; role: string; balanceWei: string; low: boolean}[];
+  wallets: {address: string; role: string; balanceYocto: string; low: boolean}[];
 }
 
 /** The `wallets` block of the signer's /health, if it sent one. */
@@ -103,7 +103,7 @@ function gasOf(signerHealth: unknown): GasStatus {
   const wallets = (w.wallets as Record<string, unknown>[]).map((x) => ({
     address: String(x['address']),
     role: String(x['role']),
-    balanceWei: String(x['balanceWei']),
+    balanceYocto: String(x['balanceYocto']),
     low: x['low'] === true,
   }));
   return {state: wallets.some((x) => x.low) ? 'low' : 'ok', checkedAt: w.checkedAt, wallets};
@@ -128,9 +128,16 @@ const RANK: Record<ComponentStatus, number> = {up: 0, unknown: 1, degraded: 2, d
 const worst = (all: ComponentStatus[]): ComponentStatus =>
   all.reduce<ComponentStatus>((w, s) => (RANK[s] > RANK[w] ? s : w), 'up');
 
+/**
+ * Blocks an indexer may trail the head by and still be caught up. Both read
+ * FINAL blocks (`headBlock` is the final height), so this is only the
+ * blocks finalised between the two reads — about one a second on NEAR.
+ */
+const FINAL_SLACK = 2;
+
 export function registerStatusRoutes(
   app: FastifyInstance,
-  deps: {db: Db; chains: Record<number, ChainConfig>; build?: BuildInfo; status?: StatusDeps},
+  deps: {db: Db; chains: Record<string, ChainConfig>; build?: BuildInfo; status?: StatusDeps},
 ): void {
   const opts = deps.status ?? {};
   const cacheMs = opts.cacheMs ?? 5_000;
@@ -155,11 +162,11 @@ export function registerStatusRoutes(
   };
 
   async function compute(): Promise<StatusReport> {
-    const chainIds = Object.keys(deps.chains).map(Number);
+    const chainIds = Object.keys(deps.chains);
 
     const [cursors, signer, heads, model] = await Promise.all([
       probe('database', () =>
-        deps.db.select().from(indexerCursor).where(eq(indexerCursor.contract, 'TaskEscrow')),
+        deps.db.select().from(indexerCursor).where(eq(indexerCursor.contract, 'Pactora')),
       ),
       opts.signer ? probe('signer', opts.signer) : Promise.resolve(null),
       Promise.all(
@@ -177,7 +184,7 @@ export function registerStatusRoutes(
       const headBlock = head?.ok ? Number(head.value) : null;
       const rpc: ComponentStatus = head === null ? 'unknown' : head.ok ? 'up' : 'down';
 
-      const cursor = cursors.ok ? cursors.value.find((c) => Number(c.chainId) === chainId) : undefined;
+      const cursor = cursors.ok ? cursors.value.find((c) => c.chainId === chainId) : undefined;
       const indexedBlock = cursor ? Number(cursor.lastBlock) : null;
       const lagBlocks =
         indexedBlock !== null && headBlock !== null ? Math.max(0, headBlock - indexedBlock) : null;
@@ -188,13 +195,13 @@ export function registerStatusRoutes(
       // caught-up indexer on a quiet chain has nothing to write, so silence
       // alone is not a fault.
       const stalled =
-        lagBlocks !== null && lagBlocks > chain.confirmations && silentFor !== null && silentFor > maxSilence;
+        lagBlocks !== null && lagBlocks > FINAL_SLACK && silentFor !== null && silentFor > maxSilence;
       const indexer: ComponentStatus =
         lagBlocks === null
           ? 'unknown'
           : stalled
             ? 'down'
-            : lagBlocks > maxLag + chain.confirmations
+            : lagBlocks > maxLag + FINAL_SLACK
               ? 'degraded'
               : 'up';
 

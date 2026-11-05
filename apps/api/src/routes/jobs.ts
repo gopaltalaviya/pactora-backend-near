@@ -1,6 +1,6 @@
 import type {FastifyInstance, FastifyRequest} from 'fastify';
 import {and, asc, desc, eq, exists, gt, inArray, isNotNull, or} from 'drizzle-orm';
-import {keccak256, toHex} from 'viem';
+import {sha256Hex} from '@pactora/near';
 import {z} from 'zod';
 import {agents, agentStats, jobEvents, jobs, type Db} from '@pactora/db';
 import {
@@ -30,13 +30,13 @@ export const JobListQuery = z.object({
 
 export interface JobRouteDeps {
   db: Db;
-  chains: Record<number, ChainConfig>;
-  defaultChainId: number;
+  chains: Record<string, ChainConfig>;
+  defaultChainId: string;
   bus: EventBus;
   /** Submits a policy-checked transaction. Injected so tests need no signer. */
   submit: (args: {
     agentId: number;
-    chainId: number;
+    chainId: string;
     kind: 'createJob' | 'directPay' | 'accept' | 'submitResult' | 'approve' | 'dispute' | 'cancel';
     job?: {id: number; chainJobId: string | null};
     spend: bigint;
@@ -46,12 +46,12 @@ export interface JobRouteDeps {
     traceId?: string;
   }) => Promise<{txHash: string; chainJobId?: string}>;
   /** v3: a job's dispute bond, read from the chain. Omitted or null: spend 0. */
-  readDisputeBond?: (args: {chainId: number; chainJobId: bigint}) => Promise<bigint | null>;
+  readDisputeBond?: (args: {chainId: string; chainJobId: bigint}) => Promise<bigint | null>;
 }
 
 export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps): Promise<void> {
   const {db, chains, bus, submit, readDisputeBond} = deps;
-  const enabled = Object.keys(chains).map(Number);
+  const enabled = Object.keys(chains);
 
   /**
    * Hire an agent.
@@ -432,7 +432,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       kind === 'submitResult'
         ? ((request.body as {output: Record<string, unknown>}).output ?? {})
         : undefined;
-    const resultHash = delivered ? await sha3(canonicalize(delivered)) : undefined;
+    const resultHash = delivered ? await sha256Of(canonicalize(delivered)) : undefined;
 
     // A dispute commits to its REASON the same way: the chain gets the hash,
     // the job's record gets the words, and anyone can check one against the
@@ -441,7 +441,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     // reason itself was stored nowhere. Required, like a decline's.
     const disputeReason = kind === 'dispute' ? DisputeBody.parse(request.body ?? {}).reason : undefined;
     const reasonHash =
-      disputeReason !== undefined ? await sha3(canonicalize({reason: disputeReason})) : undefined;
+      disputeReason !== undefined ? await sha256Of(canonicalize({reason: disputeReason})) : undefined;
 
     // A direct-pay job is already finished on chain.
     //
@@ -541,11 +541,11 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
  *
  * Exported because an x402 payment IS a hire — a fast-path one, bound to a
  * URL — and a second copy of this logic would be a second place for the
- * rules about idempotency, ERC-8004 ids and the fast path to drift apart.
+ * rules about idempotency, on-chain agent ids and the fast path to drift apart.
  */
 export async function hire(
   deps: Pick<JobRouteDeps, 'db' | 'bus' | 'submit'>,
-  ctx: {caller: Caller; chainId: number; chain: ChainConfig; idempotencyKey: string; traceId: string},
+  ctx: {caller: Caller; chainId: string; chain: ChainConfig; idempotencyKey: string; traceId: string},
   body: z.infer<typeof HireRequest>,
 ): Promise<ReturnType<typeof receipt>> {
   const {db, bus, submit} = deps;
@@ -566,14 +566,14 @@ export async function hire(
 
   const clientRow = await db.query.agents.findFirst({where: eq(agents.id, caller.agentId)});
 
-  // The contract addresses agents by their ERC-8004 id; the database uses
+  // The contract addresses agents by its own agent id; the database uses
   // its own serial. Sending one where the other is expected targets a
   // different agent entirely — the transaction still succeeds, and pays
   // the wrong wallet. Refuse until both sides are known.
   if (!clientRow?.chainAgentId || !worker.chainAgentId) {
     throw new PactoraError(
       ErrorCode.AGENT_NOT_HIREABLE,
-      'an agent is not yet registered on-chain (no ERC-8004 id) — retry once the indexer has seen it',
+      'an agent has no on-chain agent id — register it on chain (register_agent) and link it',
       2,
     );
   }
@@ -609,7 +609,7 @@ export async function hire(
   // parameter was configured and documented and read by nothing, so every
   // cheap hire of an agent with no history paid up front. An explicit
   // `path: 'direct'` is still the client's own call to make.
-  const fastPathMax = chain.params.fastPathMax as bigint;
+  const fastPathMax = chain.params.fastPathMax;
   const fastPathMinScore = Number(chain.params.fastPathMinScore ?? 0);
   const workerStats = await db.query.agentStats.findFirst({where: eq(agentStats.agentId, worker.id)});
   const earnedFastPath = (workerStats?.score ?? 0) >= fastPathMinScore;
@@ -624,7 +624,7 @@ export async function hire(
   // its on-chain event by this hash — would match an unrelated earlier
   // payment. Scoping the commitment to the job makes it identify THIS job,
   // which is what it was always meant to do. A client can still verify it:
-  // keccak256(canonicalJson + ':' + jobId), both of which are in the receipt.
+  // sha256(canonicalJson + ':' + jobId), both of which are in the receipt.
   //
   // A retried hire — same client, same Idempotency-Key — is the SAME job.
   // It used to insert a new row every time: the signer rightly returned the
@@ -666,7 +666,7 @@ export async function hire(
       })
       .returning();
     // The PUBLIC id — the one in the receipt — so the client can recompute it.
-    const hashed = await sha3(`${canonicalize(body.spec)}:${inserted!.publicId}`);
+    const hashed = await sha256Of(`${canonicalize(body.spec)}:${inserted!.publicId}`);
     const [row] = await db.update(jobs).set({specHash: hashed}).where(eq(jobs.id, inserted!.id)).returning();
     return row!;
   }
@@ -692,7 +692,7 @@ export async function hire(
     }),
     traceId: ctx.traceId,
     payload: {
-      // ERC-8004 ids, never the database's.
+      // Contract agent ids, never the database's.
       clientChainAgentId: clientRow.chainAgentId,
       workerChainAgentId: worker.chainAgentId,
       amount: amount.toString(),
@@ -774,9 +774,7 @@ export function signerKey(parts: {
   jobId: string;
   clientKey: string;
 }): string {
-  return keccak256(
-    toHex(`agentx:sign:v1:${parts.agentId}:${parts.action}:${parts.jobId}:${parts.clientKey}`),
-  );
+  return sha256Hex(`pactora:sign:v1:${parts.agentId}:${parts.action}:${parts.jobId}:${parts.clientKey}`);
 }
 
 async function findHire(db: Db, clientAgentId: number, idempotencyKey: string) {
@@ -844,7 +842,7 @@ function declinedOf(
 /**
  * The client's dispute, as the arbiter needs it: the words, and the hash the
  * chain committed to, which anyone can recompute as
- * keccak256(canonicalize({reason})). Null for a dispute made before the
+ * sha256(canonicalize({reason})). Null for a dispute made before the
  * reason was recorded, or none at all.
  */
 function disputeOf(
@@ -860,7 +858,7 @@ async function recordEvent(
   db: Db,
   bus: EventBus,
   jobId: number,
-  chainId: number,
+  chainId: string,
   kind: string,
   payload: Record<string, unknown>,
 ): Promise<void> {
@@ -879,9 +877,9 @@ export function isPublicId(id: string): boolean {
   return PUBLIC_ID.test(id);
 }
 
-async function sha3(input: string): Promise<string> {
-  const {keccak256, toHex} = await import('viem');
-  return keccak256(toHex(input));
+/** sha256, 64 lowercase hex: the hash form the contract accepts (`check_hash`). */
+async function sha256Of(input: string): Promise<string> {
+  return Promise.resolve(sha256Hex(input));
 }
 
 export {desc, agentStats, BaseUnits, z};

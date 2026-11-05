@@ -7,7 +7,7 @@ import {loadConfig} from '@pactora/config';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {createMetrics} from '@pactora/service';
 import {buildApp} from '../src/app.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * The operational surface: `/v1/status` for a public status page, build
@@ -17,8 +17,8 @@ import {addr, signedRegistration} from './helpers/register.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 const BUILD = {service: 'api', version: '0.0.1', commit: 'a1b2c3d4e5f6', builtAt: '2026-09-30T12:00:00Z'};
@@ -38,11 +38,11 @@ beforeEach(async () => {
 
 const cursorAt = (block: number, secondsAgo = 1) =>
   db.execute(sql`INSERT INTO indexer_cursor (chain_id, contract, last_block, last_block_hash, updated_at)
-    VALUES (31337, 'TaskEscrow', ${block}, '0xabc', now() - make_interval(secs => ${secondsAgo}))`);
+    VALUES ('near:sandbox', 'Pactora', ${block}, '0xabc', now() - make_interval(secs => ${secondsAgo}))`);
 
 type StatusDeps = {
   signer?: () => Promise<unknown>;
-  headBlock?: (chainId: number) => Promise<bigint>;
+  headBlock?: (chainId: string) => Promise<bigint>;
   maxIndexerLagBlocks?: number;
   cacheMs?: number;
   timeoutMs?: number;
@@ -50,9 +50,10 @@ type StatusDeps = {
 
 const build = (status: StatusDeps = {}, over: Record<string, unknown> = {}) =>
   buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     submit: async () => ({txHash: '0x'}),
     build: BUILD,
     status: {
@@ -82,8 +83,8 @@ describe('GET /v1/status', () => {
     });
     expect(body.chains).toEqual([
       {
-        chainId: 31337,
-        name: config.chains[31337]!.name,
+        chainId: 'near:sandbox',
+        name: config.chains['near:sandbox']!.name,
         testnet: true,
         rpc: 'up',
         headBlock: 1_010,
@@ -171,9 +172,10 @@ describe('GET /v1/status', () => {
   it('is down when the database is unreachable', async () => {
     const dead = createDb('postgres://pactora:pactora@127.0.0.1:1/pactora_near', {max: 1});
     const app = await buildApp({
+      ...chainDeps(config),
       db: dead,
       chains: config.chains,
-      defaultChainId: 31337,
+      defaultChainId: 'near:sandbox',
       submit: async () => ({txHash: '0x'}),
       build: BUILD,
       status: {signer: async () => undefined, headBlock: async () => 1n, cacheMs: 0, timeoutMs: 1_000},
@@ -270,11 +272,11 @@ describe('/metrics in production', () => {
 /**
  * docs/15-api.md is hand-written. This keeps it honest: every route the API
  * serves has a row in its endpoint index, and every row names a real route.
- * The doc lives in the agentx-docs repo: PACTORA_DOCS_DIR, else the checkout
+ * The doc lives in the pactora-docs-near repo: PACTORA_DOCS_DIR, else the checkout
  * beside this one (CI checks it out there). A missing file fails the test.
  */
 const DOCS_DIR =
-  process.env.PACTORA_DOCS_DIR ?? fileURLToPath(new URL('../../../../agentx-docs', import.meta.url));
+  process.env.PACTORA_DOCS_DIR ?? fileURLToPath(new URL('../../../../pactora-docs-near', import.meta.url));
 describe('gas (v3)', () => {
   /**
    * docs/17: "wallet balance monitoring: none; checked by hand before demos".
@@ -292,7 +294,7 @@ describe('gas (v3)', () => {
         {
           address: addr('a1'),
           role: 'keeper',
-          balanceWei: anyLow ? '1000' : '900000000000000000',
+          balanceYocto: anyLow ? '1000' : '900000000000000000',
           low: anyLow,
         },
       ],
@@ -378,7 +380,7 @@ describe('GET /v1/status — the AI model', () => {
   }
   const run = (agentId: number, state: 'done' | 'failed', minutesAgo: number, error: string | null = null) =>
     db.execute(sql`INSERT INTO runs (chain_id, agent_id, goal, state, error, finished_at, started_at)
-      VALUES (31337, ${agentId}, 'g', ${state}, ${error},
+      VALUES ('near:sandbox', ${agentId}, 'g', ${state}, ${error},
               now() - make_interval(mins => ${minutesAgo}), now() - make_interval(mins => ${minutesAgo + 1}))`);
 
   it('is unknown before any run', async () => {

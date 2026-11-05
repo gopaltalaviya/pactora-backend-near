@@ -7,6 +7,7 @@
  */
 import {createHash} from 'node:crypto';
 import {
+  Account,
   JsonRpcProvider,
   KeyPair,
   KeyPairSigner,
@@ -17,7 +18,7 @@ import {
   baseEncode,
   createTransaction,
 } from 'near-api-js';
-import {verifyMessage} from 'near-api-js/nep413';
+import {signMessage, verifyMessage} from 'near-api-js/nep413';
 
 export {KeyPair, PublicKey};
 
@@ -304,6 +305,29 @@ export async function verifyNep413(
   } catch {
     return false;
   }
+}
+
+/**
+ * Sign a NEP-413 message as `accountId` with `keyPair` — what a wallet's
+ * `signMessage` does. For scripts and tests; a person signs in their wallet.
+ */
+export async function signNep413(args: {
+  accountId: string;
+  keyPair: KeyPair;
+  message: string;
+  recipient: string;
+  nonce: Uint8Array;
+}): Promise<{accountId: string; publicKey: string; signature: string}> {
+  const signer = new Account(args.accountId, undefined as never, new KeyPairSigner(args.keyPair));
+  const s = await signMessage({
+    signerAccount: signer,
+    payload: {message: args.message, recipient: args.recipient, nonce: args.nonce},
+  });
+  return {
+    accountId: args.accountId,
+    publicKey: args.keyPair.getPublicKey().toString(),
+    signature: Buffer.from(s.signature).toString('base64'),
+  };
 }
 
 // ── the production client ────────────────────────────────────────────────

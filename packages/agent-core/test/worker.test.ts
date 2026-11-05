@@ -95,7 +95,7 @@ function fakeClient(offers: JobSummary[], calls: Calls, over: ClientFaults = {})
         throw over.acceptThrowsOnce;
       }
       calls.accepted.push(jobId);
-      return {jobId, chainId: 10143, state: 'accepted', txHash: '0x', explorerUrl: 'u'};
+      return {jobId, chainId: 'near:testnet', state: 'accepted', txHash: '0x', explorerUrl: 'u'};
     },
     submitResult: async (jobId: string, result: {output: Record<string, unknown>}) => {
       calls.submitAttempts++;
@@ -104,7 +104,7 @@ function fakeClient(offers: JobSummary[], calls: Calls, over: ClientFaults = {})
         throw over.submitThrowsOnce;
       }
       calls.submitted.push({jobId, output: result.output});
-      return {jobId, chainId: 10143, state: 'submitted', txHash: '0x', explorerUrl: 'u'};
+      return {jobId, chainId: 'near:testnet', state: 'submitted', txHash: '0x', explorerUrl: 'u'};
     },
   } as unknown as PactoraClient;
 }
@@ -113,7 +113,7 @@ function offer(over: Partial<JobSpec> = {}, jobId = '1'): JobSummary {
   return {
     jobId,
     chainJobId: jobId,
-    chainId: 10143,
+    chainId: 'near:testnet',
     state: 'created',
     path: 'escrow',
     amount: '20000',
@@ -124,7 +124,7 @@ function offer(over: Partial<JobSpec> = {}, jobId = '1'): JobSummary {
       deadlineSeconds: 120,
       ...over,
     },
-    specHash: '0x',
+    specHash: '',
     role: 'worker',
     hasResult: false,
     clientAgentId: '1',

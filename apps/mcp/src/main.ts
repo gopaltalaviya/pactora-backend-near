@@ -42,7 +42,7 @@ try {
   const server = await buildServer({
     baseUrl,
     apiKey,
-    ...(chainId ? {chainId: Number(chainId)} : {}),
+    ...(chainId ? {chainId} : {}),
   });
 
   await server.connect(new StdioServerTransport());

@@ -1,17 +1,18 @@
 import {sql} from 'drizzle-orm';
-import {createPublicClient, http} from 'viem';
+import {nearClient} from '@pactora/near';
 import {z} from 'zod';
 import {loadConfig} from '@pactora/config';
 import {closeDb, createDb} from '@pactora/db';
 import {buildInfo, createMetrics, env, installShutdown, loadEnv, serviceLogger} from '@pactora/service';
 import {buildApp} from './app.js';
-import {makeSignerSubmit} from './submit.js';
+import {makeSignerSubmit, makeSignerWalletKeys} from './submit.js';
 import {
   makeBudgetReader,
   makeDisputeBondReader,
   makeIdentityReader,
   makePaymentReader,
 } from './chain-reads.js';
+import {DEFAULT_SIGN_RECIPIENT, makeOwnerVerifier} from './challenges.js';
 import {makeRunExecutor} from './run-executor.js';
 import {coalesce} from './coalesce.js';
 
@@ -23,7 +24,8 @@ const Env = z
     HOST: z.string().default('0.0.0.0'),
     SIGNER_URL: env.httpUrl().default('http://127.0.0.1:7070'),
     SIGNER_TOKEN: z.string().min(32).optional(),
-    SIGNER_TIMEOUT_MS: env.positiveInt(30_000),
+    /** A sign waits for finality on NEAR (a few seconds), so not short. */
+    SIGNER_TIMEOUT_MS: env.positiveInt(60_000),
     PACTORA_SELF_URL: env.httpUrl().optional(),
     CORS_ORIGINS: env.csv(),
     TRUST_PROXY: env.trustProxy(),
@@ -41,6 +43,8 @@ const Env = z
     DB_POOL_MAX: env.positiveInt(5),
     /** Blocks the indexer may trail the chain head before /v1/status says 'degraded'. */
     STATUS_MAX_INDEXER_LAG_BLOCKS: env.positiveInt(150),
+    /** NEP-413 `recipient` the owner's wallet signs for (docs/NEAR-PORT.md §5). */
+    PACTORA_SIGN_RECIPIENT: z.string().min(1).default(DEFAULT_SIGN_RECIPIENT),
   })
   // In production the browser origins must be named: `*` is fine for a local
   // demo and wrong for a deployment with a real front end.
@@ -57,13 +61,20 @@ const db = createDb(cfg.DATABASE_URL, {max: cfg.DB_POOL_MAX});
 const metrics = createMetrics('api');
 const build = buildInfo({service: 'api', packageJsonUrl: new URL('../package.json', import.meta.url)});
 
+// Every chain's RPC must be the network the config names — the NEAR
+// counterpart of checking eth_chainId. A testnet API pointed at a mainnet
+// RPC (or a sandbox from another run) refuses to start rather than mislead.
+for (const c of Object.values(config.chains)) {
+  const served = await nearClient(c.rpcUrl, {timeoutMs: 10_000}).networkId();
+  if (served !== c.nearNetworkId) {
+    throw new Error(`${c.chainId}: RPC ${c.rpcUrl} serves "${served}", expected "${c.nearNetworkId}"`);
+  }
+}
+
 // One head reader per chain for /v1/status: a short timeout and no retries —
-// a status page must answer "rpc: down" promptly, not wait out viem's retries.
-const heads = new Map(
-  Object.values(config.chains).map((c) => [
-    c.chainId,
-    createPublicClient({transport: http(c.rpcUrl, {timeout: 2_000, retryCount: 0})}),
-  ]),
+// a status page must answer "rpc: down" promptly, not wait out retries.
+const heads = new Map<string, ReturnType<typeof nearClient>>(
+  Object.values(config.chains).map((c) => [c.chainId, nearClient(c.rpcUrl, {timeoutMs: 2_000, retries: 0})]),
 );
 // Coalesced: one probe in flight, its answer reused for 5 s. Uncoalesced, a
 // stopped signer's DNS lookups filled libuv's thread pool and starved the RPC
@@ -95,6 +106,14 @@ const app = await buildApp({
   readIdentity: makeIdentityReader(config),
   readPayment: makePaymentReader(config),
   readDisputeBond: makeDisputeBondReader(config),
+  verifyOwner: makeOwnerVerifier(config, cfg.PACTORA_SIGN_RECIPIENT),
+  signRecipient: cfg.PACTORA_SIGN_RECIPIENT,
+  walletKeys: makeSignerWalletKeys({
+    signerUrl: cfg.SIGNER_URL,
+    ...(cfg.SIGNER_TOKEN ? {signerToken: cfg.SIGNER_TOKEN} : {}),
+    timeoutMs: cfg.SIGNER_TIMEOUT_MS,
+    config,
+  }),
   corsOrigins: cfg.CORS_ORIGINS,
   trustProxy: cfg.TRUST_PROXY,
   rateLimitPerMinute: cfg.RATE_LIMIT_PER_MINUTE,
@@ -116,7 +135,7 @@ const app = await buildApp({
   },
   status: {
     signer: signerHealth,
-    headBlock: (chainId) => heads.get(chainId)!.getBlockNumber({cacheTime: 0}),
+    headBlock: async (chainId) => BigInt((await heads.get(chainId)!.finalBlock()).height),
     maxIndexerLagBlocks: cfg.STATUS_MAX_INDEXER_LAG_BLOCKS,
   },
   build,

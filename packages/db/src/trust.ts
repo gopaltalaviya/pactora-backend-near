@@ -111,7 +111,7 @@ export function verdictOf(m: TrustMetrics): {verdict: Verdict; reasons: string[]
  */
 export async function readTrust(
   db: Db,
-  args: {chainId: number; agentId: number; floor: number; windowBlocks?: number},
+  args: {chainId: string; agentId: number; floor: number; windowBlocks?: number},
 ): Promise<TrustReading> {
   const {chainId, agentId, floor} = args;
   const window = args.windowBlocks ?? DEFAULT_WINDOW_BLOCKS;

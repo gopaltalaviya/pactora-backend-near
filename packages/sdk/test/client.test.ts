@@ -44,7 +44,7 @@ function client(impl: typeof fetch, over: {maxRetries?: number} = {}) {
   return new PactoraClient({
     baseUrl: 'http://api.test',
     apiKey: 'ax_test',
-    chainId: 10143,
+    chainId: 'near:testnet',
     fetchImpl: impl,
     ...(over.maxRetries !== undefined ? {maxRetries: over.maxRetries} : {}),
   });
@@ -398,7 +398,7 @@ describe('query building', () => {
       'minScore=70',
       'rank=cheapest',
       'limit=5',
-      'chainId=10143',
+      'chainId=near%3Atestnet',
     ]) {
       expect(url).toContain(part);
     }
@@ -468,7 +468,7 @@ describe('waiting for work, not for a state', () => {
    */
   const job = (over: Record<string, unknown>) => ({
     jobId: '1',
-    chainId: 10143,
+    chainId: 'near:testnet',
     state: 'settled',
     path: 'direct',
     result: null,
@@ -521,13 +521,13 @@ describe('waiting for work, not for a state', () => {
 describe('payX402 with the escrow-backed scheme', () => {
   const RESOURCE = 'http://worker.test/market-research';
   const accepts = [
-    {scheme: 'agentx-directpay', maxAmountRequired: '20000', resource: RESOURCE, extra: {agentId: 2}},
-    {scheme: 'agentx-escrow', maxAmountRequired: '20000', resource: RESOURCE, extra: {agentId: 2}},
+    {scheme: 'pactora-directpay', maxAmountRequired: '20000', resource: RESOURCE, extra: {agentId: 2}},
+    {scheme: 'pactora-escrow', maxAmountRequired: '20000', resource: RESOURCE, extra: {agentId: 2}},
   ];
   const settled = (scheme: string) => ({
     success: true,
     transaction: '0x' + 'ab'.repeat(32),
-    network: 'eip155:10143',
+    network: 'near:testnet',
     payer: 7,
     jobId: '5f0c1a9e-2b7d-4c3e-9a61-0d8e4f7b2c11',
     paymentHeader: Buffer.from(JSON.stringify({scheme})).toString('base64'),
@@ -545,17 +545,17 @@ describe('payX402 with the escrow-backed scheme', () => {
     const {settlement} = await client(f.impl).payX402(RESOURCE, {
       maxAmount: '20000',
       body: {input: {}},
-      scheme: 'agentx-escrow',
+      scheme: 'pactora-escrow',
     });
     expect(settlement?.paymentHeader).toBe(
-      Buffer.from(JSON.stringify({scheme: 'agentx-escrow'})).toString('base64'),
+      Buffer.from(JSON.stringify({scheme: 'pactora-escrow'})).toString('base64'),
     );
   });
 
   it('cancels the job for its refund when the paid worker could not deliver', async () => {
     const f = fakeFetch((n, url) => {
       if (url === RESOURCE && n === 1) return {status: 402, body: {x402Version: 1, error: 'pay', accepts}};
-      if (url.endsWith('/v1/x402/settle')) return {status: 200, body: settled('agentx-escrow')};
+      if (url.endsWith('/v1/x402/settle')) return {status: 200, body: settled('pactora-escrow')};
       if (url === RESOURCE)
         return {status: 502, body: {error: 'paid, but the work failed', refund: 'cancel'}};
       if (url.endsWith('/cancel'))
@@ -565,7 +565,7 @@ describe('payX402 with the escrow-backed scheme', () => {
     const out = await client(f.impl).payX402(RESOURCE, {
       maxAmount: '20000',
       body: {input: {}},
-      scheme: 'agentx-escrow',
+      scheme: 'pactora-escrow',
     });
     expect(out.response.status).toBe(502);
     expect(out.refunded).toBe(true);
@@ -582,7 +582,7 @@ describe('payX402 with the escrow-backed scheme', () => {
     let cancels = 0;
     const f = fakeFetch((n, url) => {
       if (url === RESOURCE && n === 1) return {status: 402, body: {x402Version: 1, error: 'pay', accepts}};
-      if (url.endsWith('/v1/x402/settle')) return {status: 200, body: settled('agentx-escrow')};
+      if (url.endsWith('/v1/x402/settle')) return {status: 200, body: settled('pactora-escrow')};
       if (url === RESOURCE)
         return {status: 502, body: {error: 'paid, but the work failed', refund: 'cancel'}};
       if (url.endsWith('/cancel')) {
@@ -599,7 +599,7 @@ describe('payX402 with the escrow-backed scheme', () => {
     const out = await client(f.impl).payX402(RESOURCE, {
       maxAmount: '20000',
       body: {input: {}},
-      scheme: 'agentx-escrow',
+      scheme: 'pactora-escrow',
     });
     expect(out.refunded).toBe(true);
     expect(cancels).toBe(3);
@@ -608,7 +608,7 @@ describe('payX402 with the escrow-backed scheme', () => {
   it('keeps the response and says the refund is pending when the cancel cannot land', async () => {
     const f = fakeFetch((n, url) => {
       if (url === RESOURCE && n === 1) return {status: 402, body: {x402Version: 1, error: 'pay', accepts}};
-      if (url.endsWith('/v1/x402/settle')) return {status: 200, body: settled('agentx-escrow')};
+      if (url.endsWith('/v1/x402/settle')) return {status: 200, body: settled('pactora-escrow')};
       if (url === RESOURCE)
         return {status: 502, body: {error: 'paid, but the work failed', refund: 'cancel'}};
       if (url.endsWith('/cancel')) return {status: 403, body: {code: 'FORBIDDEN', detail: 'no'}};
@@ -617,7 +617,7 @@ describe('payX402 with the escrow-backed scheme', () => {
     const out = await client(f.impl).payX402(RESOURCE, {
       maxAmount: '20000',
       body: {input: {}},
-      scheme: 'agentx-escrow',
+      scheme: 'pactora-escrow',
     });
     expect(out.response.status).toBe(502);
     expect(out.refunded).toBe(false);

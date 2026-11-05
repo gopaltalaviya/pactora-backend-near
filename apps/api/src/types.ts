@@ -1,6 +1,6 @@
 export interface AgentRow {
   id: number;
-  chainId: number;
+  chainId: string;
   chainAgentId: string | null;
   name: string;
   description: string | null;

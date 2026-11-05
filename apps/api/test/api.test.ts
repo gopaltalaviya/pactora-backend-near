@@ -3,9 +3,10 @@ import {fileURLToPath} from 'node:url';
 import type {FastifyInstance} from 'fastify';
 import {loadConfig} from '@pactora/config';
 import {sql} from 'drizzle-orm';
+import {sha256Hex} from '@pactora/near';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * API behaviour, exercised through real HTTP against a real database.
@@ -28,16 +29,17 @@ let disputeBond: bigint | null = null;
 let failSubmit: Error | null = null;
 
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     submit: async (args) => {
       if (failSubmit) {
@@ -51,7 +53,7 @@ beforeAll(async () => {
         idempotencyKey: args.idempotencyKey,
         ...(args.payload !== undefined && {payload: args.payload}),
       });
-      return {txHash: `0x${'ab'.repeat(32)}`, chainJobId: String(submitted.length)};
+      return {txHash: '4yJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz', chainJobId: String(submitted.length)};
     },
     readDisputeBond: async () => disputeBond,
   });
@@ -86,11 +88,15 @@ async function register(over: Record<string, unknown> = {}) {
   // Stand in for the indexer observing ERC-8004 `Registered`. Without a
   // chain_agent_id the API refuses to hire, because sending a database serial
   // where the contract expects an ERC-8004 id pays a different agent.
-  await db.execute(sql`UPDATE agents SET chain_agent_id = ${body.agentId + 1000} WHERE id = ${body.agentId}`);
   return body;
 }
 
 /** Register an agent that the indexer has NOT yet seen on-chain. */
+/**
+ * An agent row with no on-chain id. Registration now requires one, so this is
+ * a row written some other way (by hand, or before the rule) — the hire path
+ * and discovery must still refuse it rather than address agent 0.
+ */
 async function registerUnconfirmed(over: Record<string, unknown> = {}) {
   const res = await signedRegistration(app, {
     name: 'Unconfirmed',
@@ -100,7 +106,9 @@ async function registerUnconfirmed(over: Record<string, unknown> = {}) {
     ownerAddress: addr('88'),
     ...over,
   });
-  return res.json() as {agentId: number; apiKey: string};
+  const agent = res.json() as {agentId: number; apiKey: string};
+  await db.execute(sql`UPDATE agents SET chain_agent_id = NULL WHERE id = ${agent.agentId}`);
+  return agent;
 }
 
 describe('agent registration', () => {
@@ -167,7 +175,7 @@ describe('discovery', () => {
   it('lists only agents whose on-chain identity is confirmed', async () => {
     const confirmed = await register({name: 'Real', walletAddress: addr('d1')});
     await registerUnconfirmed({name: 'Spam'});
-    const body = (await app.inject({method: 'GET', url: '/v1/agents?chainId=31337'})).json();
+    const body = (await app.inject({method: 'GET', url: '/v1/agents?chainId=near:sandbox'})).json();
     const names = (body.agents as {name: string}[]).map((a) => a.name);
     expect(names).toContain('Real');
     expect(names).not.toContain('Spam');
@@ -183,14 +191,14 @@ describe('discovery', () => {
 
   it('states the chain on every response', async () => {
     const res = await app.inject({method: 'GET', url: '/v1/agents'});
-    expect(res.json().chainId).toBe(31337);
-    expect(res.json().network).toBe('Anvil Local');
+    expect(res.json().chainId).toBe('near:sandbox');
+    expect(res.json().network).toBe('NEAR Sandbox (local)');
   });
 
   it('formats prices rather than making the client do decimals', async () => {
     await register();
     const {agents} = await app.inject({method: 'GET', url: '/v1/agents'}).then((r) => r.json());
-    expect(agents[0].priceDisplay).toBe('0.02 MockUSDC');
+    expect(agents[0].priceDisplay).toBe('0.02 mUSDC');
   });
 
   it('filters by capability and by maxPrice', async () => {
@@ -294,7 +302,7 @@ describe('hiring', () => {
     const body = res.json();
     // fastPathMax is 0.03; the price is 0.02.
     expect(body.path).toBe('direct');
-    expect(body.amountDisplay).toBe('0.02 MockUSDC');
+    expect(body.amountDisplay).toBe('0.02 mUSDC');
     expect(body.explorerUrl).toBeTruthy();
     expect(submitted[0]!.kind).toBe('directPay');
   });
@@ -383,7 +391,7 @@ describe('hiring', () => {
     const res = await hire(client.apiKey, worker.agentId, {maxPrice: '1'});
     expect(res.statusCode).toBe(409);
     expect(res.json().code).toBe('PRICE_ABOVE_MAX');
-    expect(res.json().detail).toContain('0.02 MockUSDC');
+    expect(res.json().detail).toContain('0.02 mUSDC');
   });
 
   it('refuses to let an agent hire itself', async () => {
@@ -411,7 +419,7 @@ describe('hiring', () => {
     const res = await hire(client.apiKey, ghost.agentId);
     expect(res.statusCode).toBe(409);
     expect(res.json().code).toBe('AGENT_NOT_HIREABLE');
-    expect(res.json().detail).toContain('ERC-8004');
+    expect(res.json().detail).toContain('on-chain agent id');
   });
 
   it('rejects an unknown API key', async () => {
@@ -433,14 +441,14 @@ describe('GET /v1/agents/:id/trust', () => {
    */
   async function paid(workerId: number, clientId: number, block: number) {
     await db.execute(sql`INSERT INTO payments (chain_id, from_agent_id, to_agent_id, amount, tx_hash, block_number)
-        VALUES (31337, ${clientId}, ${workerId}, 50000, ${'0x' + String(block).padStart(64, '0')}, ${block})`);
+        VALUES ('near:sandbox', ${clientId}, ${workerId}, 50000, ${'0x' + String(block).padStart(64, '0')}, ${block})`);
   }
 
   it('answers new for an agent with no record', async () => {
     const w = await register({name: 'W', walletAddress: addr('b1')});
     const res = await app.inject({method: 'GET', url: `/v1/agents/${w.agentId}/trust`});
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({agentId: String(w.agentId), chainId: 31337, verdict: 'new'});
+    expect(res.json()).toMatchObject({agentId: String(w.agentId), chainId: 'near:sandbox', verdict: 'new'});
     expect(res.json().reasons.length).toBeGreaterThan(0);
   });
 
@@ -454,8 +462,8 @@ describe('GET /v1/agents/:id/trust', () => {
         walletAddress: wallet,
         ownerAddress: addr(`funded-owner-${i}`),
       });
-      await db.execute(sql`INSERT INTO token_transfers (chain_id, block_number, tx_hash, log_index, from_address, to_address, amount)
-          VALUES (31337, ${100 + i}, ${'0x' + String(i + 1).padStart(64, 'a')}, 0, ${workerOwner}, ${wallet}, 1000000)`);
+      await db.execute(sql`INSERT INTO token_transfers (chain_id, block_number, tx_hash, receipt_id, log_index, from_address, to_address, amount)
+          VALUES ('near:sandbox', ${100 + i}, ${'tx' + String(i + 1)}, ${'receipt' + String(i + 1)}, 0, ${workerOwner}, ${wallet}, 1000000)`);
       await paid(w.agentId, c.agentId, 110 + i);
     }
     const body = (await app.inject({method: 'GET', url: `/v1/agents/${w.agentId}/trust`})).json();
@@ -557,9 +565,8 @@ describe('job lifecycle', () => {
     const reason = 'the summary contradicts its own sources';
     expect((await post(`/v1/jobs/${jobId}/dispute`, client.apiKey, {reason})).statusCode).toBe(200);
 
-    const {keccak256, toHex} = await import('viem');
     const {canonicalize} = await import('@pactora/shared');
-    const reasonHash = keccak256(toHex(canonicalize({reason})));
+    const reasonHash = sha256Hex(canonicalize({reason}));
     expect(submitted.at(-1)).toMatchObject({kind: 'dispute', payload: {reasonHash}});
 
     const job = (await app.inject({method: 'GET', url: `/v1/jobs/${jobId}`})).json();
@@ -710,8 +717,8 @@ describe('the error contract agents depend on', () => {
   it('reports which chains are live on /health', async () => {
     const health = await app.inject({method: 'GET', url: '/health'}).then((r) => r.json());
     expect(health.ok).toBe(true);
-    expect(health.chains[0].chainId).toBe(31337);
-    expect(health.chains[0].escrow).toMatch(/^0x/);
+    expect(health.chains[0].chainId).toBe('near:sandbox');
+    expect(health.chains[0].contract).toBe('pactora.test.near');
   });
 });
 

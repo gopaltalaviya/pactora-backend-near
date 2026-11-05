@@ -148,7 +148,8 @@ export interface ChainConfig {
 
 export interface PactoraConfig {
   readonly defaultChainId: ChainId;
-  readonly chains: Readonly<Partial<Record<ChainId, ChainConfig>>>;
+  /** Enabled chains only, keyed by CAIP-2 id. */
+  readonly chains: Readonly<Record<string, ChainConfig>>;
   chain(chainId?: string): ChainConfig;
 }
 

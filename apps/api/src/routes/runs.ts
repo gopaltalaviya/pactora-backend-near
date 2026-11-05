@@ -28,7 +28,7 @@ export const StartRun = z.object({
 
 export interface RunRouteDeps {
   db: Db;
-  chains: Record<number, ChainConfig>;
+  chains: Record<string, ChainConfig>;
   runBus: EventBus;
   /** Absent when no model is configured; starting a run then fails cleanly. */
   runs?: RunService;
@@ -42,7 +42,7 @@ export const RunListQuery = z.object({
 
 export async function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps): Promise<void> {
   const {db, chains, runBus} = deps;
-  const enabled = Object.keys(chains).map(Number);
+  const enabled = Object.keys(chains);
 
   app.post('/v1/runs', async (request, reply) => {
     const caller = await authenticate(db, request);

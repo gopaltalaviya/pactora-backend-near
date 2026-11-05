@@ -6,7 +6,7 @@ import {sql} from 'drizzle-orm';
 import {PactoraError, ErrorCode, validateShape} from '@pactora/shared';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * Chaos checklist, the parts that run through the API.
@@ -31,16 +31,17 @@ let chainJobSeq = 0;
 let withholdChainJobId = false;
 
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     submit: async (args) => {
       submitBehaviour?.();
@@ -51,8 +52,8 @@ beforeAll(async () => {
       // jobs_chain_job_uk — a mock that cannot happen in production.
       const chainJobId = String(++chainJobSeq);
       return withholdChainJobId
-        ? {txHash: `0x${'ab'.repeat(32)}`}
-        : {txHash: `0x${'ab'.repeat(32)}`, chainJobId};
+        ? {txHash: '4yJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz'}
+        : {txHash: '4yJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz', chainJobId};
     },
   });
 });
@@ -88,7 +89,6 @@ async function register(name: string): Promise<{agentId: number; apiKey: string}
   const body = res.json() as {agentId: number; apiKey: string};
   // The API refuses a hire until both sides carry an ERC-8004 id, which the
   // indexer would supply. These tests are about the failure paths after that.
-  await db.execute(sql`UPDATE agents SET chain_agent_id = ${body.agentId} WHERE id = ${body.agentId}`);
   return body;
 }
 
@@ -616,7 +616,8 @@ describe('the direct-pay path, after the money has moved', () => {
       sql`SELECT result, result_hash FROM jobs WHERE public_id = ${jobId}`,
     )) as unknown as {result: Record<string, unknown> | null; result_hash: string | null}[];
     expect(rows[0]!.result).toMatchObject({summary: 'liquidity is thin'});
-    expect(rows[0]!.result_hash).toMatch(/^0x[0-9a-f]{64}$/);
+    // sha256, 64 lowercase hex: what the contract's check_hash accepts.
+    expect(rows[0]!.result_hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('sends no transaction for it — the chain is already finished with this job', async () => {

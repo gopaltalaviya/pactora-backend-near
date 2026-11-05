@@ -5,7 +5,7 @@ import {sql} from 'drizzle-orm';
 import {loadConfig} from '@pactora/config';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * Cursor pagination (v3). docs/17: "bounded `limit` only, no cursor" — past
@@ -13,8 +13,8 @@ import {addr, signedRegistration} from './helpers/register.js';
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 let app: FastifyInstance;
@@ -23,9 +23,10 @@ let db: Db;
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     submit: async () => ({txHash: '0x'}),
   });
@@ -75,7 +76,7 @@ describe('GET /v1/jobs pagination', () => {
     for (let i = 0; i < 5; i++) {
       const [row] =
         (await db.execute(sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-          VALUES (31337, ${client.agentId}, ${worker.agentId}, 'escrow', 20000, '{}'::jsonb, '0x01') RETURNING public_id`)) as unknown as {
+          VALUES ('near:sandbox', ${client.agentId}, ${worker.agentId}, 'escrow', 20000, '{}'::jsonb, '0x01') RETURNING public_id`)) as unknown as {
           public_id: string;
         }[];
       ids.push(row!.public_id);
@@ -98,7 +99,7 @@ describe('GET /v1/runs pagination', () => {
     const ids: string[] = [];
     for (let i = 0; i < 3; i++) {
       const [row] =
-        (await db.execute(sql`INSERT INTO runs (chain_id, agent_id, goal) VALUES (31337, ${o.agentId}, ${'g' + i})
+        (await db.execute(sql`INSERT INTO runs (chain_id, agent_id, goal) VALUES ('near:sandbox', ${o.agentId}, ${'g' + i})
           RETURNING public_id`)) as unknown as {public_id: string}[];
       ids.push(row!.public_id);
     }

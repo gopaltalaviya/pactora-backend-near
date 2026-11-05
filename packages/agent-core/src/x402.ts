@@ -10,6 +10,7 @@ import {
   type PaymentRequired,
   type PaymentRequirements,
   type VerifyResponse,
+  type ChainId,
   type X402Scheme,
 } from '@pactora/shared';
 import type {PactoraClient} from '@pactora/sdk';
@@ -50,7 +51,8 @@ export interface X402ServerOptions<T> {
   price: BaseUnits;
   payTo: string;
   asset: string;
-  network: string;
+  /** CAIP-2 chain id, e.g. `near:testnet`. */
+  network: ChainId;
   description?: string;
   /** The schemes the quote offers, in order of preference. Default: direct pay only. */
   schemes?: X402Scheme[];

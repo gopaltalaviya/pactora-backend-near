@@ -1,17 +1,17 @@
-import {encodeFunctionData, type Abi, type Hex} from 'viem';
 import type {PactoraConfig} from '@pactora/config';
-import {loadAbis} from '@pactora/config';
 import {PactoraError, ErrorCode} from '@pactora/shared';
 import type {JobRouteDeps} from './routes/jobs.js';
+import type {WalletKeys} from './routes/agents.js';
 
 /**
  * Turn an API action into a policy-checked, signed transaction.
  *
- * The API never holds a key. It encodes the call, hands it to the signer over
- * private networking, and reports what came back. That separation is what
- * makes "the API is compromised" survivable: an attacker gets to *propose*
- * transactions, and the signer's policy plus the on-chain AgentAccount caps
- * decide whether any of them happen.
+ * The API never holds a key. It names the contract call — a method and its
+ * JSON arguments (docs/NEAR-PORT.md §6) — hands it to the signer over private
+ * networking, and reports what came back. That separation is what makes "the
+ * API is compromised" survivable: an attacker gets to *propose* calls, and the
+ * signer's policy plus the contract's caps on the agent's purse decide
+ * whether any of them happen.
  */
 
 export interface SignerSubmitDeps {
@@ -19,9 +19,8 @@ export interface SignerSubmitDeps {
   /** Presented to the signer, which refuses requests without it when it has one. */
   signerToken?: string;
   config: PactoraConfig;
-  abis?: Record<string, Abi>;
   fetchImpl?: typeof fetch;
-  /** How long to wait for the signer. A sign includes a broadcast, so not short. */
+  /** How long to wait for the signer. A sign includes a broadcast and finality, so not short. */
   timeoutMs?: number;
 }
 
@@ -35,161 +34,206 @@ const PASS_THROUGH = new Set<string>([
   ErrorCode.SCHEMA_MISMATCH,
   ErrorCode.INVALID_STATE,
   ErrorCode.DEADLINE_PASSED,
+  ErrorCode.NOT_FOUND,
 ]);
 
-export function makeSignerSubmit(deps: SignerSubmitDeps): JobRouteDeps['submit'] {
-  const abis = deps.abis ?? (loadAbis() as unknown as Record<string, Abi>);
-  const escrowAbi = abis['TaskEscrow'];
-  if (!escrowAbi) throw new Error('TaskEscrow ABI missing — run `make export` in agentx-contracts');
-  const doFetch = deps.fetchImpl ?? fetch;
+type Kind = Parameters<JobRouteDeps['submit']>[0]['kind'];
 
+/** A contract call: the method and its arguments, with the contract's own argument names. */
+export interface ContractCall {
+  method: string;
+  args: Record<string, unknown>;
+}
+
+/** POST to the signer; its RFC 7807 refusals pass through when the caller can act on them. */
+async function callSigner<T>(
+  deps: SignerSubmitDeps,
+  path: string,
+  body: unknown,
+  traceId?: string,
+): Promise<T> {
+  const doFetch = deps.fetchImpl ?? fetch;
+  let res: Response;
+  try {
+    res = await doFetch(`${deps.signerUrl}${path}`, {
+      method: 'POST',
+      // No timeout used to mean a hung signer hung every hire with it.
+      signal: AbortSignal.timeout(deps.timeoutMs ?? 60_000),
+      headers: {
+        'content-type': 'application/json',
+        ...(deps.signerToken ? {authorization: `Bearer ${deps.signerToken}`} : {}),
+        // One id from the caller's request to the signer's log line.
+        ...(traceId ? {'x-request-id': traceId} : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    // Nothing was signed, or the idempotency key makes a retry safe if it was.
+    throw new PactoraError(
+      ErrorCode.UPSTREAM_UNAVAILABLE,
+      `the signer did not answer: ${err instanceof Error ? err.message : String(err)}`,
+      2,
+    );
+  }
+
+  if (!res.ok) {
+    // The signer already speaks RFC 7807, so its refusal is passed through
+    // intact rather than flattened into a generic 500. An agent that hit a
+    // budget cap must see BUDGET_EXCEEDED, not "signer error".
+    const problem = (await res.json().catch(() => ({}))) as {
+      code?: string;
+      detail?: string;
+      retryAfter?: number;
+    };
+    // A refusal the CALLER can act on passes through with its code. Anything
+    // else — the signer down, a 5xx, the API's own token rejected — is an
+    // outage, not the caller's empty wallet.
+    if (problem.code && PASS_THROUGH.has(problem.code)) {
+      throw new PactoraError(
+        problem.code as ErrorCode,
+        problem.detail ?? `signer refused with ${res.status}`,
+        problem.retryAfter,
+      );
+    }
+    throw new PactoraError(
+      ErrorCode.UPSTREAM_UNAVAILABLE,
+      `the signer answered ${res.status}${problem.code ? ` ${problem.code}` : ''}`,
+      2,
+    );
+  }
+  return (await res.json()) as T;
+}
+
+export function makeSignerSubmit(deps: SignerSubmitDeps): JobRouteDeps['submit'] {
   return async ({agentId, chainId, kind, job, spend, idempotencyKey, payload, traceId}) => {
     const chain = deps.config.chain(chainId);
-    const escrow = chain.contracts['TaskEscrow'];
-    if (!escrow) {
-      throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${chainId} has no deployed TaskEscrow`);
-    }
-
-    const data = encodeCall(escrowAbi, kind, {agentId, job, spend, payload, chain});
-
-    let res: Response;
-    try {
-      res = await doFetch(`${deps.signerUrl}/sign`, {
-        method: 'POST',
-        // No timeout used to mean a hung signer hung every hire with it.
-        signal: AbortSignal.timeout(deps.timeoutMs ?? 30_000),
-        headers: {
-          'content-type': 'application/json',
-          ...(deps.signerToken ? {authorization: `Bearer ${deps.signerToken}`} : {}),
-          // One id from the caller's request to the signer's log line.
-          ...(traceId ? {'x-request-id': traceId} : {}),
-        },
-        body: JSON.stringify({
-          agentId,
-          chainId,
-          target: escrow,
-          data,
-          spend: spend.toString(),
-          idempotencyKey,
-        }),
-      });
-    } catch (err) {
-      // Nothing was signed, or the idempotency key makes a retry safe if it was.
-      throw new PactoraError(
-        ErrorCode.UPSTREAM_UNAVAILABLE,
-        `the signer did not answer: ${err instanceof Error ? err.message : String(err)}`,
-        2,
-      );
-    }
-
-    if (!res.ok) {
-      // The signer already speaks RFC 7807, so its refusal is passed through
-      // intact rather than flattened into a generic 500. An agent that hit a
-      // budget cap must see BUDGET_EXCEEDED, not "signer error".
-      const problem = (await res.json().catch(() => ({}))) as {
-        code?: string;
-        detail?: string;
-        retryAfter?: number;
-      };
-      // A refusal the CALLER can act on passes through with its code. Anything
-      // else — the signer down, a 5xx, the API's own token rejected — is an
-      // outage, not the caller's empty wallet (which is what v1 called it).
-      if (problem.code && PASS_THROUGH.has(problem.code)) {
-        throw new PactoraError(
-          problem.code as ErrorCode,
-          problem.detail ?? `signer refused with ${res.status}`,
-          problem.retryAfter,
-        );
-      }
-      throw new PactoraError(
-        ErrorCode.UPSTREAM_UNAVAILABLE,
-        `the signer answered ${res.status}${problem.code ? ` ${problem.code}` : ''}`,
-        2,
-      );
-    }
-
-    const {txHash} = (await res.json()) as {txHash: string};
-    return {txHash};
+    const call = contractCall(kind, {job, payload, chain, spend});
+    const out = await callSigner<{txHash: string; result?: unknown}>(
+      deps,
+      '/sign',
+      {agentId, chainId, method: call.method, args: call.args, spend: spend.toString(), idempotencyKey},
+      traceId,
+    );
+    // create_job and direct_pay return the new job's id; the indexer links it too.
+    const created = kind === 'createJob' || kind === 'directPay';
+    const chainJobId =
+      created &&
+      (typeof out.result === 'number' || typeof out.result === 'string') &&
+      /^\d+$/.test(String(out.result))
+        ? String(out.result)
+        : undefined;
+    return {txHash: out.txHash, ...(chainJobId !== undefined ? {chainJobId} : {})};
   };
 }
 
-function encodeCall(
-  abi: Abi,
-  kind: Parameters<JobRouteDeps['submit']>[0]['kind'],
+/** The signer's agent keys, for registration (docs/NEAR-PORT.md §5–6). */
+export function makeSignerWalletKeys(deps: SignerSubmitDeps): WalletKeys {
+  return {
+    async publicKeyFor({walletAddress}) {
+      const out = await callSigner<{publicKey: string}>(deps, '/keys', {walletAddress});
+      return out.publicKey;
+    },
+    async accept({chainId, walletAddress, chainAgentId}) {
+      return callSigner<{txHash: string; alreadyAccepted: boolean}>(deps, '/keys/accept', {
+        chainId,
+        walletAddress,
+        chainAgentId,
+      });
+    },
+  };
+}
+
+/**
+ * The contract call for an API action, with the contract's argument names
+ * (`contracts/pactora/src/lib.rs`). Exported for tests.
+ */
+export function contractCall(
+  kind: Kind,
   ctx: {
-    agentId: number;
     job: {id: number; chainJobId: string | null} | undefined;
-    spend: bigint;
     payload: Record<string, unknown> | undefined;
     chain: ReturnType<PactoraConfig['chain']>;
+    spend?: bigint;
   },
-): Hex {
-  const chainJobId = ctx.job?.chainJobId ? BigInt(ctx.job.chainJobId) : 0n;
-  const specHash = (ctx.payload?.['specHash'] as Hex) ?? (('0x' + '0'.repeat(64)) as Hex);
-
-  // ERC-8004 ids supplied by the caller. NEVER ctx.agentId — that is the
-  // database's serial, and the contract would resolve it to a different
-  // agent's wallet without erroring.
-  const workerAgentId = agentIdOf(ctx.payload?.['workerChainAgentId']);
-  const clientAgentId = agentIdOf(ctx.payload?.['clientChainAgentId']);
+): ContractCall {
+  const jobId = (): number => {
+    const id = ctx.job?.chainJobId;
+    if (!id || !/^\d+$/.test(id)) {
+      throw new PactoraError(
+        ErrorCode.INVALID_STATE,
+        'this job has no on-chain id yet — retry once it is indexed',
+        2,
+      );
+    }
+    return Number(id);
+  };
+  const hash = (key: string): string | undefined => {
+    const v = ctx.payload?.[key];
+    return typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) ? v : undefined;
+  };
+  // Contract agent ids supplied by the caller. NEVER the DB's agentId — that
+  // is the database's serial, and the contract would resolve it to a
+  // different agent without erroring.
+  const agent = (key: string): number => {
+    const v = ctx.payload?.[key];
+    if (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) return v;
+    if (typeof v === 'string' && /^[1-9]\d*$/.test(v) && Number.isSafeInteger(Number(v))) return Number(v);
+    throw new PactoraError(ErrorCode.INVALID_STATE, `the hire names no on-chain ${key}`);
+  };
+  // A hire's amount is what it spends — the same figure the signer checks against the caps.
+  const amount = (): string => {
+    if (ctx.spend === undefined || ctx.spend <= 0n) {
+      throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, 'a hire must spend a positive amount');
+    }
+    return ctx.spend.toString();
+  };
+  const specHash = (): string => {
+    const h = hash('specHash');
+    if (!h) throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, 'the hire carries no sha256 spec hash');
+    return h;
+  };
 
   switch (kind) {
     case 'directPay':
-      return encodeFunctionData({
-        abi,
-        functionName: 'directPay',
-        args: [clientAgentId, workerAgentId, ctx.spend, specHash],
-      });
-
+      return {
+        method: 'direct_pay',
+        args: {
+          client_id: agent('clientChainAgentId'),
+          worker_id: agent('workerChainAgentId'),
+          amount: amount(),
+          spec_hash: specHash(),
+        },
+      };
     case 'createJob':
-      return encodeFunctionData({
-        abi,
-        functionName: 'createJob',
-        args: [
-          clientAgentId,
-          workerAgentId,
-          ctx.spend,
-          specHash,
-          BigInt(ctx.chain.params.acceptWindowSeconds as number),
-          BigInt(ctx.chain.params.workWindowSeconds as number),
-        ],
-      });
-
+      return {
+        method: 'create_job',
+        args: {
+          client_id: agent('clientChainAgentId'),
+          worker_id: agent('workerChainAgentId'),
+          amount: amount(),
+          spec_hash: specHash(),
+          accept_window: ctx.chain.params.acceptWindowSeconds,
+          work_window: ctx.chain.params.workWindowSeconds,
+        },
+      };
     case 'accept':
-      return encodeFunctionData({abi, functionName: 'acceptJob', args: [chainJobId]});
-
-    case 'submitResult':
-      return encodeFunctionData({
-        abi,
-        functionName: 'submitResult',
-        args: [chainJobId, (ctx.payload?.['resultHash'] as Hex) ?? specHash, ''],
-      });
-
+      return {method: 'accept_job', args: {job_id: jobId()}};
+    case 'submitResult': {
+      const resultHash = hash('resultHash');
+      if (!resultHash) throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, 'a result needs its sha256 hash');
+      return {method: 'submit_result', args: {job_id: jobId(), result_hash: resultHash}};
+    }
     case 'approve':
-      return encodeFunctionData({abi, functionName: 'approve', args: [chainJobId]});
-
+      return {method: 'approve', args: {job_id: jobId(), review_hash: hash('reviewHash') ?? null}};
     case 'dispute':
-      return encodeFunctionData({
-        abi,
-        functionName: 'dispute',
-        args: [chainJobId, (ctx.payload?.['reasonHash'] as Hex) ?? specHash],
-      });
-
+      return {method: 'dispute', args: {job_id: jobId(), reason_hash: hash('reasonHash') ?? null}};
     case 'cancel':
-      return encodeFunctionData({abi, functionName: 'cancel', args: [chainJobId]});
-
+      return {method: 'cancel', args: {job_id: jobId()}};
     default: {
-      // Exhaustiveness: adding a new action without an encoding is a compile
+      // Exhaustiveness: adding a new action without a call is a compile
       // error, not a transaction that quietly does nothing.
       const never: never = kind;
       throw new Error(`unhandled action ${String(never)}`);
     }
   }
-}
-
-/** An ERC-8004 id from the hire payload: a decimal string, number or bigint — nothing else. */
-function agentIdOf(v: unknown): bigint {
-  if (typeof v === 'bigint') return v;
-  if (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v))) return BigInt(v);
-  return 0n;
 }

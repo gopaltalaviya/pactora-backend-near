@@ -6,20 +6,18 @@ import {sql} from 'drizzle-orm';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
 import type {IdentityReading} from '../src/chain-reads.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {accepted, addr, fakeOwnerVerifier, fakeWalletKeys, signedRegistration} from './helpers/register.js';
 
 /**
- * Linking a Pactora record to its ERC-8004 identity.
+ * Linking a Pactora record to its on-chain agent (docs/NEAR-PORT.md §5).
  *
- * Nothing did. The route said `chain_agent_id` "stays NULL until the indexer
- * observes the registration", and the indexer only watches TaskEscrow — so
- * every agent registered through the API or the /register page could never
- * be hired, and the only agents that ever worked were the demo's, whose
- * scripts wrote the column with raw SQL. The other tests in this suite do the
- * same, which is how it went unnoticed.
- *
- * The chain confirms the id before it is stored: it must exist, belong to the
- * registrant, and pay out to the wallet given.
+ * On EVM nothing did, for a while: the route said `chain_agent_id` "stays NULL
+ * until the indexer observes the registration", and the indexer never did —
+ * so agents registered through the API could never be hired. On NEAR the id is
+ * REQUIRED, and the contract confirms it before it is stored: the agent must
+ * exist, belong to the registrant, not be frozen, and name the wallet given —
+ * accepted, or proposed and then accepted by the signer with the wallet's own
+ * key.
  */
 
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
@@ -27,42 +25,64 @@ const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.
 const OWNER = addr('22');
 const WALLET_A = addr('11');
 const WALLET_B = addr('33');
+const WALLET_C = addr('55');
 
-/** What the fake registry holds: ERC-8004 id → identity. */
+/** What the fake contract's registry holds: agent id → agent. */
 let registry: Map<bigint, IdentityReading>;
 
 let app: FastifyInstance;
 let blind: FastifyInstance;
+let keyless: FastifyInstance;
 let db: Db;
 
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   const base = {
     db,
-    chains: config.chains as Record<number, never>,
-    defaultChainId: 31337,
+    chains: config.chains,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
-    submit: async () => ({txHash: `0x${'ab'.repeat(32)}`, chainJobId: '1'}),
+    verifyOwner: fakeOwnerVerifier(config),
+    submit: async () => ({txHash: '4yJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz', chainJobId: '1'}),
   };
-  app = await buildApp({...base, readIdentity: async ({chainAgentId}) => registry.get(chainAgentId) ?? null});
+  const readIdentity = async ({chainAgentId}: {chainAgentId: bigint}) => registry.get(chainAgentId) ?? null;
+  // The accepting signer of the shared helper, against this file's registry.
+  const walletKeys = {
+    ...fakeWalletKeys,
+    accept: async (args: {chainId: string; walletAddress: string; chainAgentId: string}) => {
+      const a = registry.get(BigInt(args.chainAgentId));
+      if (a && a.pendingWallet === args.walletAddress) {
+        a.wallet = args.walletAddress;
+        a.pendingWallet = null;
+      }
+      accepted.push(args);
+      return {txHash: 'AcceptTx1111111111111111111111111111111111111', alreadyAccepted: false};
+    },
+  };
+  app = await buildApp({...base, readIdentity, walletKeys});
   blind = await buildApp(base);
+  keyless = await buildApp({...base, readIdentity});
 });
 
 afterAll(async () => {
   await app.close();
   await blind.close();
+  await keyless.close();
   await closeDb(db);
 });
 
 beforeEach(async () => {
+  accepted.length = 0;
   registry = new Map([
-    [41n, {owner: OWNER, wallet: WALLET_A}],
-    [42n, {owner: OWNER, wallet: WALLET_B}],
+    [41n, {owner: OWNER, wallet: WALLET_A, pendingWallet: null, frozen: false}],
+    [42n, {owner: OWNER, wallet: WALLET_B, pendingWallet: null, frozen: false}],
+    [43n, {owner: OWNER, wallet: null, pendingWallet: WALLET_C, frozen: false}],
+    [44n, {owner: OWNER, wallet: WALLET_A, pendingWallet: null, frozen: true}],
   ]);
   await db.execute(
     sql`TRUNCATE agents, jobs, job_events, agent_stats, agent_capabilities, api_keys, payments RESTART IDENTITY CASCADE`,
@@ -86,13 +106,14 @@ const storedIds = async () =>
     }[]
   ).map((r) => r.chain_agent_id);
 
-describe('registering with an ERC-8004 id', () => {
+describe('registering an on-chain agent', () => {
   it('stores a verified id, and the agent can be hired straight away', async () => {
     const client = await register(app, {chainAgentId: '41', name: 'Client'});
     const worker = await register(app, {chainAgentId: '42', walletAddress: WALLET_B});
     expect(client.statusCode).toBe(201);
     expect(worker.statusCode).toBe(201);
     expect(await storedIds()).toEqual(['41', '42']);
+    expect(accepted).toEqual([]); // both wallets had already accepted
 
     const hire = await app.inject({
       method: 'POST',
@@ -115,11 +136,11 @@ describe('registering with an ERC-8004 id', () => {
     expect(await storedIds()).toEqual([]);
   });
 
-  /** The escrow pays the registry's wallet; a mismatch sends money elsewhere. */
-  it('refuses an id whose payout wallet is not the one given', async () => {
+  /** The contract lets only its wallet act for the agent; a mismatch hands the agent to someone else. */
+  it('refuses an id whose wallet is not the one given', async () => {
     const res = await register(app, {chainAgentId: '41', walletAddress: WALLET_B});
     expect(res.statusCode).toBe(409);
-    expect(res.json().detail).toMatch(/pays out to/);
+    expect(res.json().detail).toMatch(/wallet is/);
     expect(await storedIds()).toEqual([]);
   });
 
@@ -135,9 +156,69 @@ describe('registering with an ERC-8004 id', () => {
     expect(await storedIds()).toEqual([]);
   });
 
-  it('still registers without one, unhireable until linked', async () => {
-    const res = await register(app, {});
+  it('refuses a frozen agent: the owner pulled its kill switch', async () => {
+    const res = await register(app, {chainAgentId: '44'});
+    expect(res.statusCode).toBe(409);
+    expect(res.json().detail).toMatch(/frozen/);
+    expect(await storedIds()).toEqual([]);
+  });
+
+  it('has the signer accept a proposed wallet first, then stores the agent', async () => {
+    const res = await register(app, {chainAgentId: '43', walletAddress: WALLET_C});
     expect(res.statusCode).toBe(201);
-    expect(await storedIds()).toEqual([null]);
+    expect(accepted).toEqual([{chainId: 'near:sandbox', walletAddress: WALLET_C, chainAgentId: '43'}]);
+    expect(registry.get(43n)!.wallet).toBe(WALLET_C);
+    expect(await storedIds()).toEqual(['43']);
+  });
+
+  it('refuses a proposed wallet when there is no signer to accept for it', async () => {
+    const res = await register(keyless, {chainAgentId: '43', walletAddress: WALLET_C});
+    expect(res.statusCode).toBe(409);
+    expect(res.json().detail).toMatch(/has not accepted/);
+    expect(await storedIds()).toEqual([]);
+  });
+
+  it('requires the id: an agent that is not on chain can never be hired', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agents/challenge',
+      payload: {ownerAddress: OWNER, walletAddress: WALLET_A},
+    });
+    expect(res.statusCode).toBe(422);
+    expect(JSON.stringify(res.json())).toMatch(/chainAgentId/);
+  });
+});
+
+describe('POST /v1/agents/wallet-key', () => {
+  it('hands out the public half of the key the signer holds for a wallet', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agents/wallet-key',
+      payload: {walletAddress: WALLET_C},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      chainId: 'near:sandbox',
+      walletAddress: WALLET_C,
+      walletPublicKey: expect.stringMatching(/^ed25519:/),
+    });
+  });
+
+  it('refuses something that is not a NEAR account', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agents/wallet-key',
+      payload: {walletAddress: '0x14b93e928aabd1aa9b3479c84bf168358eb27dC6'},
+    });
+    expect(res.statusCode).toBe(422);
+  });
+
+  it('says plainly when there is no signer to hold keys', async () => {
+    const res = await blind.inject({
+      method: 'POST',
+      url: '/v1/agents/wallet-key',
+      payload: {walletAddress: WALLET_C},
+    });
+    expect(res.statusCode).toBe(409);
   });
 });

@@ -6,7 +6,7 @@ import {sql} from 'drizzle-orm';
 import {createDb, closeDb, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
 import type {BudgetReader, BudgetReading} from '../src/chain-reads.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * `/v1/network` and `/v1/budget` — the two things an autonomous agent must be
@@ -25,8 +25,8 @@ let db: Db;
 let reading: BudgetReading | null | 'throw' = null;
 
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 
 const readBudget: BudgetReader = async () => {
@@ -37,12 +37,13 @@ const readBudget: BudgetReader = async () => {
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     readBudget,
-    submit: async () => ({txHash: `0x${'cd'.repeat(32)}`, chainJobId: '1'}),
+    submit: async () => ({txHash: '5zJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz', chainJobId: '1'}),
   });
 });
 
@@ -76,7 +77,7 @@ describe('GET /v1/network', () => {
   it('answers without credentials, because a client checks the network before holding a key', async () => {
     const res = await app.inject({method: 'GET', url: '/v1/network'});
     expect(res.statusCode).toBe(200);
-    expect(res.json().chainId).toBe(31337);
+    expect(res.json().chainId).toBe('near:sandbox');
   });
 
   /** The field that stops an agent treating real money as play money. */
@@ -88,8 +89,8 @@ describe('GET /v1/network', () => {
   /** Null here made a hosted x402 worker refuse to start: "no payment token". */
   it('names the payment token the escrow is paid in', async () => {
     const {paymentToken, contracts} = (await app.inject({method: 'GET', url: '/v1/network'})).json();
-    expect(paymentToken.address).toBeTruthy();
-    expect(paymentToken.address).toBe(contracts.PaymentToken);
+    expect(paymentToken.accountId).toBe('musdc.test.near');
+    expect(paymentToken.accountId).toBe(contracts.PaymentToken);
   });
 
   it('reports the windows an agent must plan against, in seconds', async () => {
@@ -105,13 +106,19 @@ describe('GET /v1/network', () => {
     expect(body.fastPathMaxDisplay).toMatch(/\d/);
   });
 
-  /**
-   * A client that guesses the registry ABI sends a transaction that reverts,
-   * and on mainnet it pays for the privilege.
-   */
-  it('states which ERC-8004 registry ABI the chain has', async () => {
+  /** Everything a client calls on NEAR lives in these accounts (docs/NEAR-PORT.md §4). */
+  it('names the Pactora contract, the token and the arbiter, and the NEAR network id', async () => {
     const body = (await app.inject({method: 'GET', url: '/v1/network'})).json();
-    expect(typeof body.erc8004.referenceImplementation).toBe('boolean');
+    expect(body.chainId).toBe('near:sandbox');
+    expect(body.nearNetworkId).toBe('sandbox');
+    expect(body.contracts).toEqual({
+      Pactora: 'pactora.test.near',
+      PaymentToken: 'musdc.test.near',
+      Arbiter: 'arbiter.test.near',
+    });
+    expect(body.nativeCurrency).toEqual({name: 'NEAR', symbol: 'NEAR', decimals: 24});
+    expect(body).not.toHaveProperty('erc8004');
+    expect(body).not.toHaveProperty('confirmations');
   });
 
   /**
@@ -120,17 +127,17 @@ describe('GET /v1/network', () => {
    */
   it('publishes the public RPC list, never an env-configured private endpoint', async () => {
     const configured = loadConfig({
-      contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
+      contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
       env: {
-        ENABLED_CHAIN_IDS: '31337',
-        DEFAULT_CHAIN_ID: '31337',
-        RPC_URL_31337: 'https://paid-provider.example/v2/SECRET-KEY',
+        ENABLED_CHAINS: 'near:sandbox',
+        RPC_URL_SANDBOX: 'https://paid-provider.example/v2/SECRET-KEY',
       },
     });
     const withPrivateRpc = await buildApp({
+      ...chainDeps(config),
       db,
       chains: configured.chains,
-      defaultChainId: 31337,
+      defaultChainId: 'near:sandbox',
       bus: new EventBus(),
       submit: async () => ({txHash: '0x', chainJobId: '1'}),
     });
@@ -138,7 +145,7 @@ describe('GET /v1/network', () => {
     try {
       const body = (await withPrivateRpc.inject({method: 'GET', url: '/v1/network'})).json();
       expect(JSON.stringify(body)).not.toContain('SECRET-KEY');
-      expect(body.rpcUrls).toEqual(['http://127.0.0.1:8545']);
+      expect(body.rpcUrls).toEqual(['http://127.0.0.1:3030']);
     } finally {
       await withPrivateRpc.close();
     }
@@ -151,7 +158,7 @@ describe('GET /v1/network', () => {
    */
   it('reports every user-facing fee and limit, from the chain params', async () => {
     const body = (await app.inject({method: 'GET', url: '/v1/network'})).json();
-    const p = config.chain(31337).params;
+    const p = config.chain('near:sandbox').params;
     expect(body).toMatchObject({
       bondBps: Number(p.bondBps),
       minBond: String(p.minBond),
@@ -177,7 +184,7 @@ describe('GET /v1/network', () => {
 
   it('falls back to the default chain rather than erroring on an unknown one', async () => {
     const body = (await app.inject({method: 'GET', url: '/v1/network?chainId=99999'})).json();
-    expect(body.chainId).toBe(31337);
+    expect(body.chainId).toBe('near:sandbox');
   });
 });
 
@@ -203,8 +210,8 @@ describe('GET /v1/budget', () => {
     const {apiKey} = await register();
     reading = null;
     const body = (await app.inject({method: 'GET', url: '/v1/budget', headers: auth(apiKey)})).json();
-    expect(body.perTaskCap).toBe(String(config.chain(31337).params.defaultPerTaskCap));
-    expect(body.dailyCap).toBe(String(config.chain(31337).params.defaultDailyCap));
+    expect(body.perTaskCap).toBe(String(config.chain('near:sandbox').params.defaultPerTaskCap));
+    expect(body.dailyCap).toBe(String(config.chain('near:sandbox').params.defaultDailyCap));
   });
 
   it('requires a key — a budget is not public information', async () => {

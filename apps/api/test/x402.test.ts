@@ -12,7 +12,7 @@ import {
 } from '@pactora/shared';
 import {buildApp, EventBus} from '../src/app.js';
 import type {PaymentReading} from '../src/chain-reads.js';
-import {addr, signedRegistration} from './helpers/register.js';
+import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
  * The x402 facilitator: settle as the client, verify and redeem as the worker.
@@ -27,12 +27,14 @@ import {addr, signedRegistration} from './helpers/register.js';
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
-const chain = config.chains[31337]!;
+const chain = config.chains['near:sandbox']!;
 const TOKEN = chain.contracts['PaymentToken'] as string;
 const WORKER_WALLET = addr('11');
+/** A base58 transaction hash (NEAR's form): 44 characters, no 0, O, I or l. */
+const fakeTx = (n: number) => `Tx${String(n).replace(/0/g, 'o')}`.padEnd(44, 'z');
 
 let app: FastifyInstance;
 let db: Db;
@@ -43,14 +45,15 @@ let reading: PaymentReading | 'throw' = {status: 'pending'};
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
   app = await buildApp({
+    ...chainDeps(config),
     db,
     chains: config.chains,
-    defaultChainId: 31337,
+    defaultChainId: 'near:sandbox',
     bus: new EventBus(),
     submit: async (args) => {
       submitted.push({kind: args.kind, spend: args.spend, idempotencyKey: args.idempotencyKey});
       return {
-        txHash: `0x${submitted.length.toString(16).padStart(64, '0')}`,
+        txHash: fakeTx(submitted.length),
         chainJobId: String(submitted.length),
       };
     },
@@ -84,8 +87,6 @@ async function register(name: string, wallet: string, price = '20000') {
   });
   expect(res.statusCode).toBe(201);
   const body = res.json() as {agentId: number; apiKey: string};
-  // Stand in for the indexer having seen the ERC-8004 registration.
-  await db.execute(sql`UPDATE agents SET chain_agent_id = ${body.agentId + 1000} WHERE id = ${body.agentId}`);
   return body;
 }
 
@@ -97,7 +98,7 @@ const auth = (apiKey: string, key?: string) => ({
 function quote(workerId: number, over: Partial<PaymentRequirements> = {}): PaymentRequirements {
   return {
     scheme: X402_SCHEME,
-    network: 'eip155:31337',
+    network: 'near:sandbox',
     maxAmountRequired: '20000',
     resource: 'http://127.0.0.1:9402/market-research',
     description: '',
@@ -162,7 +163,7 @@ describe('POST /v1/x402/settle — the client pays', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.success).toBe(true);
-    expect(body.network).toBe('eip155:31337');
+    expect(body.network).toBe('near:sandbox');
     expect(body.payer).toBe(client.agentId);
     expect(submitted).toEqual([expect.objectContaining({kind: 'directPay', spend: 20_000n})]);
 
@@ -217,7 +218,7 @@ describe('POST /v1/x402/settle — the client pays', () => {
 
   it('refuses a quote for another network', async () => {
     const {worker, client} = await setup();
-    const res = await settle(client.apiKey, quote(worker.agentId, {network: 'eip155:10143'}));
+    const res = await settle(client.apiKey, quote(worker.agentId, {network: 'near:testnet'}));
     expect(res.json().code).toBe('CHAIN_MISMATCH');
     expect(submitted).toHaveLength(0);
   });
@@ -307,7 +308,7 @@ describe('POST /v1/x402/redeem — the worker checks, once', () => {
 
   it('refuses when the chain shows a payment for a different job', async () => {
     const {worker, req, header, jobId} = await paid();
-    await chainConfirms(jobId, {specHash: `0x${'77'.repeat(32)}`});
+    await chainConfirms(jobId, {specHash: '77'.repeat(32)});
     expect((await redeem(worker.apiKey, req, header)).json().invalidReason).toBe('transaction_mismatch');
   });
 
@@ -321,7 +322,7 @@ describe('POST /v1/x402/redeem — the worker checks, once', () => {
     const {worker, req, header, jobId} = await paid();
     await chainConfirms(jobId);
     const forged = decodePaymentHeader(header);
-    forged.payload.txHash = `0x${'99'.repeat(32)}`;
+    forged.payload.txHash = fakeTx(99);
     expect((await redeem(worker.apiKey, req, encodePaymentHeader(forged))).json().invalidReason).toBe(
       'transaction_mismatch',
     );
@@ -377,7 +378,7 @@ describe('POST /v1/x402/redeem — the worker checks, once', () => {
     const header = encodePaymentHeader({
       x402Version: 1,
       scheme: X402_SCHEME,
-      network: 'eip155:31337',
+      network: 'near:sandbox',
       payload: {jobId, txHash},
     });
     expect((await redeem(worker.apiKey, req, header)).json().invalidReason).toBe('not_direct_payment');
@@ -413,14 +414,14 @@ describe('POST /v1/x402/redeem — the worker checks, once', () => {
 });
 
 /**
- * v3: the refundable scheme. `agentx-escrow` settles as an escrow job, so the
+ * v3: the refundable scheme. `pactora-escrow` settles as an escrow job, so the
  * money waits in the escrow while the worker works and a failed job refunds.
  * Not capped at fastPathMax (nothing is paid before the work), only at the
  * escrow's maxJobAmount.
  */
-describe('the escrow-backed scheme (agentx-escrow)', () => {
+describe('the escrow-backed scheme (pactora-escrow)', () => {
   const escrowQuote = (workerId: number, over: Partial<PaymentRequirements> = {}) =>
-    quote(workerId, {scheme: 'agentx-escrow', ...over} as Partial<PaymentRequirements>);
+    quote(workerId, {scheme: 'pactora-escrow', ...over} as Partial<PaymentRequirements>);
 
   /** Make the fake chain report the JobCreated the escrow would emit for this job. */
   async function chainCreated(jobId: string, over: {workerChainId?: bigint} = {}) {
@@ -447,7 +448,7 @@ describe('the escrow-backed scheme (agentx-escrow)', () => {
     expect(res.statusCode).toBe(200);
     expect(submitted).toEqual([expect.objectContaining({kind: 'createJob', spend: 20_000n})]);
     const header = decodePaymentHeader(res.json().paymentHeader);
-    expect(header.scheme).toBe('agentx-escrow');
+    expect(header.scheme).toBe('pactora-escrow');
     const [job] = (await db.execute(
       sql`SELECT path FROM jobs WHERE public_id = ${res.json().jobId}`,
     )) as unknown as {path: string}[];
