@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import {sql} from 'drizzle-orm';
 import {z} from 'zod';
-import {loadConfig, type ChainConfig} from '@pactora/config';
+import {loadConfig} from '@pactora/config';
 import {closeDb, createDb} from '@pactora/db';
 import {
   buildInfo,
@@ -14,9 +14,9 @@ import {
   serviceLogger,
   serviceOptions,
 } from '@pactora/service';
-import {blockRpc, nearClient, neardataSource, rpcSource, type BlockSource} from '@pactora/near';
 import {ChainLinkError, Indexer} from './indexer.js';
 import {runIndexerLoop} from './loop.js';
+import {openSource} from './source.js';
 
 /**
  * One indexer worker per enabled chain, all in one process.
@@ -78,38 +78,6 @@ const shutdown = installShutdown({
     ['database', () => closeDb(db)],
   ],
 });
-
-/**
- * The chain's block source, after checking it is the network the config names.
- *
- * The RPC must answer `status.chain_id` = `nearNetworkId`; and on neardata the
- * final block it serves must be the block the RPC has at that height — a
- * mainnet neardata URL beside a testnet RPC would otherwise index the wrong
- * network without a single error.
- */
-async function openSource(chain: ChainConfig): Promise<BlockSource> {
-  const client = nearClient(chain.rpcUrl);
-  const network = await client.networkId();
-  if (network !== chain.nearNetworkId) {
-    throw new Error(
-      `chain ${chain.chainId}: RPC ${chain.rpcUrl} is network "${network}", the config says "${chain.nearNetworkId}"`,
-    );
-  }
-  const rpc = blockRpc(chain.rpcUrl);
-  if (chain.blockSource.kind === 'rpc') return rpcSource(rpc);
-
-  const source = neardataSource(chain.blockSource.url);
-  // A height both have as final: the lower of the two heads, a real block on either.
-  const height = Math.min(await source.finalHeight(), (await client.finalBlock()).height);
-  const [served, onRpc] = await Promise.all([source.blockAt(height), rpc.block(height)]);
-  if (!served || !onRpc || served.hash !== onRpc.header.hash) {
-    throw new Error(
-      `chain ${chain.chainId}: neardata ${chain.blockSource.url} block ${height} is ${served?.hash ?? 'missing'}, ` +
-        `RPC ${chain.rpcUrl} has ${onRpc?.header.hash ?? 'no block'} — not the same network`,
-    );
-  }
-  return source;
-}
 
 const workersDone = Promise.all(
   Object.values(config.chains).map(async (chain) => {
