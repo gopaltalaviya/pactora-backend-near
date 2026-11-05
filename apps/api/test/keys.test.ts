@@ -17,7 +17,7 @@ import {addr, signedRegistration} from './helpers/register.js';
  *   - re-issue: an owner who lost every key signs a single-use, short-lived
  *     server nonce, checked against the agent's CURRENT on-chain owner.
  */
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
   contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
   env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},

@@ -35,7 +35,7 @@ import {cloneCodeOf, delegationOf} from '../src/accounts.js';
  * test.
  */
 
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 
 /** Anvil account #0 — a well-known test key, never used on a real network. */
 const TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as Hex;

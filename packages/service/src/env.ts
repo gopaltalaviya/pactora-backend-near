@@ -78,5 +78,7 @@ export const env = {
       ),
   logLevel: () => z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   nodeEnv: () => z.enum(['development', 'test', 'production']).default('development'),
-  privateKey: () => z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'must be a 0x-prefixed 32-byte hex key'),
+  /** A NEAR secret key as near-cli and near-api-js write it: `ed25519:<base58>`. */
+  nearSecretKey: () =>
+    z.string().regex(/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,90}$/, 'must be a NEAR key, ed25519:<base58>'),
 };

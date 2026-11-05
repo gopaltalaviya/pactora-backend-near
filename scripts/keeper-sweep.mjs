@@ -47,7 +47,7 @@ const pub = createPublicClient({transport: http(chain.rpcUrl)});
 const readJob = (id) =>
   pub.readContract({address: escrow, abi: abis['TaskEscrow'], functionName: 'getJob', args: [id]});
 
-const db = createDb(process.env.DATABASE_URL ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx');
+const db = createDb(process.env.DATABASE_URL ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near');
 const ids = process.argv.slice(2).map((a) => BigInt(a));
 const keeper = chainKeeper({
   db,

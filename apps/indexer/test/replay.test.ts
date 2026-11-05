@@ -26,7 +26,7 @@ import {encodeAbiParameters, encodeEventTopics, stringToHex, type Abi, type AbiE
  * is entirely local.
  */
 
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 
 let db: Db;
 let indexer: Indexer;

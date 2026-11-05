@@ -5,17 +5,17 @@ import {loadConfig} from '../src/index.js';
 // fileURLToPath, not URL.pathname: on Windows the latter yields "/C:/..."
 // with a leading slash that fs cannot resolve.
 const config = loadConfig({
-  contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
-  env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
+  contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+  env: {ENABLED_CHAINS: 'near:sandbox'},
 });
-const c = config.chain(31337);
+const c = config.chain('near:sandbox');
 
 describe('token amounts are exact integer base units', () => {
   it('formats the demo prices', () => {
-    expect(c.formatToken(20_000n)).toBe('0.02 MockUSDC'); // research agent
-    expect(c.formatToken(50_000n)).toBe('0.05 MockUSDC'); // execution agent
-    expect(c.formatToken(0n)).toBe('0 MockUSDC');
-    expect(c.formatToken(1n)).toBe('0.000001 MockUSDC'); // one base unit
+    expect(c.formatToken(20_000n)).toBe('0.02 mUSDC'); // research agent
+    expect(c.formatToken(50_000n)).toBe('0.05 mUSDC'); // execution agent
+    expect(c.formatToken(0n)).toBe('0 mUSDC');
+    expect(c.formatToken(1n)).toBe('0.000001 mUSDC'); // one base unit
   });
 
   it('parses back exactly', () => {
@@ -39,7 +39,7 @@ describe('token amounts are exact integer base units', () => {
     // 0.1 + 0.2 !== 0.3 in floats. Base units must not care.
     const sum = c.parseToken('0.1') + c.parseToken('0.2');
     expect(sum).toBe(c.parseToken('0.3'));
-    expect(c.formatToken(sum)).toBe('0.3 MockUSDC');
+    expect(c.formatToken(sum)).toBe('0.3 mUSDC');
   });
 
   it('handles amounts beyond Number.MAX_SAFE_INTEGER', () => {

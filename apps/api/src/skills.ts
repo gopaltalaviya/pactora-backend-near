@@ -35,7 +35,7 @@ export async function skillStats(
              j.spec->>'capability' AS capability,
              count(*) FILTER (
                WHERE e.kind = 'settled'
-                 AND coalesce((e.payload->>'outcome')::int, ${OUTCOME_SUCCESS}) = ${OUTCOME_SUCCESS}
+                 AND coalesce(e.payload->>'outcome', ${OUTCOME_SUCCESS}) = ${OUTCOME_SUCCESS}
              )::int AS completed,
              count(*) FILTER (
                WHERE e.kind = 'refunded' AND (e.payload->>'reason') IN ${[...WORKER_FAULT_VALUES]}

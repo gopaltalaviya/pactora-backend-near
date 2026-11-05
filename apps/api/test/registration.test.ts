@@ -22,7 +22,7 @@ import type {IdentityReading} from '../src/chain-reads.js';
  * too, unless it IS the owner.
  */
 
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
   contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
   env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},

@@ -15,7 +15,7 @@ import {addr, signedRegistration} from './helpers/register.js';
  * describing the network it lives on, and `/metrics` that is not public by
  * accident in production.
  */
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
   contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
   env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
@@ -169,7 +169,7 @@ describe('GET /v1/status', () => {
   });
 
   it('is down when the database is unreachable', async () => {
-    const dead = createDb('postgres://agentx:agentx@127.0.0.1:1/agentx', {max: 1});
+    const dead = createDb('postgres://pactora:pactora@127.0.0.1:1/pactora_near', {max: 1});
     const app = await buildApp({
       db: dead,
       chains: config.chains,

@@ -8,7 +8,7 @@ import {WORKER_FAULT_VALUES, closeDb, createDb, reputationScoreSql, type Db} fro
  * must be the same formula, or the same history would score two ways. This
  * pins the shared expression to the indexer's formula as it was written.
  */
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 let db: Db;
 beforeAll(() => {
   db = createDb(DB_URL, {max: 2});
@@ -53,12 +53,12 @@ describe('reputationScoreSql', () => {
 });
 
 describe('WORKER_FAULT_VALUES', () => {
-  /** JobRefunded.reason is a left-aligned bytes32 string; the indexer also accepts plain text. */
-  it('holds each worker-fault reason as text and as its bytes32 form', () => {
+  /** job_refunded.reason is a plain string on NEAR. */
+  it('holds each worker-fault reason, and nothing else', () => {
     expect(WORKER_FAULT_VALUES).toContain('undelivered');
     expect(WORKER_FAULT_VALUES).toContain('dispute');
-    expect(WORKER_FAULT_VALUES).toContain(`0x${Buffer.from('undelivered').toString('hex').padEnd(64, '0')}`);
-    expect(WORKER_FAULT_VALUES).toContain(`0x${Buffer.from('dispute').toString('hex').padEnd(64, '0')}`);
+    // NEAR events carry the reason as a plain string; no bytes32 encodings.
+    expect(WORKER_FAULT_VALUES).toEqual(['undelivered', 'dispute']);
     expect(WORKER_FAULT_VALUES).not.toContain('cancelled');
   });
 });

@@ -44,7 +44,7 @@ if (!process.argv.includes('--truncates-the-dev-db')) {
 }
 
 const CHAIN_ID = Number(process.env.VERIFY_CHAIN_ID ?? 10143);
-const DB_URL = process.env.DATABASE_URL ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env.DATABASE_URL ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const API_PORT = Number(process.env.FARM_API_PORT ?? 8097);
 const SIGNER_PORT = Number(process.env.FARM_SIGNER_PORT ?? 7097);
 

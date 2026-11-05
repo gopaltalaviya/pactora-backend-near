@@ -57,7 +57,7 @@ export const agents = pgTable(
   'agents',
   {
     id: bigserial('id', {mode: 'number'}).primaryKey(),
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     /** ERC-8004 ERC-721 token id. NULL until the indexer sees Registered. */
     chainAgentId: chainUint('chain_agent_id'),
     ownerAddress: text('owner_address').notNull(),
@@ -141,7 +141,7 @@ export const jobs = pgTable(
      * `id` made every job in the system enumerable by walking 1, 2, 3.
      */
     publicId: uuid('public_id').notNull().defaultRandom(),
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     chainJobId: chainUint('chain_job_id'),
     clientAgentId: bigint('client_agent_id', {mode: 'number'}).notNull(),
     workerAgentId: bigint('worker_agent_id', {mode: 'number'}).notNull(),
@@ -182,28 +182,32 @@ export const jobs = pgTable(
 /**
  * Append-only audit log. Never updated, never deleted.
  *
- * `UNIQUE (chain_id, tx_hash, log_index)` is what makes the indexer safely
+ * `UNIQUE (chain_id, receipt_id, log_index)` is what makes the indexer safely
  * re-runnable: replaying a block range becomes a no-op rather than a
- * duplication. Off-chain events carry a NULL tx_hash, and Postgres treats
- * NULLs as distinct, so they are unaffected.
+ * duplication. On NEAR an event belongs to a receipt, not a transaction —
+ * one transaction's receipts run across several blocks, each with its own
+ * logs — so the receipt is the key and `tx_hash` is kept for links.
+ * Off-chain events carry a NULL receipt_id, and Postgres treats NULLs as
+ * distinct, so they are unaffected.
  */
 export const jobEvents = pgTable(
   'job_events',
   {
     id: bigserial('id', {mode: 'number'}).primaryKey(),
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     jobId: bigint('job_id', {mode: 'number'})
       .notNull()
       .references(() => jobs.id, {onDelete: 'cascade'}),
     kind: text('kind').notNull(),
     payload: jsonb('payload').notNull().default({}),
     txHash: text('tx_hash'),
+    receiptId: text('receipt_id'),
     blockNumber: bigint('block_number', {mode: 'number'}),
     logIndex: integer('log_index'),
     occurredAt: timestamp('occurred_at', {withTimezone: true}).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex('job_events_idempotency_uk').on(t.chainId, t.txHash, t.logIndex),
+    uniqueIndex('job_events_idempotency_uk').on(t.chainId, t.receiptId, t.logIndex),
     index('job_events_job_idx').on(t.jobId, t.id),
   ],
 );
@@ -214,7 +218,7 @@ export const payments = pgTable(
   'payments',
   {
     id: bigserial('id', {mode: 'number'}).primaryKey(),
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     jobId: bigint('job_id', {mode: 'number'}).references(() => jobs.id),
     fromAgentId: bigint('from_agent_id', {mode: 'number'}).references(() => agents.id),
     toAgentId: bigint('to_agent_id', {mode: 'number'}).references(() => agents.id),
@@ -234,25 +238,27 @@ export const payments = pgTable(
  * paid reviews are farmable by an owner who funds the raters' wallets
  * seconds before they pay. A transfer from the worker's side to a client
  * before that client hires is the signature of it. Recorded by the indexer
- * from the token's own `Transfer` logs, in the same chunks it reads the
- * escrow; addresses are lower-case. Kept when EITHER side is known, so a
- * rater wallet funded before it registered is still caught from the worker's
- * side.
+ * from the token's own NEP-141 `ft_transfer` events, in the same blocks it
+ * reads the protocol; accounts are NEAR account ids (lower case by rule).
+ * Kept when EITHER side is known, so a rater wallet funded before it
+ * registered is still caught from the worker's side. One `ft_transfer` log
+ * can list several transfers: `log_index` is 256 × the log line + the entry.
  */
 export const tokenTransfers = pgTable(
   'token_transfers',
   {
     id: bigserial('id', {mode: 'number'}).primaryKey(),
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     blockNumber: bigint('block_number', {mode: 'number'}).notNull(),
     txHash: text('tx_hash').notNull(),
+    receiptId: text('receipt_id').notNull(),
     logIndex: integer('log_index').notNull(),
     fromAddress: text('from_address').notNull(),
     toAddress: text('to_address').notNull(),
     amount: baseUnits('amount').notNull(),
   },
   (t) => [
-    uniqueIndex('token_transfers_uk').on(t.chainId, t.txHash, t.logIndex),
+    uniqueIndex('token_transfers_uk').on(t.chainId, t.receiptId, t.logIndex),
     index('token_transfers_to_idx').on(t.chainId, t.toAddress, t.blockNumber),
     index('token_transfers_from_idx').on(t.chainId, t.fromAddress, t.blockNumber),
   ],
@@ -286,7 +292,7 @@ export const signerTxs = pgTable(
   'signer_txs',
   {
     id: bigserial('id', {mode: 'number'}).primaryKey(),
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     agentId: bigint('agent_id', {mode: 'number'})
       .notNull()
       .references(() => agents.id),
@@ -387,7 +393,7 @@ export const registrationChallenges = pgTable(
   'registration_challenges',
   {
     nonce: text('nonce').primaryKey(),
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     /** Lower-case. */
     ownerAddress: text('owner_address').notNull(),
     requester: text('requester').notNull().default(''),
@@ -417,7 +423,7 @@ export const rateLimits = pgTable('rate_limits', {
 export const indexerCursor = pgTable(
   'indexer_cursor',
   {
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     contract: text('contract').notNull(),
     lastBlock: bigint('last_block', {mode: 'number'}).notNull(),
     lastBlockHash: text('last_block_hash').notNull(),
@@ -444,7 +450,7 @@ export const runs = pgTable(
     id: bigserial('id', {mode: 'number'}).primaryKey(),
     /** The only id the API shows; see `jobs.publicId`. */
     publicId: uuid('public_id').notNull().defaultRandom(),
-    chainId: bigint('chain_id', {mode: 'number'}).notNull(),
+    chainId: text('chain_id').notNull(),
     /** The orchestrator agent that owns the spending caps this run ran under. */
     agentId: bigint('agent_id', {mode: 'number'})
       .notNull()

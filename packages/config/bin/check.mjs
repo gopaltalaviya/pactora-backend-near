@@ -13,20 +13,18 @@ try {
   const ids = Object.keys(config.chains);
   console.log(`\u2713 Pactora config OK \u2014 ${ids.length} chain(s) enabled\n`);
   for (const id of ids) {
-    const c = config.chain(Number(id));
+    const c = config.chain(id);
     const star = c.chainId === config.defaultChainId ? ' (default)' : '';
     console.log(`  ${c.name} [${c.chainId}]${star}`);
     console.log(`    rpc        ${c.rpcUrl}`);
+    console.log(`    blocks     ${c.blockSource.kind === 'neardata' ? c.blockSource.url : 'rpc'}`);
     console.log(`    testnet    ${c.testnet}`);
     console.log(`    startBlock ${c.startBlock}`);
     console.log(`    fastPath   ${c.formatToken(c.params.fastPathMax)}`);
     console.log(`    minStake   ${c.formatToken(c.params.minStake)}`);
     console.log(`    fee        ${c.params.protocolFeeBps / 100}%`);
-    for (const [name, addr] of Object.entries(c.contracts)) {
-      console.log(`    ${name.padEnd(20)} ${addr}`);
-    }
-    for (const [name, addr] of Object.entries(c.erc8004)) {
-      console.log(`    erc8004.${name.padEnd(12)} ${addr}`);
+    for (const [name, account] of Object.entries(c.contracts)) {
+      console.log(`    ${name.padEnd(20)} ${account}`);
     }
     console.log('');
   }

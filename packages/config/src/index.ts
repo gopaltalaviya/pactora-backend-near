@@ -1,7 +1,7 @@
-import {readFileSync, existsSync, readdirSync} from 'node:fs';
+import {readFileSync, existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {z} from 'zod';
-import {legacyEnvProblems} from '@pactora/shared';
+import {ACCOUNT_ID_RE, ChainId as ChainIdSchema, legacyEnvProblems, type ChainId} from '@pactora/shared';
 
 /**
  * @pactora/config — the ONE import for chain facts, protocol parameters and
@@ -9,130 +9,147 @@ import {legacyEnvProblems} from '@pactora/shared';
  *
  * Assembled from three versioned sources plus env, validated, and frozen:
  *
- *   config/networks.json          what each chain is
- *   config/params.<chainId>.json  protocol parameters (same bytes the deploy
- *                                 script writes on-chain)
- *   deployments/<chainId>.json    generated addresses
- *   env                           secrets and wiring ONLY
+ *   config/networks.json        what each network is, keyed by CAIP-2 id
+ *   config/params.<slug>.json   protocol parameters: `onchain` is what the
+ *                               deploy passes to `new` (and `get_params`
+ *                               returns); `offchain` is the backend's own
+ *   deployments/<slug>.json     generated account ids
+ *   env                         secrets and wiring ONLY
  *
- * No chain object is defined anywhere else. No contract address is ever an env
- * var. See docs/08.
+ * No chain object is defined anywhere else. No contract account is ever an env
+ * var. See docs/NEAR-PORT.md §3.
  */
 
 // ── schemas ──────────────────────────────────────────────────────────────
-const Address = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
+const AccountId = z.string().regex(ACCOUNT_ID_RE, 'must be a NEAR account id').min(2).max(64);
+const Units = z.string().regex(/^\d+$/);
 
 const NetworkSchema = z.object({
-  chainId: z.number().int().positive(),
+  chainId: ChainIdSchema,
+  /** Names the params/deployments files (`:` is not allowed in Windows paths). */
+  slug: z.string().regex(/^[a-z0-9-]+$/),
+  /** What RPC `status.chain_id` must answer; every service checks it at start. */
+  nearNetworkId: z.string().min(1),
   name: z.string().min(1),
   shortName: z.string().min(1),
-  foundryAlias: z.string().min(1),
   testnet: z.boolean(),
-  nativeCurrency: z.object({
-    name: z.string(),
-    symbol: z.string(),
-    decimals: z.number().int(),
-  }),
+  nativeCurrency: z.object({name: z.string(), symbol: z.string(), decimals: z.number().int()}),
   rpcUrls: z.array(z.string().url()).min(1),
+  /** Where the indexer reads final blocks: neardata (testnet, mainnet) or RPC polling (sandbox). */
+  blockSource: z.discriminatedUnion('kind', [
+    z.object({kind: z.literal('neardata'), url: z.string().url()}),
+    z.object({kind: z.literal('rpc')}),
+  ]),
   blockExplorerUrls: z.array(z.string().url()),
   faucetUrls: z.array(z.string().url()).default([]),
-  confirmations: z.number().int().positive(),
-  maxLogRange: z.number().int().positive().default(100),
-  maxLogRangeNote: z.string().optional(),
   paymentToken: z.object({
     symbol: z.string(),
     decimals: z.literal(6),
-    address: Address.nullable(),
+    accountId: AccountId.nullable(),
     deployWithProtocol: z.boolean(),
-    note: z.string().optional(),
-  }),
-  erc8004: z.object({
-    deployWithProtocol: z.boolean(),
-    identityRegistry: Address.nullable(),
-    reputationRegistry: Address.nullable(),
-    identityImplementationPinned: Address.optional(),
     note: z.string().optional(),
   }),
 });
 
-const ParamsSchema = z.object({
-  minStake: z.string().regex(/^\d+$/),
-  withdrawDelaySeconds: z.number().int().positive(),
-  fastPathMax: z.string().regex(/^\d+$/),
-  /** v2: the smallest job the escrow accepts, and the fee floor — both on chain. */
-  minJobAmount: z.string().regex(/^\d+$/),
-  minFee: z.string().regex(/^\d+$/),
-  fastPathMinScore: z.number().int().min(0).max(100),
-  protocolFeeBps: z.number().int().min(0).max(1000),
-  acceptWindowSeconds: z.number().int().positive(),
-  workWindowSeconds: z.number().int().positive(),
-  reviewWindowSeconds: z.number().int().positive(),
-  /** v2: how long the arbiter has before anyone may expire a dispute. */
-  disputeTimeoutSeconds: z.number().int().positive(),
-  /** v2: the delay on handing over the contracts' admin role. */
-  adminDelaySeconds: z.number().int().positive(),
-  /** v3: the largest escrow job; also the ceiling for an escrow-backed x402 payment. */
-  maxJobAmount: z.string().regex(/^\d+$/),
-  /** v3: the gas every review gets (TaskEscrow.Config.feedbackGas). */
-  feedbackGas: z.number().int().positive(),
-  /** v3: the worker's per-job bond — a share of the job, with a floor. */
-  bondBps: z.number().int().min(0).max(10_000),
-  minBond: z.string().regex(/^\d+$/),
-  /** v3: what disputing costs the client — a share of the job, with a floor. */
-  disputeBondBps: z.number().int().min(0).max(10_000),
-  minDisputeBond: z.string().regex(/^\d+$/),
-  confidenceFloor: z.number().int().positive(),
-  /**
-   * What a newly registered agent may spend before its owner configures
-   * anything. Off-chain only — the on-chain authority is AgentAccount, and an
-   * agent paid from a plain EOA has no contract to read.
-   *
-   * It must not default to zero. A zero budget reads as "you may spend
-   * nothing", so an orchestrator refuses to hire anyone and the marketplace
-   * is broken on arrival — while the signer, finding no AgentAccount, would
-   * happily have signed. Reporting and enforcement must not disagree.
-   */
-  defaultPerTaskCap: z.string().regex(/^\d+$/),
-  defaultDailyCap: z.string().regex(/^\d+$/),
-});
+/** The contract's `Params`, exactly as `get_params` returns them (snake_case JSON). */
+export const OnchainParamsSchema = z
+  .object({
+    protocol_fee_bps: z.number().int().min(0).max(1000),
+    min_fee: Units,
+    min_job_amount: Units,
+    max_job_amount: Units,
+    fast_path_max: Units,
+    review_window: z.number().int().positive(),
+    max_accept_window: z.number().int().positive(),
+    max_work_window: z.number().int().positive(),
+    dispute_timeout: z.number().int().positive(),
+    bond_bps: z.number().int().min(0).max(10_000),
+    min_bond: Units,
+    dispute_bond_bps: z.number().int().min(0).max(10_000),
+    min_dispute_bond: Units,
+    min_stake: Units,
+    withdraw_delay: z.number().int().positive(),
+    default_per_task_cap: Units,
+    default_daily_cap: Units,
+  })
+  .strict();
+
+const OffchainParamsSchema = z
+  .object({
+    /** The windows the backend asks for on each job; the contract caps them at max_*_window. */
+    acceptWindowSeconds: z.number().int().positive(),
+    workWindowSeconds: z.number().int().positive(),
+    fastPathMinScore: z.number().int().min(0).max(100),
+    confidenceFloor: z.number().int().positive(),
+  })
+  .strict();
+
+const ParamsFileSchema = z.object({onchain: OnchainParamsSchema, offchain: OffchainParamsSchema});
 
 const DeploymentSchema = z.object({
-  chainId: z.number().int(),
+  chainId: ChainIdSchema,
   deployedAt: z.string(),
   startBlock: z.number().int().nonnegative(),
   commit: z.string().optional(),
-  contracts: z.record(z.string(), Address),
-  erc8004: z.record(z.string(), Address).optional(),
+  contracts: z.object({Pactora: AccountId, PaymentToken: AccountId, Arbiter: AccountId}).catchall(AccountId),
+  /** sha256 of each deployed wasm, from the CI build that produced it. */
+  wasm: z.record(z.string(), z.string().regex(/^[0-9a-f]{64}$/)).optional(),
 });
 
 export type Network = z.infer<typeof NetworkSchema>;
-export type Params = z.infer<typeof ParamsSchema>;
+export type OnchainParams = z.infer<typeof OnchainParamsSchema>;
 export type Deployment = z.infer<typeof DeploymentSchema>;
+
+/** The parameters the backend reads, by the names it has always used. */
+export interface Params {
+  minStake: bigint;
+  fastPathMax: bigint;
+  minJobAmount: bigint;
+  minFee: bigint;
+  maxJobAmount: bigint;
+  minBond: bigint;
+  minDisputeBond: bigint;
+  defaultPerTaskCap: bigint;
+  defaultDailyCap: bigint;
+  bondBps: number;
+  disputeBondBps: number;
+  protocolFeeBps: number;
+  withdrawDelaySeconds: number;
+  reviewWindowSeconds: number;
+  disputeTimeoutSeconds: number;
+  maxAcceptWindowSeconds: number;
+  maxWorkWindowSeconds: number;
+  acceptWindowSeconds: number;
+  workWindowSeconds: number;
+  fastPathMinScore: number;
+  confidenceFloor: number;
+}
 
 // ── the resolved shape ───────────────────────────────────────────────────
 export interface ChainConfig {
-  readonly chainId: number;
+  readonly chainId: ChainId;
+  readonly slug: string;
+  readonly nearNetworkId: string;
   readonly name: string;
   readonly testnet: boolean;
   readonly rpcUrl: string;
-  readonly confirmations: number;
-  /** Largest eth_getLogs span this RPC will serve. */
-  readonly maxLogRange: number;
+  readonly blockSource: Network['blockSource'];
   readonly network: Network;
-  readonly params: Readonly<Record<keyof Params, bigint | number>>;
-  readonly contracts: Readonly<Record<string, string>>;
-  readonly erc8004: Readonly<Record<string, string>>;
+  readonly params: Readonly<Params>;
+  /** The on-chain half of the params file, as passed to `new` and returned by `get_params`. */
+  readonly onchainParams: Readonly<OnchainParams>;
+  readonly contracts: Readonly<Deployment['contracts']>;
   readonly startBlock: number;
   explorerTx(hash: string): string;
-  explorerAddress(address: string): string;
+  explorerAddress(account: string): string;
   formatToken(amount: bigint): string;
   parseToken(human: string): bigint;
 }
 
 export interface PactoraConfig {
-  readonly defaultChainId: number;
-  readonly chains: Readonly<Record<number, ChainConfig>>;
-  chain(chainId?: number): ChainConfig;
+  readonly defaultChainId: ChainId;
+  readonly chains: Readonly<Partial<Record<ChainId, ChainConfig>>>;
+  chain(chainId?: string): ChainConfig;
 }
 
 // ── loader ───────────────────────────────────────────────────────────────
@@ -149,6 +166,11 @@ class ConfigError extends Error {
   }
 }
 
+/** The contracts checkout: `PACTORA_CONTRACTS_ROOT`, else the sibling `pactora-contracts-near`. */
+export function defaultContractsRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env['PACTORA_CONTRACTS_ROOT'] ?? join(process.cwd(), '..', 'pactora-contracts-near');
+}
+
 /**
  * Validate everything at startup and report ALL problems at once.
  *
@@ -157,12 +179,11 @@ class ConfigError extends Error {
  */
 export function loadConfig(opts: LoadOptions = {}): PactoraConfig {
   const env = opts.env ?? process.env;
-  // Before anything else: a stale AGENTX_CONTRACTS_ROOT would otherwise send
-  // the loader to the default path and report a confusing problem there.
+  // Before anything else: a stale AGENTX_* or EVM-era variable would otherwise
+  // send the loader to the defaults and report a confusing problem there.
   const legacy = legacyEnvProblems(env);
   if (legacy.length > 0) throw new ConfigError(legacy);
-  const root =
-    opts.contractsRoot ?? env['PACTORA_CONTRACTS_ROOT'] ?? join(process.cwd(), '..', 'agentx-contracts');
+  const root = opts.contractsRoot ?? defaultContractsRoot(env);
 
   const problems: string[] = [];
   const readJson = (rel: string): unknown => {
@@ -180,140 +201,155 @@ export function loadConfig(opts: LoadOptions = {}): PactoraConfig {
   if (rawNetworks === undefined) {
     throw new ConfigError([
       `config/networks.json not found under ${root}`,
-      'set PACTORA_CONTRACTS_ROOT to the agentx-contracts checkout',
+      'set PACTORA_CONTRACTS_ROOT to the pactora-contracts-near checkout (or the backend chain/ copy)',
     ]);
   }
 
-  const enabled = (env['ENABLED_CHAIN_IDS'] ?? '10143')
+  const enabledRaw = (env['ENABLED_CHAINS'] ?? 'near:testnet')
     .split(',')
     .map((s) => s.trim())
-    .filter(Boolean)
-    .map(Number);
+    .filter(Boolean);
+  const enabled: ChainId[] = [];
+  for (const id of enabledRaw) {
+    const parsed = ChainIdSchema.safeParse(id);
+    if (parsed.success) enabled.push(parsed.data);
+    else
+      problems.push(`ENABLED_CHAINS: "${id}" is not a supported chain (${ChainIdSchema.options.join(', ')})`);
+  }
+  if (enabledRaw.length === 0) problems.push('ENABLED_CHAINS is empty');
 
-  if (enabled.length === 0 || enabled.some(Number.isNaN)) {
-    problems.push(`ENABLED_CHAIN_IDS="${env['ENABLED_CHAIN_IDS']}" is not a list of chain ids`);
+  const defaultRaw = env['DEFAULT_CHAIN'] ?? enabled[0];
+  const defaultChainId = enabled.find((c) => c === defaultRaw);
+  if (defaultRaw !== undefined && defaultChainId === undefined) {
+    problems.push(`DEFAULT_CHAIN=${defaultRaw} is not in ENABLED_CHAINS=${enabledRaw.join(',')}`);
   }
 
-  const defaultChainId = Number(env['DEFAULT_CHAIN_ID'] ?? enabled[0]);
-  if (!enabled.includes(defaultChainId)) {
-    problems.push(`DEFAULT_CHAIN_ID=${defaultChainId} is not in ENABLED_CHAIN_IDS=${enabled.join(',')}`);
-  }
-
-  const chains: Record<number, ChainConfig> = {};
+  const chains: Partial<Record<ChainId, ChainConfig>> = {};
 
   for (const chainId of enabled) {
-    const netRaw = (rawNetworks as Record<string, unknown>)[String(chainId)];
+    const netRaw = (rawNetworks as Record<string, unknown>)[chainId];
     if (netRaw === undefined) {
-      problems.push(`chain ${chainId}: not present in config/networks.json`);
+      problems.push(`${chainId}: not present in config/networks.json`);
       continue;
     }
-
     const net = NetworkSchema.safeParse(netRaw);
     if (!net.success) {
       for (const issue of net.error.issues) {
-        problems.push(`chain ${chainId}: networks.json ${issue.path.join('.')} — ${issue.message}`);
+        problems.push(`${chainId}: networks.json ${issue.path.join('.')} — ${issue.message}`);
       }
       continue;
     }
-
-    const paramsRaw = readJson(`config/params.${chainId}.json`);
-    if (paramsRaw === undefined) {
-      problems.push(`chain ${chainId}: config/params.${chainId}.json not found`);
+    if (net.data.chainId !== chainId) {
+      problems.push(`${chainId}: networks.json entry says chainId ${net.data.chainId}`);
       continue;
     }
-    const stripped = Object.fromEntries(
-      Object.entries(paramsRaw as Record<string, unknown>).filter(([k]) => !k.startsWith('_')),
-    );
-    const params = ParamsSchema.safeParse(stripped);
+    const slug = net.data.slug;
+
+    const paramsRaw = readJson(`config/params.${slug}.json`);
+    if (paramsRaw === undefined) {
+      problems.push(`${chainId}: config/params.${slug}.json not found`);
+      continue;
+    }
+    const {_comment: _c, ...paramsBody} = paramsRaw as Record<string, unknown>;
+    const params = ParamsFileSchema.safeParse(paramsBody);
     if (!params.success) {
       for (const issue of params.error.issues) {
-        problems.push(`chain ${chainId}: params.${issue.path.join('.')} — ${issue.message}`);
+        problems.push(`${chainId}: params.${slug}.json ${issue.path.join('.')} — ${issue.message}`);
       }
       continue;
     }
 
-    const deployRaw = readJson(`deployments/${chainId}.json`);
+    const deployRaw = readJson(`deployments/${slug}.json`);
     if (deployRaw === undefined) {
       problems.push(
-        `chain ${chainId}: deployments/${chainId}.json not found ` +
-          `→ run \`make deploy NETWORK=${net.data.foundryAlias}\`, ` +
-          `or drop ${chainId} from ENABLED_CHAIN_IDS`,
+        `${chainId}: deployments/${slug}.json not found → deploy with pactora-contracts-near ` +
+          `scripts/deploy.mjs, or drop ${chainId} from ENABLED_CHAINS`,
       );
       continue;
     }
     const deployment = DeploymentSchema.safeParse(deployRaw);
     if (!deployment.success) {
       for (const issue of deployment.error.issues) {
-        problems.push(`chain ${chainId}: deployments.${issue.path.join('.')} — ${issue.message}`);
+        problems.push(`${chainId}: deployments/${slug}.json ${issue.path.join('.')} — ${issue.message}`);
       }
       continue;
     }
-
-    // The deployment must belong to the chain it claims.
+    // The deployment must belong to the network it claims.
     if (deployment.data.chainId !== chainId) {
       problems.push(
-        `chain ${chainId}: deployments/${chainId}.json declares chainId ` +
-          `${deployment.data.chainId} — wrong file for this network`,
+        `${chainId}: deployments/${slug}.json declares chainId ${deployment.data.chainId} — wrong file for this network`,
       );
       continue;
     }
 
-    const rpcUrl = env[`RPC_URL_${chainId}`] ?? net.data.rpcUrls[0]!;
+    const rpcUrl = env[`RPC_URL_${slug.toUpperCase().replace(/-/g, '_')}`] ?? net.data.rpcUrls[0]!;
     const explorer = net.data.blockExplorerUrls[0]?.replace(/\/$/, '') ?? '';
     const decimals = net.data.paymentToken.decimals;
-    // A token deployed with the protocol has no address in networks.json; the
+    // A token deployed with the protocol has no id in networks.json; the
     // deploy wrote it to the deployment. Resolve it once, here, for every reader.
     const paymentToken = Object.freeze({
       ...net.data.paymentToken,
-      address: net.data.paymentToken.address ?? deployment.data.contracts['PaymentToken'] ?? null,
+      accountId: net.data.paymentToken.accountId ?? deployment.data.contracts.PaymentToken,
     });
-    // v3: real money is never denominated in nothing.
-    if (!net.data.testnet && !paymentToken.address) {
+    if (!net.data.testnet && net.data.paymentToken.accountId === null) {
       problems.push(
-        `chain ${chainId}: no payment token — set paymentToken.address in networks.json (D8) ` +
-          `before enabling a non-testnet chain`,
+        `${chainId}: no payment token — set paymentToken.accountId in networks.json ` +
+          `before enabling a network that is not a testnet`,
       );
       continue;
+    }
+
+    const on = params.data.onchain;
+    const off = params.data.offchain;
+    const windows: Array<[string, number, number]> = [
+      ['acceptWindowSeconds', off.acceptWindowSeconds, on.max_accept_window],
+      ['workWindowSeconds', off.workWindowSeconds, on.max_work_window],
+    ];
+    for (const [name, asked, max] of windows) {
+      if (asked > max)
+        problems.push(`${chainId}: offchain.${name}=${asked} exceeds the contract's maximum ${max}`);
     }
 
     chains[chainId] = Object.freeze({
       chainId,
+      slug,
+      nearNetworkId: net.data.nearNetworkId,
       name: net.data.name,
       testnet: net.data.testnet,
       rpcUrl,
-      confirmations: net.data.confirmations,
-      maxLogRange: net.data.maxLogRange,
+      blockSource: net.data.blockSource,
       network: Object.freeze({...net.data, paymentToken}),
+      onchainParams: Object.freeze({...on}),
       params: Object.freeze({
-        minStake: BigInt(params.data.minStake),
-        fastPathMax: BigInt(params.data.fastPathMax),
-        minJobAmount: BigInt(params.data.minJobAmount),
-        minFee: BigInt(params.data.minFee),
-        maxJobAmount: BigInt(params.data.maxJobAmount),
-        minBond: BigInt(params.data.minBond),
-        minDisputeBond: BigInt(params.data.minDisputeBond),
-        feedbackGas: params.data.feedbackGas,
-        bondBps: params.data.bondBps,
-        disputeBondBps: params.data.disputeBondBps,
-        // Money, so bigint like the rest — never a JS number.
-        defaultPerTaskCap: BigInt(params.data.defaultPerTaskCap),
-        defaultDailyCap: BigInt(params.data.defaultDailyCap),
-        withdrawDelaySeconds: params.data.withdrawDelaySeconds,
-        fastPathMinScore: params.data.fastPathMinScore,
-        protocolFeeBps: params.data.protocolFeeBps,
-        acceptWindowSeconds: params.data.acceptWindowSeconds,
-        workWindowSeconds: params.data.workWindowSeconds,
-        reviewWindowSeconds: params.data.reviewWindowSeconds,
-        disputeTimeoutSeconds: params.data.disputeTimeoutSeconds,
-        adminDelaySeconds: params.data.adminDelaySeconds,
-        confidenceFloor: params.data.confidenceFloor,
+        // Money, so bigint — never a JS number.
+        minStake: BigInt(on.min_stake),
+        fastPathMax: BigInt(on.fast_path_max),
+        minJobAmount: BigInt(on.min_job_amount),
+        minFee: BigInt(on.min_fee),
+        maxJobAmount: BigInt(on.max_job_amount),
+        minBond: BigInt(on.min_bond),
+        minDisputeBond: BigInt(on.min_dispute_bond),
+        defaultPerTaskCap: BigInt(on.default_per_task_cap),
+        defaultDailyCap: BigInt(on.default_daily_cap),
+        bondBps: on.bond_bps,
+        disputeBondBps: on.dispute_bond_bps,
+        protocolFeeBps: on.protocol_fee_bps,
+        withdrawDelaySeconds: on.withdraw_delay,
+        reviewWindowSeconds: on.review_window,
+        disputeTimeoutSeconds: on.dispute_timeout,
+        maxAcceptWindowSeconds: on.max_accept_window,
+        maxWorkWindowSeconds: on.max_work_window,
+        acceptWindowSeconds: off.acceptWindowSeconds,
+        workWindowSeconds: off.workWindowSeconds,
+        fastPathMinScore: off.fastPathMinScore,
+        confidenceFloor: off.confidenceFloor,
       }),
-      contracts: Object.freeze(deployment.data.contracts),
-      erc8004: Object.freeze(deployment.data.erc8004 ?? {}),
+      contracts: Object.freeze({...deployment.data.contracts}),
       startBlock: deployment.data.startBlock,
 
-      explorerTx: (hash: string) => `${explorer}/tx/${hash}`,
-      explorerAddress: (address: string) => `${explorer}/address/${address}`,
+      // nearblocks: /txns/<hash>, /address/<account>.
+      explorerTx: (hash: string) => `${explorer}/txns/${hash}`,
+      explorerAddress: (account: string) => `${explorer}/address/${account}`,
 
       /** Base units → human. Never float arithmetic. */
       formatToken(amount: bigint): string {
@@ -339,45 +375,20 @@ export function loadConfig(opts: LoadOptions = {}): PactoraConfig {
     });
   }
 
-  if (problems.length > 0) throw new ConfigError(problems);
+  if (problems.length > 0 || defaultChainId === undefined) {
+    throw new ConfigError(problems.length > 0 ? problems : ['no chain enabled']);
+  }
 
   return Object.freeze({
     defaultChainId,
     chains: Object.freeze(chains),
-    chain(chainId?: number): ChainConfig {
+    chain(chainId?: string): ChainConfig {
       const id = chainId ?? defaultChainId;
-      const c = chains[id];
+      const c = chains[id as ChainId];
       if (!c) {
-        throw new Error(`chain ${id} not enabled (ENABLED_CHAIN_IDS=${Object.keys(chains).join(',')})`);
+        throw new Error(`chain ${id} not enabled (ENABLED_CHAINS=${Object.keys(chains).join(',')})`);
       }
       return c;
     },
   });
-}
-
-/**
- * ABIs, generated by `make export` in the contracts repo.
- *
- * Loaded from the same contracts checkout as everything else, so there is one
- * source for chain artifacts rather than a copy that drifts. In production
- * this resolves through the published `@pactora/contracts` package instead;
- * the shape is identical either way.
- */
-export function loadAbis(contractsRoot?: string): Record<string, unknown[]> {
-  const root =
-    contractsRoot ?? process.env['PACTORA_CONTRACTS_ROOT'] ?? join(process.cwd(), '..', 'agentx-contracts');
-  const dir = join(root, 'export', 'abis');
-
-  if (!existsSync(dir)) {
-    throw new Error(
-      `ABIs not found at ${dir}
-` + '  → run `make export` in agentx-contracts, or set PACTORA_CONTRACTS_ROOT',
-    );
-  }
-
-  const abis: Record<string, unknown[]> = {};
-  for (const file of readdirSync(dir).filter((f) => f.endsWith('.json'))) {
-    abis[file.replace('.json', '')] = JSON.parse(readFileSync(join(dir, file), 'utf8')) as unknown[];
-  }
-  return abis;
 }

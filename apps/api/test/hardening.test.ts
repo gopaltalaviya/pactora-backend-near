@@ -12,7 +12,7 @@ import {streamEvents} from '../src/events.js';
  * Production hardening of the HTTP surface: headers, readiness, metrics,
  * bounded streams, and a shutdown that does not wait on them.
  */
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
   contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
   env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},
@@ -213,7 +213,7 @@ describe('a database outage', () => {
   // "do not retry, this is ours", and the site showed a bare failure. It is a
   // 503 with retry-after, and the body names no host.
   it('is a 503 UPSTREAM_UNAVAILABLE with retry-after, never a 500, and leaks no address', async () => {
-    const dead = createDb('postgres://agentx:agentx@127.0.0.1:1/agentx', {max: 1});
+    const dead = createDb('postgres://pactora:pactora@127.0.0.1:1/pactora_near', {max: 1});
     try {
       const app = await build({db: dead});
       const res = await app.inject({url: '/v1/agents'});

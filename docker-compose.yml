@@ -2,20 +2,21 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: agentx
-      POSTGRES_PASSWORD: agentx
-      POSTGRES_DB: agentx
-    # 5442 on the host: 5432 is shadowed by another local Postgres on this
-    # machine, and connecting to the wrong database is worse than not connecting.
-    ports: ['5442:5432']
-    volumes: ['agentx-pg:/var/lib/postgresql/data']
+      POSTGRES_USER: pactora
+      POSTGRES_PASSWORD: pactora
+      POSTGRES_DB: pactora_near
+    # 5443 on the host: 5432 is another local Postgres, and 5442 is the Monad
+    # build's (agentx-backend). Connecting to the wrong database is worse than not
+    # connecting: the tests TRUNCATE.
+    ports: ['5443:5432']
+    volumes: ['pactora-near-pg:/var/lib/postgresql/data']
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U agentx']
+      test: ['CMD-SHELL', 'pg_isready -U pactora']
       interval: 5s
       retries: 10
 
 volumes:
-  agentx-pg:
+  pactora-near-pg:
 
 # No Redis here.
 #

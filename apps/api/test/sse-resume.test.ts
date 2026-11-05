@@ -13,7 +13,7 @@ import {buildApp, EventBus} from '../src/app.js';
  * ids it got the whole history again and a page drew every step twice. Each
  * event's id is its row id — stored first, so ids are unique and ordered.
  */
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const config = loadConfig({
   contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),
   env: {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'},

@@ -23,16 +23,39 @@ export const BaseUnits = z
 
 export type BaseUnits = z.infer<typeof BaseUnits>;
 
-/** ERC-8004 agent id — an ERC-721 token id, so uint256, so a string. */
+/** The contract's agent id (`AgentId`, a u64), carried as a decimal string. */
 export const AgentId = z.string().regex(/^\d+$/, 'agent id must be a numeric string');
 export type AgentId = z.infer<typeof AgentId>;
 
-export const ChainId = z.union([z.literal(31337), z.literal(10143), z.literal(143)]);
+/**
+ * A network, as a CAIP-2 chain id string (docs/NEAR-PORT.md §1).
+ *
+ * `near:<network>` is the form NEAR x402 code uses; the ChainAgnostic
+ * registry has no NEAR profile yet, so it is a convention, not a registered
+ * standard. `near:sandbox` is a local node only.
+ */
+export const CHAIN_IDS = ['near:testnet', 'near:sandbox'] as const;
+export const ChainId = z.enum(CHAIN_IDS);
 export type ChainId = z.infer<typeof ChainId>;
 
-export const Address = z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'must be a 20-byte hex address');
+/**
+ * A NEAR account id: 2–64 characters, nearcore's rule — lowercase
+ * alphanumeric parts separated by `-` or `_`, joined by `.`. Covers named
+ * (`alice.testnet`) and implicit (64 hex) accounts.
+ */
+export const ACCOUNT_ID_RE = /^(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/;
+export const AccountId = z.string().min(2).max(64).regex(ACCOUNT_ID_RE, 'must be a NEAR account id');
+export type AccountId = z.infer<typeof AccountId>;
 
-export const Hash32 = z.string().regex(/^0x[a-fA-F0-9]{64}$/, 'must be a 32-byte hex hash');
+export function isAccountId(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 2 && value.length <= 64 && ACCOUNT_ID_RE.test(value);
+}
+
+/** sha256 as 64 lowercase hex, no `0x` — what the contract's `check_hash` accepts. */
+export const Hash32 = z.string().regex(/^[0-9a-f]{64}$/, 'must be a sha256 hash: 64 lowercase hex');
+
+/** A NEAR transaction hash: 32 bytes in base58. */
+export const TxHash = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{43,44}$/, 'must be a base58 transaction hash');
 
 // ── capabilities ─────────────────────────────────────────────────────────
 /**
@@ -79,7 +102,7 @@ export const JobResult = z.object({
 export type JobResult = z.infer<typeof JobResult>;
 
 // ── lifecycle ────────────────────────────────────────────────────────────
-/** Mirrors ITaskEscrow.JobState exactly. Divergence here is a real bug. */
+/** Mirrors the contract's `JobState` exactly. Divergence here is a real bug. */
 export const JobState = z.enum(['created', 'accepted', 'submitted', 'disputed', 'settled', 'refunded']);
 export type JobState = z.infer<typeof JobState>;
 

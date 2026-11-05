@@ -1,0 +1,28 @@
+{
+  "_comment": "onchain is passed to Pactora's new(params) byte for byte and must equal get_params after deploy (scripts/check-params.mjs). offchain is read only by the backend. Values carried over from AgentX v3 params.10143.json; max windows are 10x the defaults, as v3's Deploy.s.sol set them.",
+  "onchain": {
+    "protocol_fee_bps": 100,
+    "min_fee": "100",
+    "min_job_amount": "10000",
+    "max_job_amount": "10000000",
+    "fast_path_max": "30000",
+    "review_window": 600,
+    "max_accept_window": 3000,
+    "max_work_window": 18000,
+    "dispute_timeout": 3600,
+    "bond_bps": 2000,
+    "min_bond": "10000",
+    "dispute_bond_bps": 1000,
+    "min_dispute_bond": "10000",
+    "min_stake": "10000000",
+    "withdraw_delay": 604800,
+    "default_per_task_cap": "100000",
+    "default_daily_cap": "1000000"
+  },
+  "offchain": {
+    "acceptWindowSeconds": 300,
+    "workWindowSeconds": 1800,
+    "fastPathMinScore": 70,
+    "confidenceFloor": 25
+  }
+}

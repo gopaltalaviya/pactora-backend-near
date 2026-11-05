@@ -5,8 +5,8 @@
 ```bash
 nvm use                      # Node 22 (.nvmrc)
 pnpm install                 # also installs the git hooks
-docker compose up -d         # Postgres on 127.0.0.1:5442
-DATABASE_URL=postgres://agentx:agentx@127.0.0.1:5442/agentx pnpm db:migrate
+docker compose up -d         # Postgres on 127.0.0.1:5443
+DATABASE_URL=postgres://pactora:pactora@127.0.0.1:5443/pactora_near pnpm db:migrate
 pnpm -r build
 ```
 

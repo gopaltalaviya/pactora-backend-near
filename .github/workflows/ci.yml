@@ -54,10 +54,10 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: agentx
-          POSTGRES_PASSWORD: agentx
-          POSTGRES_DB: agentx
-        ports: ['5442:5432']
+          POSTGRES_USER: pactora
+          POSTGRES_PASSWORD: pactora
+          POSTGRES_DB: pactora_near
+        ports: ['5443:5432']
         options: >-
           --health-cmd pg_isready --health-interval 5s
           --health-timeout 5s --health-retries 10
@@ -100,13 +100,13 @@ jobs:
       - working-directory: agentx-backend
         run: pnpm -r build
       - working-directory: agentx-backend
-        env: {DATABASE_URL: 'postgres://agentx:agentx@127.0.0.1:5442/agentx'}
+        env: {DATABASE_URL: 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near'}
         run: pnpm --filter @pactora/db migrate
       - working-directory: agentx-backend
         env:
           # 127.0.0.1, never localhost: Node resolves localhost to ::1 while
           # the service container binds IPv4.
-          DATABASE_URL: postgres://agentx:agentx@127.0.0.1:5442/agentx
+          DATABASE_URL: postgres://pactora:pactora@127.0.0.1:5443/pactora_near
           PACTORA_CONTRACTS_ROOT: ../agentx-contracts
         # Coverage floors are enforced by vitest.config.ts.
         run: pnpm test:coverage

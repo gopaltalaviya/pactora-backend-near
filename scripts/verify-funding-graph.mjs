@@ -3,7 +3,7 @@
  * v3, live: the funding graph the trust check reads is exactly the chain's.
  *
  *   set -a; . ../agentx-contracts/.env; set +a
- *   DATABASE_URL=postgres://agentx:agentx@127.0.0.1:5442/agentx  *     node scripts/verify-funding-graph.mjs <untilBlock> --truncates-the-dev-db
+ *   DATABASE_URL=postgres://pactora:pactora@127.0.0.1:5443/pactora_near  *     node scripts/verify-funding-graph.mjs <untilBlock> --truncates-the-dev-db
  *
  * Runs the real Indexer against Monad testnet from the deployment's start
  * block, with the AGENT_A and AGENT_B wallets as the known agents, then reads

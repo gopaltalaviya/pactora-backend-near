@@ -8,18 +8,18 @@ import {sql, type SQL} from 'drizzle-orm';
  * history can never score two ways.
  */
 
-/** `JobSettled.outcome` for a paid, reviewed job. UNRESOLVED (a dispute that timed out) pays but earns nothing. */
-export const OUTCOME_SUCCESS = 0;
+/**
+ * `job_settled.outcome` for a paid, reviewed job — the contract's `Outcome`
+ * enum as its JSON names it. `Unresolved` (a dispute that timed out) pays but
+ * earns nothing.
+ */
+export const OUTCOME_SUCCESS = 'Success';
 
-/** Refund reasons the contract records as the worker's failure. A client's own cancel is not one. */
+/** `job_refunded.reason`s the contract records as the worker's failure. A client's own cancel is not one. */
 export const WORKER_FAULT = new Set(['undelivered', 'dispute']);
 
-/** `JobRefunded.reason` is a left-aligned bytes32 string; plain text is accepted too. */
-const bytes32 = (s: string) =>
-  `0x${Array.from(new TextEncoder().encode(s), (b) => b.toString(16).padStart(2, '0'))
-    .join('')
-    .padEnd(64, '0')}`;
-export const WORKER_FAULT_VALUES: readonly string[] = [...WORKER_FAULT].flatMap((r) => [r, bytes32(r)]);
+/** The same reasons, as the values an event payload carries (plain strings on NEAR). */
+export const WORKER_FAULT_VALUES: readonly string[] = [...WORKER_FAULT];
 
 /**
  * The score, as SQL: Laplace-smoothed and volume-damped (docs/04 §2.3), so a

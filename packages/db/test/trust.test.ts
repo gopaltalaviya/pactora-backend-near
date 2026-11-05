@@ -18,8 +18,8 @@ import {
  * worker's side funded the client just before it paid, which is how
  * prooflines found Monad's ERC-8004 ratings were farmed.
  */
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
-const CHAIN = 10143;
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
+const CHAIN = 'near:testnet';
 let db: Db;
 let seq = 0;
 
@@ -36,7 +36,7 @@ beforeEach(async () => {
   seq = 0;
 });
 
-const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}`;
+const addr = (n: number) => `a${n}.testnet`;
 
 async function agent(owner: string, wallet = addr(1000 + ++seq)): Promise<{id: number; wallet: string}> {
   const rows = (await db.execute(
@@ -48,12 +48,13 @@ async function agent(owner: string, wallet = addr(1000 + ++seq)): Promise<{id: n
 
 async function pay(clientId: number, workerId: number, block: number, amount = 50_000): Promise<void> {
   await db.execute(sql`INSERT INTO payments (chain_id, from_agent_id, to_agent_id, amount, tx_hash, block_number)
-      VALUES (${CHAIN}, ${clientId}, ${workerId}, ${amount}, ${`0x${(++seq).toString(16).padStart(64, '0')}`}, ${block})`);
+      VALUES (${CHAIN}, ${clientId}, ${workerId}, ${amount}, ${`tx${++seq}`}, ${block})`);
 }
 
 async function transfer(from: string, to: string, block: number): Promise<void> {
-  await db.execute(sql`INSERT INTO token_transfers (chain_id, block_number, tx_hash, log_index, from_address, to_address, amount)
-      VALUES (${CHAIN}, ${block}, ${`0x${(++seq).toString(16).padStart(64, '0')}`}, 0, ${from.toLowerCase()}, ${to.toLowerCase()}, 1000000)`);
+  const n = ++seq;
+  await db.execute(sql`INSERT INTO token_transfers (chain_id, block_number, tx_hash, receipt_id, log_index, from_address, to_address, amount)
+      VALUES (${CHAIN}, ${block}, ${`tx${n}`}, ${`receipt${n}`}, 0, ${from}, ${to}, 1000000)`);
 }
 
 async function failed(agentId: number, n: number): Promise<void> {
@@ -143,10 +144,10 @@ describe('readTrust', () => {
     expect((await trust(worker.id)).metrics.selfFunded).toBe(0);
   });
 
-  it('matches addresses whatever their case', async () => {
-    const workerOwner = '0xAbCdEf0000000000000000000000000000000001';
+  it('matches implicit (64-hex) accounts as well as named ones', async () => {
+    const workerOwner = 'abcdef'.padEnd(64, '0');
     const worker = await agent(workerOwner);
-    const c = await agent(addr(10), '0xFfEe000000000000000000000000000000000002');
+    const c = await agent(addr(10), 'ffee'.padEnd(64, '1'));
     await transfer(workerOwner, c.wallet, 10);
     await pay(c.id, worker.id, 20);
     expect((await trust(worker.id)).metrics.selfFunded).toBe(1);

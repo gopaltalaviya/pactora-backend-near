@@ -32,8 +32,11 @@ export const MIN_CLIENT_OWNERS = 3;
 export const MAX_TOP_OWNER_SHARE = 0.5;
 /** Settlements one owner can contribute to the trust score. */
 export const PER_OWNER_CAP = 3;
-/** How far before a payment a funding transfer counts: ~1 h of Monad blocks at ~0.4 s. */
-export const DEFAULT_WINDOW_BLOCKS = 9_000;
+/**
+ * How far before a payment a funding transfer counts: ~1 h of NEAR blocks.
+ * Measured on testnet 2026-11-05: 595 ms per block over 3,000 final blocks.
+ */
+export const DEFAULT_WINDOW_BLOCKS = 6_000;
 
 export type Verdict = 'trusted' | 'new' | 'concentrated' | 'self-funded' | 'failing';
 

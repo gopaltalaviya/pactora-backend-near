@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import {BaseUnits, Capability, type JobSpec} from './job.js';
+import {AccountId, BaseUnits, Capability, ChainId, TxHash, type JobSpec} from './job.js';
 
 /**
  * x402 — HTTP 402 Payment Required, made to mean something.
@@ -10,11 +10,11 @@ import {BaseUnits, Capability, type JobSpec} from './job.js';
  * and it is named for what it is rather than borrowing `exact`:
  *
  * - `exact` has the client sign an EIP-3009 `transferWithAuthorization`,
- *   which the facilitator submits. The test token has no such function, and
+ *   which the facilitator submits. NEP-141 has no such function, and
  *   more to the point a Pactora agent's key lives in the signer, not in the
  *   agent — there is nothing for the agent to sign with.
- * - `agentx-directpay` has the client settle FIRST, through the facilitator,
- *   as a `directPay` on `TaskEscrow`: paid, settled and feedback recorded in
+ * - `pactora-directpay` has the client settle FIRST, through the facilitator,
+ *   as a `direct_pay` on the Pactora contract: paid, settled and reviewed in
  *   one transaction, under the same caps as every other spend. The receipt of
  *   that payment is what goes in `X-PAYMENT`, and the worker redeems it once.
  *
@@ -22,36 +22,36 @@ import {BaseUnits, Capability, type JobSpec} from './job.js';
  * worker's only question — "was I paid, for this, and not already?" — is one
  * the facilitator answers from the chain and a one-row ledger.
  *
- * - `agentx-escrow` (v3) is the refundable one. The facilitator settles the
+ * - `pactora-escrow` (v3) is the refundable one. The facilitator settles the
  *   payment as an escrow job, so the money waits in the escrow while the
  *   worker works. The worker does the work first; only then does it accept
  *   and submit on chain. A worker that cannot deliver declines, and the client
  *   cancels for a full refund; one that accepts and vanishes is refunded by
- *   the deadline exits, with its bond. Slower than `agentx-directpay` (more
+ *   the deadline exits, with its bond. Slower than `pactora-directpay` (more
  *   transactions) and not capped by the fast path, only by `maxJobAmount`.
  */
 
 export const X402_VERSION = 1;
-export const X402_SCHEME = 'agentx-directpay';
-export const X402_ESCROW_SCHEME = 'agentx-escrow';
+export const X402_SCHEME = 'pactora-directpay';
+export const X402_ESCROW_SCHEME = 'pactora-escrow';
 export const X402Scheme = z.enum([X402_SCHEME, X402_ESCROW_SCHEME]);
 export type X402Scheme = z.infer<typeof X402Scheme>;
 
 export const PaymentRequirements = z.object({
   scheme: X402Scheme,
-  /** The network slug, e.g. `monad-testnet`. A payment on another chain is refused. */
-  network: z.string().min(1),
+  /** The CAIP-2 network, e.g. `near:testnet`. A payment on another chain is refused. */
+  network: ChainId,
   /** What this resource costs, in token base units. */
   maxAmountRequired: BaseUnits,
   /** The URL being paid for. The payment is bound to it. */
   resource: z.string().url(),
   description: z.string().max(500).default(''),
   mimeType: z.string().default('application/json'),
-  /** The worker's payout wallet — where `directPay` sends the money. */
-  payTo: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  /** The worker's wallet account — who `direct_pay` credits. */
+  payTo: AccountId,
   maxTimeoutSeconds: z.number().int().positive().max(3_600).default(300),
-  /** The payment token. */
-  asset: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  /** The payment token's account id (NEP-141). */
+  asset: AccountId,
   extra: z.object({
     /** The worker's Pactora agent id — who is being paid. */
     agentId: z.number().int().positive(),
@@ -71,11 +71,11 @@ export interface PaymentRequired {
 export const PaymentPayload = z.object({
   x402Version: z.literal(X402_VERSION),
   scheme: X402Scheme,
-  network: z.string().min(1),
+  network: ChainId,
   payload: z.object({
     /** The Pactora job the facilitator settled this payment as — its public id. */
     jobId: z.string().uuid(),
-    txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    txHash: TxHash,
   }),
 });
 export type PaymentPayload = z.infer<typeof PaymentPayload>;

@@ -1,116 +1,31 @@
 {
-  "31337": {
-    "chainId": 31337,
-    "name": "Anvil Local",
-    "shortName": "anvil",
-    "foundryAlias": "anvil",
+  "_comment": "What each NEAR network is. Keyed by CAIP-2 id (near:<network>, the convention NEAR x402 code uses; ChainAgnostic has no NEAR profile yet). slug names the params/deployments files, because ':' is not allowed in Windows paths. nearNetworkId is what RPC status.chain_id must answer.",
+  "near:testnet": {
+    "chainId": "near:testnet",
+    "slug": "testnet",
+    "nearNetworkId": "testnet",
+    "name": "NEAR Testnet",
+    "shortName": "near-testnet",
     "testnet": true,
-    "nativeCurrency": {
-      "name": "Ether",
-      "symbol": "ETH",
-      "decimals": 18
-    },
-    "rpcUrls": [
-      "http://127.0.0.1:8545"
-    ],
+    "nativeCurrency": {"name": "NEAR", "symbol": "NEAR", "decimals": 24},
+    "rpcUrls": ["https://rpc.testnet.near.org"],
+    "blockSource": {"kind": "neardata", "url": "https://testnet.neardata.xyz"},
+    "blockExplorerUrls": ["https://testnet.nearblocks.io"],
+    "faucetUrls": [],
+    "paymentToken": {"symbol": "mUSDC", "decimals": 6, "accountId": null, "deployWithProtocol": true}
+  },
+  "near:sandbox": {
+    "chainId": "near:sandbox",
+    "slug": "sandbox",
+    "nearNetworkId": "sandbox",
+    "name": "NEAR Sandbox (local)",
+    "shortName": "near-sandbox",
+    "testnet": true,
+    "nativeCurrency": {"name": "NEAR", "symbol": "NEAR", "decimals": 24},
+    "rpcUrls": ["http://127.0.0.1:3030"],
+    "blockSource": {"kind": "rpc"},
     "blockExplorerUrls": [],
     "faucetUrls": [],
-    "confirmations": 1,
-    "paymentToken": {
-      "symbol": "MockUSDC",
-      "decimals": 6,
-      "address": null,
-      "deployWithProtocol": true
-    },
-    "erc8004": {
-      "deployWithProtocol": true,
-      "identityRegistry": null,
-      "reputationRegistry": null
-    },
-    "maxLogRange": 10000,
-    "maxLogRangeNote": "anvil has no limit; a large range just makes local replays fast."
-  },
-  "10143": {
-    "chainId": 10143,
-    "name": "Monad Testnet",
-    "shortName": "monad-testnet",
-    "foundryAlias": "monad_testnet",
-    "testnet": true,
-    "nativeCurrency": {
-      "name": "MON",
-      "symbol": "MON",
-      "decimals": 18
-    },
-    "rpcUrls": [
-      "https://testnet-rpc.monad.xyz"
-    ],
-    "blockExplorerUrls": [
-      "https://testnet.monadexplorer.com"
-    ],
-    "faucetUrls": [
-      "https://faucet.monad.xyz"
-    ],
-    "confirmations": 2,
-    "paymentToken": {
-      "symbol": "MockUSDC",
-      "decimals": 6,
-      "address": null,
-      "deployWithProtocol": true
-    },
-    "erc8004": {
-      "deployWithProtocol": false,
-      "identityRegistry": "0x8004A818BFB912233c491871b3d84c89A494BD9e",
-      "reputationRegistry": "0x8004B663056A597Dffe9eCcC1965A193B7388713",
-      "identityImplementationPinned": "0x7274e874ca62410a93bd8bf61c69d8045e399c02",
-      "reputationImplementationPinned": "0x16e0fa7f7c56b9a767e34b192b51f921be31da34",
-      "validationRegistry": "0x8004Cb1BF31DAf7788923b405b754f57acEB4272",
-      "validationImplementationPinned": "0xdb31f5d9167f8ebc8b30fbbf814c4d297c2d7f99",
-      "note": "Verified 2026-10-25: the canonical ERC-8004 registries are now on Monad testnet (2026-09-22 they were not, and v2 used our own reference deployment). Identity runs the same implementation as mainnet's pin; reputation getVersion()='2.0.0'. ERC-1967 proxies - verify-erc8004 checks both pins. Validation Registry (getVersion()='2.0.0', same implementation on mainnet; upstream marks it under discussion) - SettlementValidator answers requests there; never used for money."
-    },
-    "maxLogRange": 100,
-    "maxLogRangeNote": "Monad testnet RPC rejects eth_getLogs over 100 blocks. Found by running the indexer against it, not by reading docs."
-  },
-  "143": {
-    "chainId": 143,
-    "name": "Monad",
-    "shortName": "monad",
-    "foundryAlias": "monad",
-    "testnet": false,
-    "nativeCurrency": {
-      "name": "MON",
-      "symbol": "MON",
-      "decimals": 18
-    },
-    "rpcUrls": [
-      "https://rpc.monad.xyz",
-      "https://rpc1.monad.xyz",
-      "https://rpc2.monad.xyz",
-      "https://rpc3.monad.xyz"
-    ],
-    "blockExplorerUrls": [
-      "https://monadscan.com",
-      "https://monadvision.com"
-    ],
-    "faucetUrls": [],
-    "confirmations": 5,
-    "paymentToken": {
-      "symbol": "USDC",
-      "decimals": 6,
-      "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-      "deployWithProtocol": false,
-      "note": "D8 (2026-10-26): Circle's native USDC, from developers.circle.com/stablecoins/usdc-contract-addresses; read on 143: decimals() 6, symbol() and name() 'USDC'."
-    },
-    "erc8004": {
-      "deployWithProtocol": false,
-      "identityRegistry": "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
-      "reputationRegistry": "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63",
-      "identityImplementationPinned": "0x7274e874ca62410a93bd8bf61c69d8045e399c02",
-      "reputationImplementationPinned": "0x16e0fa7f7c56b9a767e34b192b51f921be31da34",
-      "validationRegistry": "0x8004Cc8439f36fd5F9F049D9fF86523Df6dAAB58",
-      "validationImplementationPinned": "0xdb31f5d9167f8ebc8b30fbbf814c4d297c2d7f99",
-      "note": "Verified live 2026-09-22: ERC-721 name()='AgentIdentity', symbol()='AGENT'. ERC-1967 proxies - CI must check the implementation has not moved. 2026-10-25: Validation Registry 0x8004Cc84... runs the testnet implementation, pinned."
-    },
-    "maxLogRange": 100,
-    "maxLogRangeNote": "Measured 2026-10-26 on rpc.monad.xyz: a wider eth_getLogs is refused with -32614 'eth_getLogs is limited to a 100 range'."
+    "paymentToken": {"symbol": "mUSDC", "decimals": 6, "accountId": null, "deployWithProtocol": true}
   }
 }

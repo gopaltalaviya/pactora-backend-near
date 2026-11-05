@@ -24,7 +24,7 @@ import {addr, signedRegistration} from './helpers/register.js';
  * that checked nothing. The live check is `DEMO_X402=1 pnpm demo`.
  */
 
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 
 const config = loadConfig({
   contractsRoot: fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url)),

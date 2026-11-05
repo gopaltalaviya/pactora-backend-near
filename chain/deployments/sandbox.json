@@ -1,0 +1,11 @@
+{
+  "_comment": "Local near-sandbox (Docker). Account ids are fixed: the deploy script creates exactly these under the sandbox root test.near, so this file is the same on every fresh sandbox. startBlock 0: a fresh chain. The arbiter is a plain account here; on testnet it is a Sputnik DAO.",
+  "chainId": "near:sandbox",
+  "deployedAt": "fixed",
+  "startBlock": 0,
+  "contracts": {
+    "Pactora": "pactora.test.near",
+    "PaymentToken": "musdc.test.near",
+    "Arbiter": "arbiter.test.near"
+  }
+}

@@ -5,8 +5,8 @@ import {loadConfig} from '../src/index.js';
 // The env vars were renamed AGENTX_* → PACTORA_* on 2026-11-01. A hosted
 // `.env` that still says AGENTX_CONTRACTS_ROOT would otherwise boot on the
 // default path and fail somewhere else, later, with a confusing error.
-const contractsRoot = fileURLToPath(new URL('../../../../agentx-contracts', import.meta.url));
-const base = {ENABLED_CHAIN_IDS: '31337', DEFAULT_CHAIN_ID: '31337'};
+const contractsRoot = fileURLToPath(new URL('../../../chain', import.meta.url));
+const base = {ENABLED_CHAINS: 'near:sandbox'};
 
 describe('a pre-rename AGENTX_* variable refuses to start', () => {
   it('names the PACTORA_* replacement', () => {
@@ -28,6 +28,6 @@ describe('a pre-rename AGENTX_* variable refuses to start', () => {
 
   it('still loads when only the new names are set', () => {
     const config = loadConfig({contractsRoot, env: {...base, PACTORA_CONTRACTS_ROOT: contractsRoot}});
-    expect(config.defaultChainId).toBe(31337);
+    expect(config.defaultChainId).toBe('near:sandbox');
   });
 });

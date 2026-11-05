@@ -16,7 +16,7 @@ import {addr, signedRegistration} from './helpers/register.js';
  * error contract, which is exactly where a demo breaks.
  */
 
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 
 let app: FastifyInstance;
 let db: Db;

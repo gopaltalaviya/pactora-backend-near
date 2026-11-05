@@ -19,7 +19,7 @@ import {createDb, closeDb} from '@pactora/db';
 import {Indexer} from '../apps/indexer/dist/indexer.js';
 
 const CHAIN_ID = Number(process.env.VERIFY_CHAIN_ID ?? 31337);
-const DB_URL = process.env.DATABASE_URL ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env.DATABASE_URL ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 // anvil account 0 — a published test key, worthless by design.
 // anvil account 0 locally; the real DEPLOYER key on a testnet run.
 const DEPLOYER = privateKeyToAccount(

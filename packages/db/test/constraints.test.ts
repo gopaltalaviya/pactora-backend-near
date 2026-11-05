@@ -18,7 +18,7 @@ import {createDb, closeDb, type Db} from '../src/index.js';
  * indistinguishable from one that was never written.
  */
 
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://agentx:agentx@127.0.0.1:5442/agentx';
+const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 
 let db: Db;
 
@@ -51,10 +51,10 @@ async function refuses(statement: ReturnType<typeof sql>, because: RegExp): Prom
   expect(`${(error as Error).message} ${pg.message}`).toMatch(because);
 }
 
-async function agent(chainId: number, wallet: string, over: {price?: string} = {}): Promise<number> {
+async function agent(chainId: string, wallet: string, over: {price?: string} = {}): Promise<number> {
   const rows = (await db.execute(
     sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
-        VALUES (${chainId}, '0xowner', ${wallet}, 'A', ${over.price ?? '20000'}) RETURNING id`,
+        VALUES (${chainId}, 'owner.testnet', ${wallet}, 'A', ${over.price ?? '20000'}) RETURNING id`,
   )) as unknown as {id: number}[];
   return rows[0]!.id;
 }
@@ -67,34 +67,34 @@ describe('a job can never span two chains', () => {
    * buy mainnet reputation.
    */
   it('refuses a job whose worker is on another chain', async () => {
-    const client = await agent(10143, '0x' + '11'.repeat(20));
-    const worker = await agent(143, '0x' + '22'.repeat(20));
+    const client = await agent('near:testnet', 'w11.testnet');
+    const worker = await agent('near:sandbox', 'w22.testnet');
 
     await refuses(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-          VALUES (10143, ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0xa')`,
+          VALUES ('near:testnet', ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0xa')`,
       /jobs_worker_same_chain|foreign key/i,
     );
   });
 
   it('refuses a job whose client is on another chain', async () => {
-    const client = await agent(143, '0x' + '33'.repeat(20));
-    const worker = await agent(10143, '0x' + '44'.repeat(20));
+    const client = await agent('near:sandbox', 'w33.testnet');
+    const worker = await agent('near:testnet', 'w44.testnet');
 
     await refuses(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-          VALUES (10143, ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0xb')`,
+          VALUES ('near:testnet', ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0xb')`,
       /jobs_client_same_chain|foreign key/i,
     );
   });
 
   it('accepts a job when both sides are on the same chain', async () => {
-    const client = await agent(10143, '0x' + '55'.repeat(20));
-    const worker = await agent(10143, '0x' + '66'.repeat(20));
+    const client = await agent('near:testnet', 'w55.testnet');
+    const worker = await agent('near:testnet', 'w66.testnet');
 
     await db.execute(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-          VALUES (10143, ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0xc')`,
+          VALUES ('near:testnet', ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0xc')`,
     );
     const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM jobs`)) as unknown as {n: number}[];
     expect(rows[0]!.n).toBe(1);
@@ -103,14 +103,14 @@ describe('a job can never span two chains', () => {
 
 describe('money cannot be created or faked', () => {
   async function pair(): Promise<[number, number]> {
-    return [await agent(10143, '0x' + '77'.repeat(20)), await agent(10143, '0x' + '88'.repeat(20))];
+    return [await agent('near:testnet', 'w77.testnet'), await agent('near:testnet', 'w88.testnet')];
   }
 
   it('refuses a self-dealt job', async () => {
     const [a] = await pair();
     await refuses(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-          VALUES (10143, ${a}, ${a}, 'escrow', 20000, '{}'::jsonb, '0xd')`,
+          VALUES ('near:testnet', ${a}, ${a}, 'escrow', 20000, '{}'::jsonb, '0xd')`,
       /no_self_dealing/i,
     );
   });
@@ -119,7 +119,7 @@ describe('money cannot be created or faked', () => {
     const [c, w] = await pair();
     await refuses(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-          VALUES (10143, ${c}, ${w}, 'escrow', 0, '{}'::jsonb, '0xe')`,
+          VALUES ('near:testnet', ${c}, ${w}, 'escrow', 0, '{}'::jsonb, '0xe')`,
       /amount_positive/i,
     );
   });
@@ -129,7 +129,7 @@ describe('money cannot be created or faked', () => {
     const [c, w] = await pair();
     await refuses(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, fee, spec, spec_hash)
-          VALUES (10143, ${c}, ${w}, 'escrow', 20000, 20001, '{}'::jsonb, '0xf')`,
+          VALUES ('near:testnet', ${c}, ${w}, 'escrow', 20000, 20001, '{}'::jsonb, '0xf')`,
       /fee_within_amount/i,
     );
   });
@@ -138,7 +138,7 @@ describe('money cannot be created or faked', () => {
     const [c, w] = await pair();
     await refuses(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, fee, spec, spec_hash)
-          VALUES (10143, ${c}, ${w}, 'escrow', 20000, -1, '{}'::jsonb, '0x10')`,
+          VALUES ('near:testnet', ${c}, ${w}, 'escrow', 20000, -1, '{}'::jsonb, '0x10')`,
       /fee_not_negative/i,
     );
   });
@@ -146,7 +146,7 @@ describe('money cannot be created or faked', () => {
   it('refuses a zero-amount payment row', async () => {
     await refuses(
       sql`INSERT INTO payments (chain_id, amount, fee, tx_hash, block_number)
-          VALUES (10143, 0, 0, '0xaa', 1)`,
+          VALUES ('near:testnet', 0, 0, '0xaa', 1)`,
       /payment_amount_positive/i,
     );
   });
@@ -154,7 +154,7 @@ describe('money cannot be created or faked', () => {
   it('refuses a negative price', async () => {
     await refuses(
       sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
-          VALUES (10143, '0xo', '0x99', 'Cheap', -1)`,
+          VALUES ('near:testnet', 'o.testnet', 'w99.testnet', 'Cheap', -1)`,
       /price_non_negative/i,
     );
   });
@@ -162,12 +162,12 @@ describe('money cannot be created or faked', () => {
 
 describe('a score cannot leave its range', () => {
   it('refuses a score above 100', async () => {
-    const a = await agent(10143, '0x' + 'aa'.repeat(20));
+    const a = await agent('near:testnet', 'waa.testnet');
     await refuses(sql`INSERT INTO agent_stats (agent_id, score) VALUES (${a}, 101)`, /score_in_range/i);
   });
 
   it('refuses a negative score', async () => {
-    const a = await agent(10143, '0x' + 'bb'.repeat(20));
+    const a = await agent('near:testnet', 'wbb.testnet');
     await refuses(sql`INSERT INTO agent_stats (agent_id, score) VALUES (${a}, -1)`, /score_in_range/i);
   });
 });
@@ -178,7 +178,7 @@ describe('capabilities stay matchable', () => {
    * and discovery would silently find nobody.
    */
   it('refuses a capability that is not kebab-case', async () => {
-    const a = await agent(10143, '0x' + 'cc'.repeat(20));
+    const a = await agent('near:testnet', 'wcc.testnet');
     for (const bad of [
       'Market Research',
       'market_research',
@@ -194,7 +194,7 @@ describe('capabilities stay matchable', () => {
   });
 
   it('accepts ordinary kebab-case', async () => {
-    const a = await agent(10143, '0x' + 'dd'.repeat(20));
+    const a = await agent('near:testnet', 'wdd.testnet');
     await db.execute(
       sql`INSERT INTO agent_capabilities (agent_id, capability) VALUES (${a}, 'market-research'), (${a}, 'trade-analysis'), (${a}, 'x2')`,
     );
@@ -207,15 +207,15 @@ describe('capabilities stay matchable', () => {
 
 describe('job_events is append-only, enforced rather than documented', () => {
   async function anEvent(): Promise<number> {
-    const client = await agent(10143, '0x' + 'ee'.repeat(20));
-    const worker = await agent(10143, '0x' + 'ff'.repeat(20));
+    const client = await agent('near:testnet', 'wee.testnet');
+    const worker = await agent('near:testnet', 'wff.testnet');
     const jobs = (await db.execute(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-          VALUES (10143, ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0x11') RETURNING id`,
+          VALUES ('near:testnet', ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0x11') RETURNING id`,
     )) as unknown as {id: number}[];
     await db.execute(
       sql`INSERT INTO job_events (chain_id, job_id, kind, payload, tx_hash, log_index)
-          VALUES (10143, ${jobs[0]!.id}, 'settled', '{}'::jsonb, '0xtx', 0)`,
+          VALUES ('near:testnet', ${jobs[0]!.id}, 'settled', '{}'::jsonb, '0xtx', 0)`,
     );
     return jobs[0]!.id;
   }
@@ -238,7 +238,7 @@ describe('job_events is append-only, enforced rather than documented', () => {
     const jobId = await anEvent();
     await db.execute(
       sql`INSERT INTO job_events (chain_id, job_id, kind, payload, tx_hash, log_index)
-          VALUES (10143, ${jobId}, 'accepted', '{}'::jsonb, '0xtx2', 1)`,
+          VALUES ('near:testnet', ${jobId}, 'accepted', '{}'::jsonb, '0xtx2', 1)`,
     );
     const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM job_events`)) as unknown as {
       n: number;
@@ -249,24 +249,25 @@ describe('job_events is append-only, enforced rather than documented', () => {
 
 describe('uniqueness that makes replay safe', () => {
   it('refuses the same chain event twice', async () => {
-    const client = await agent(10143, '0x' + '12'.repeat(20));
-    const worker = await agent(10143, '0x' + '13'.repeat(20));
+    const client = await agent('near:testnet', 'w12.testnet');
+    const worker = await agent('near:testnet', 'w13.testnet');
     const jobs = (await db.execute(
       sql`INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash)
-          VALUES (10143, ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0x14') RETURNING id`,
+          VALUES ('near:testnet', ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, '0x14') RETURNING id`,
     )) as unknown as {id: number}[];
 
-    const insert = sql`INSERT INTO job_events (chain_id, job_id, kind, payload, tx_hash, log_index)
-        VALUES (10143, ${jobs[0]!.id}, 'settled', '{}'::jsonb, '0xdup', 3)`;
+    // Keyed by receipt, not transaction: on NEAR one transaction's receipts each log their own events.
+    const insert = sql`INSERT INTO job_events (chain_id, job_id, kind, payload, tx_hash, receipt_id, log_index)
+        VALUES ('near:testnet', ${jobs[0]!.id}, 'settled', '{}'::jsonb, 'txdup', 'receiptdup', 3)`;
     await db.execute(insert);
     await refuses(insert, /job_events_idempotency_uk|duplicate key/i);
   });
 
   it('refuses two agents sharing a wallet on one chain', async () => {
-    await agent(10143, '0x' + '15'.repeat(20));
+    await agent('near:testnet', 'w15.testnet');
     await refuses(
       sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
-          VALUES (10143, '0xo', ${'0x' + '15'.repeat(20)}, 'Twin', 100)`,
+          VALUES ('near:testnet', 'o.testnet', 'w15.testnet', 'Twin', 100)`,
       /agents_chain_wallet_uk|duplicate key/i,
     );
   });
@@ -277,21 +278,21 @@ describe('uniqueness that makes replay safe', () => {
    * index at agent one.
    */
   it('allows the same wallet on a different chain', async () => {
-    await agent(10143, '0x' + '16'.repeat(20));
-    await agent(143, '0x' + '16'.repeat(20));
+    await agent('near:testnet', 'w16.testnet');
+    await agent('near:sandbox', 'w16.testnet');
     const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM agents`)) as unknown as {n: number}[];
     expect(rows[0]!.n).toBe(2);
   });
 
   it('refuses reusing an idempotency key in the signer ledger', async () => {
-    const a = await agent(10143, '0x' + '17'.repeat(20));
+    const a = await agent('near:testnet', 'w17.testnet');
     await db.execute(
       sql`INSERT INTO signer_txs (chain_id, agent_id, idempotency_key, nonce, status)
-          VALUES (10143, ${a}, 'key-1', 0, 'pending')`,
+          VALUES ('near:testnet', ${a}, 'key-1', 0, 'pending')`,
     );
     await refuses(
       sql`INSERT INTO signer_txs (chain_id, agent_id, idempotency_key, nonce, status)
-          VALUES (10143, ${a}, 'key-1', 1, 'pending')`,
+          VALUES ('near:testnet', ${a}, 'key-1', 1, 'pending')`,
       /signer_idempotency_uk|duplicate key/i,
     );
   });
@@ -302,15 +303,46 @@ describe('uniqueness that makes replay safe', () => {
    * the mempool.
    */
   it('refuses reusing a nonce for the same agent on the same chain', async () => {
-    const a = await agent(10143, '0x' + '18'.repeat(20));
+    const a = await agent('near:testnet', 'w18.testnet');
     await db.execute(
       sql`INSERT INTO signer_txs (chain_id, agent_id, idempotency_key, nonce, status)
-          VALUES (10143, ${a}, 'key-a', 7, 'pending')`,
+          VALUES ('near:testnet', ${a}, 'key-a', 7, 'pending')`,
     );
     await refuses(
       sql`INSERT INTO signer_txs (chain_id, agent_id, idempotency_key, nonce, status)
-          VALUES (10143, ${a}, 'key-b', 7, 'pending')`,
+          VALUES ('near:testnet', ${a}, 'key-b', 7, 'pending')`,
       /signer_nonce_uk|duplicate key/i,
+    );
+  });
+});
+
+describe('NEAR identifiers (docs/NEAR-PORT.md §1–2)', () => {
+  it('refuses a network key that is not a NEAR CAIP-2 id', async () => {
+    await refuses(
+      sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
+          VALUES ('10143', 'o.testnet', 'w1.testnet', 'A', 100)`,
+      /agents_chain_caip2/,
+    );
+  });
+
+  it('refuses an owner or wallet that is not a NEAR account id', async () => {
+    await refuses(
+      sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
+          VALUES ('near:testnet', '0xAbC0000000000000000000000000000000000001', 'w2.testnet', 'A', 100)`,
+      /agents_owner_account/,
+    );
+    await refuses(
+      sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
+          VALUES ('near:testnet', 'o.testnet', 'bad..name', 'A', 100)`,
+      /agents_wallet_account/,
+    );
+  });
+
+  it('refuses a token transfer between non-accounts', async () => {
+    await refuses(
+      sql`INSERT INTO token_transfers (chain_id, block_number, tx_hash, receipt_id, log_index, from_address, to_address, amount)
+          VALUES ('near:testnet', 1, 't', 'r', 0, 'Alice.testnet', 'bob.testnet', 1)`,
+      /token_transfers_from_account/,
     );
   });
 });
