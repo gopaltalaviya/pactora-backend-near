@@ -9,12 +9,15 @@ import {
   rpcSource,
   sha256Hex,
   signFunctionCall,
+  signFunctionCallWith,
+  keyPairKey,
   verifyNep413,
   TGAS,
   type AccessKeyInfo,
+  type TxKey,
 } from '../src/index.js';
 import {signMessage} from 'near-api-js/nep413';
-import {Account, KeyPairSigner} from 'near-api-js';
+import {Account, KeyPairSigner, baseEncode} from 'near-api-js';
 
 const ev = (event: string, data: unknown) =>
   `EVENT_JSON:${JSON.stringify({standard: 'pactora', version: '1.0.0', event, data})}`;
@@ -137,6 +140,56 @@ describe('signFunctionCall', () => {
     expect(call.methodName).toBe('accept_job');
     expect(JSON.parse(Buffer.from(call.args).toString())).toEqual({job_id: 3});
     expect(call.deposit).toBe(0n);
+  });
+});
+
+describe('signFunctionCallWith (a key held elsewhere, e.g. a KMS)', () => {
+  const base = {
+    signerId: 'bot.alice.testnet',
+    receiverId: 'pactora.testnet',
+    nonce: 7n,
+    blockHash: '11111111111111111111111111111111',
+    method: 'cancel',
+    args: {job_id: 1},
+    gas: 100n * TGAS,
+    deposit: 0n,
+  };
+
+  it('produces exactly the bytes and hash a local key pair does', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    const local = await signFunctionCall({...base, keyPair: kp});
+    const remote = await signFunctionCallWith({...base, key: keyPairKey(kp)});
+    expect(remote.hash).toBe(local.hash);
+    expect(Buffer.from(remote.bytes).equals(Buffer.from(local.bytes))).toBe(true);
+  });
+
+  it('signs sha256 of the borsh transaction, and the signature verifies', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    let signedMessage: Uint8Array | undefined;
+    const key: TxKey = {
+      publicKey: kp.getPublicKey().toString(),
+      async sign(message) {
+        signedMessage = message;
+        return kp.sign(message).signature;
+      },
+    };
+    const signed = await signFunctionCallWith({...base, key});
+    expect(signedMessage).toHaveLength(32);
+    const decoded = decodeSigned(signed.bytes);
+    expect(
+      kp.getPublicKey().verify(signedMessage!, Uint8Array.from(decoded.signature.ed25519Signature!.data)),
+    ).toBe(true);
+    expect(baseEncode(signedMessage!)).toBe(signed.hash);
+  });
+
+  it('refuses a signature that does not verify against the declared key', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    const other = KeyPair.fromRandom('ed25519');
+    const key: TxKey = {
+      publicKey: kp.getPublicKey().toString(),
+      sign: async (m) => other.sign(m).signature,
+    };
+    await expect(signFunctionCallWith({...base, key})).rejects.toThrow(/does not verify/);
   });
 });
 
