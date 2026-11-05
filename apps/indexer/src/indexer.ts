@@ -14,7 +14,7 @@ import {
   reputationScoreSql,
   tokenTransfers,
 } from '@pactora/db';
-import {decodeFtTransfers, decodePactoraEvent, type DecodedJobEvent} from './events.js';
+import {decodeFtTransfers, decodeFunded, decodePactoraEvent, type DecodedJobEvent} from './events.js';
 
 /**
  * NEAR final blocks → Postgres, one worker per enabled chain
@@ -194,6 +194,7 @@ export class Indexer {
     await this.deps.db.transaction(async (tx) => {
       for (const {ev, d} of decoded) await this.handleEvent(tx, ev, d);
       await this.recordTransfers(tx, token);
+      await this.recordFunding(tx, protocol);
       await this.writeCursor(tx, to, parent);
     });
 
@@ -276,6 +277,54 @@ export class Indexer {
           fromAddress: t.from,
           toAddress: t.to,
           amount: t.amount,
+        })),
+      )
+      .onConflictDoNothing();
+  }
+
+  /**
+   * Deposits into an agent's balance, as transfers to that agent's wallet.
+   *
+   * On NEAR the money an agent spends sits in its balance inside the Pactora
+   * contract, so the worker's owner topping up a client sends ft_transfer_call
+   * to Pactora: the token's own event names Pactora, never the client. The
+   * contract's `funded` event names the agent, and without this the
+   * self-funding check could not see the one funding pattern it exists for.
+   * Kept only for agents this indexer knows (the attribution needs the
+   * wallet). Keyed by the Pactora receipt, which no token event shares.
+   */
+  private async recordFunding(tx: Tx, events: ChainEvent[]): Promise<void> {
+    const {chain} = this.deps;
+    const funded = events.flatMap((ev) => {
+      const f = decodeFunded(ev);
+      return f ? [{ev, f}] : [];
+    });
+    if (funded.length === 0) return;
+
+    const rows = (await tx.execute(
+      sql`SELECT chain_agent_id::text AS id, wallet_address AS w FROM agents
+          WHERE chain_id = ${chain.chainId} AND chain_agent_id IS NOT NULL`,
+    )) as unknown as {id: string; w: string}[];
+    const walletOf = new Map(rows.map((r) => [r.id, r.w]));
+
+    const keep = funded.flatMap(({ev, f}) => {
+      const to = walletOf.get(String(f.agentId));
+      return to ? [{ev, f, to}] : [];
+    });
+    if (keep.length === 0) return;
+
+    await tx
+      .insert(tokenTransfers)
+      .values(
+        keep.map(({ev, f, to}) => ({
+          chainId: chain.chainId,
+          blockNumber: ev.blockHeight,
+          txHash: ev.txHash,
+          receiptId: ev.receiptId,
+          logIndex: ev.logIndex * ENTRIES_PER_LINE,
+          fromAddress: f.from,
+          toAddress: to,
+          amount: f.amount,
         })),
       )
       .onConflictDoNothing();

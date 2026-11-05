@@ -380,3 +380,20 @@ describe('nearClient against nearcore error shapes', () => {
     }
   });
 });
+
+describe('neardata API key', () => {
+  it('sends the key as ?apiKey= (neardata README), and never in an error message', async () => {
+    const urls: string[] = [];
+    const src = neardataSource(
+      'https://example.invalid',
+      async (url: string) => {
+        urls.push(url);
+        return {ok: false, status: 429, json: async () => null};
+      },
+      's3cr3t/+key',
+    );
+    const err = await src.blockAt(5).catch((e: unknown) => e as Error);
+    expect(urls).toEqual(['https://example.invalid/v0/block/5?apiKey=s3cr3t%2F%2Bkey']);
+    expect(String(err)).not.toContain('s3cr3t');
+  });
+});

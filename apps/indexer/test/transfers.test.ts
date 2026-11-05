@@ -157,4 +157,43 @@ describe('funding transfers', () => {
       ['alice.test.near', 'bob.test.near', '100'],
     ]);
   });
+
+  /**
+   * On NEAR an agent's spendable money sits in its balance INSIDE the Pactora
+   * contract: the worker's owner topping up a client sends ft_transfer_call
+   * to Pactora, so the token's own event names Pactora, never the client's
+   * wallet. The contract's `funded` event names the agent; it is recorded as
+   * a transfer from the sender to that agent's wallet, so the self-funding
+   * check sees it.
+   */
+  it("records a deposit into an agent's balance as a transfer to that agent's wallet", async () => {
+    await seedAgents(db);
+    const src = new FakeChain(chain.startBlock);
+    const b = src.block(
+      receipt({
+        executor: chain.contracts.Pactora,
+        receiptId: 'RF1',
+        txHash: 'TF1',
+        logs: [
+          log.funded({agentId: CLIENT.chainAgentId, from: WORKER.owner, amount: 500_000, kind: 'balance'}),
+          // Stake is not spendable money: it backs bonds, it does not pay anyone.
+          log.funded({agentId: CLIENT.chainAgentId, from: WORKER.owner, amount: 9, kind: 'stake'}),
+          // An agent this indexer does not know: nothing to attribute it to.
+          log.funded({agentId: 999, from: WORKER.owner, amount: 7, kind: 'balance'}),
+        ],
+      }),
+    );
+    await new Indexer({db, chain, source: src}).tick();
+    expect(await rows()).toEqual([
+      {
+        from_address: WORKER.owner,
+        to_address: CLIENT.wallet,
+        amount: '500000',
+        block_number: b,
+        tx_hash: 'TF1',
+        receipt_id: 'RF1',
+        log_index: 0,
+      },
+    ]);
+  });
 });

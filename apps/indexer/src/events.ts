@@ -229,6 +229,28 @@ export interface FtTransferEntry {
  * than halting the indexer: the token may be a third party's contract, and
  * one bad entry must not stop the protocol's own events being indexed.
  */
+export interface FundedEntry {
+  /** The contract agent id whose balance was topped up. */
+  agentId: number;
+  from: string;
+  amount: string;
+}
+
+/**
+ * A deposit into an agent's spendable balance (`funded`, kind `balance`),
+ * from the Pactora contract's own log; null for anything else. Stake is not
+ * spendable money — it backs bonds, it pays no one — so it is not funding.
+ */
+export function decodeFunded(e: Nep297Event): FundedEntry | null {
+  if (e.standard !== 'pactora' || e.event !== 'funded' || !Array.isArray(e.data)) return null;
+  const d: unknown = e.data[0];
+  if (!isObject(d) || d['kind'] !== 'balance') return null;
+  const {agent_id: agentId, from, amount} = d;
+  if (typeof agentId !== 'number' || !Number.isSafeInteger(agentId) || typeof from !== 'string') return null;
+  if (typeof amount !== 'string' || !/^(0|[1-9]\d*)$/.test(amount)) return null;
+  return {agentId, from, amount};
+}
+
 export function decodeFtTransfers(e: Nep297Event): FtTransferEntry[] {
   if (e.standard !== 'nep141' || e.event !== 'ft_transfer' || !Array.isArray(e.data)) return [];
   const out: FtTransferEntry[] = [];

@@ -41,6 +41,8 @@ const Env = z.object({
   METRICS_TOKEN: z.string().optional(),
   LOG_LEVEL: env.logLevel(),
   DB_POOL_MAX: env.positiveInt(3),
+  /** FastNear key for neardata (testnet, mainnet). Without it the free limit cannot keep pace with testnet. */
+  NEARDATA_API_KEY: z.string().min(1).optional(),
 });
 
 const cfg = loadEnv(Env);
@@ -81,7 +83,10 @@ const shutdown = installShutdown({
 
 const workersDone = Promise.all(
   Object.values(config.chains).map(async (chain) => {
-    const source = await openSource(chain);
+    const source = await openSource(
+      chain,
+      cfg.NEARDATA_API_KEY ? {neardataApiKey: cfg.NEARDATA_API_KEY} : {},
+    );
     const indexer = new Indexer({db, chain, source, logger});
     if (cfg.INDEXER_START_AT_HEAD) {
       const at = await indexer.seedCursorToHead();

@@ -35,6 +35,9 @@ const PASS_THROUGH = new Set<string>([
   ErrorCode.INVALID_STATE,
   ErrorCode.DEADLINE_PASSED,
   ErrorCode.NOT_FOUND,
+  ErrorCode.FORBIDDEN,
+  // The signer says when retrying the same request is safe, and how soon.
+  ErrorCode.UPSTREAM_UNAVAILABLE,
 ]);
 
 type Kind = Parameters<JobRouteDeps['submit']>[0]['kind'];

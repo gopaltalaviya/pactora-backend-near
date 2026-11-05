@@ -9,7 +9,10 @@ import {blockRpc, nearClient, neardataSource, rpcSource, type BlockSource} from 
  * mainnet neardata URL beside a testnet RPC would otherwise index the wrong
  * network without a single error.
  */
-export async function openSource(chain: ChainConfig): Promise<BlockSource> {
+export async function openSource(
+  chain: ChainConfig,
+  opts: {neardataApiKey?: string} = {},
+): Promise<BlockSource> {
   const client = nearClient(chain.rpcUrl);
   const network = await client.networkId();
   if (network !== chain.nearNetworkId) {
@@ -20,7 +23,7 @@ export async function openSource(chain: ChainConfig): Promise<BlockSource> {
   const rpc = blockRpc(chain.rpcUrl);
   if (chain.blockSource.kind === 'rpc') return rpcSource(rpc);
 
-  const source = neardataSource(chain.blockSource.url);
+  const source = neardataSource(chain.blockSource.url, fetch, opts.neardataApiKey);
   // A height both have as final: the lower of the two heads, a real block on either.
   const height = Math.min(await source.finalHeight(), (await client.finalBlock()).height);
   const served = await source.blockAt(height);

@@ -101,7 +101,8 @@ function gasOf(signerHealth: unknown): GasStatus {
     return {state: 'unknown', checkedAt: null, wallets: []};
   }
   const wallets = (w.wallets as Record<string, unknown>[]).map((x) => ({
-    address: String(x['address']),
+    // The NEAR signer names the account; an older one said address.
+    address: String(x['account'] ?? x['address']),
     role: String(x['role']),
     balanceYocto: String(x['balanceYocto']),
     low: x['low'] === true,

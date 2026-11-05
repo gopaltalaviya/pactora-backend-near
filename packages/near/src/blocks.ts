@@ -57,10 +57,18 @@ interface NeardataBlock {
   shards: Array<{receipt_execution_outcomes: NeardataOutcome[]}>;
 }
 
-export function neardataSource(baseUrl: string, fetchImpl: FetchLike = fetch): BlockSource {
+/**
+ * `apiKey` is a FastNear key, sent as `?apiKey=` — the form neardata's README
+ * gives (a Bearer header is lost on its redirects). Without one the free
+ * tier's limit applies, which cannot keep pace with testnet's ~100 blocks a
+ * minute (measured: HTTP 429, "30 blocks per minute"). The key is never logged:
+ * errors name the path, not the URL.
+ */
+export function neardataSource(baseUrl: string, fetchImpl: FetchLike = fetch, apiKey?: string): BlockSource {
   const base = baseUrl.replace(/\/$/, '');
+  const auth = apiKey ? `?apiKey=${encodeURIComponent(apiKey)}` : '';
   const get = async (path: string): Promise<unknown> => {
-    const res = await fetchImpl(`${base}${path}`, {signal: AbortSignal.timeout(20_000)});
+    const res = await fetchImpl(`${base}${path}${auth}`, {signal: AbortSignal.timeout(20_000)});
     if (!res.ok) throw new Error(`neardata ${path}: HTTP ${res.status}`);
     return res.json();
   };
