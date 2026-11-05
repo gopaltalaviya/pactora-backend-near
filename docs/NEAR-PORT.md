@@ -155,9 +155,45 @@ How every call is sent:
 - **Nonce:** access-key nonce + 1, under the per-agent advisory lock.
 - **Wait:** `send_tx` with `wait_until: FINAL`.
 
+Argument encoding: ids (`*_id`, windows) are JSON numbers, as near-sdk reads
+`u64` (a decimal string is accepted and converted); `amount` is a decimal
+string (`U128`); hashes are 64 lowercase hex; `review_hash`/`reason_hash` may
+be omitted or `null`. Unknown arguments are refused. `client_id`
+(`create_job`, `direct_pay`) and `agent_id` (`accept_wallet`) must be the
+agent's own `chainAgentId`. `spend` must be at least what the call takes
+from the purse: `amount` for a hire, the job's `dispute_bond` (fixed at
+creation) for `dispute`, 0 otherwise.
+
+Replay: the same `(agentId, idempotencyKey)` with the same
+`{method, args, spend}` returns the original `{txHash, nonce, result}` with
+`replayed: true`; a different call under the key is `IDEMPOTENCY_CONFLICT`. A
+call that failed on chain answers every retry of its key with the same error.
+
 Two more endpoints:
-- `POST /keys` `{walletAddress}` → `{publicKey}`. It creates the key if missing and is idempotent.
-- `GET /health` reports each signing account's NEAR balance in yocto (`balanceYocto`).
+- `POST /keys` `{walletAddress, chainId?}` → `{publicKey}`. It creates the key if missing and is idempotent.
+- `POST /keys/accept` `{chainId, walletAddress, chainAgentId}` (`chainAgentId` a decimal string) →
+  `{txHash, alreadyAccepted}`. Registration step (d): `accept_wallet` for a wallet that has no agent
+  row yet. `alreadyAccepted: true` and `txHash: ''` when `get_agent(chainAgentId).wallet` already is
+  the wallet; nothing is sent.
+- `GET /health` reports each signing account's NEAR balance in yocto (`wallets.wallets[].balanceYocto`).
+
+All three POSTs need `Authorization: Bearer <SIGNER_TOKEN>` when the signer has one. Refusals are RFC 7807
+with `code`:
+
+| `code` (HTTP) | When |
+|---|---|
+| `SCHEMA_MISMATCH` (422) | body or args malformed; declared `spend` below what the call takes; contract `BadHash`, `ZeroAmount`, `AmountBelowMinimum`, `AmountAboveMaximum`, `AmountTooLargeForFastPath`, `WindowTooLong` |
+| `CHAIN_MISMATCH` (409) | another chain; agent row not on this chain |
+| `FORBIDDEN` (403) | method not allowed; `client_id`/`agent_id` not the agent's; dispute of another client's job; key is FullAccess, for another receiver, or lacks the method; contract `NotAgentWallet`, `NotAgentOwner`, `NotPendingWallet` |
+| `AGENT_NOT_HIREABLE` (409) | no `chainAgentId`; no key held; key not on the wallet; wallet account missing; no purse; contract `NotHireable`, `AgentFrozen`, `SameOwner`, `SelfDealing` |
+| `INSUFFICIENT_FUNDS` (402) | wallet below 0.05 NEAR; key allowance below 0.01 NEAR; purse balance below the spend; contract `InsufficientBalance`, `InsufficientBond`, `InsufficientStorage` |
+| `BUDGET_EXCEEDED` (402) | per-task cap or rolling daily cap (with `retryAfter` = seconds until `next_release_at`, else a day); contract `PerTaskCapExceeded`, `DailyCapExceeded` |
+| `DEADLINE_PASSED` (410) | contract `DeadlinePassed` |
+| `NOT_FOUND` (404) | dispute of a job that does not exist; `/keys/accept` with no key held or no such agent; contract `NoSuchJob`, `NoSuchAgent` |
+| `INVALID_STATE` (409) | `/keys/accept` when the pending wallet is another account; `/keys` with no key store; contract `InvalidState`, `Paused`, `WalletTaken`, `DeadlineNotPassed`, any other |
+| `IDEMPOTENCY_CONFLICT` (409) | key reused for a different call |
+| `UPSTREAM_UNAVAILABLE` (503, `retryAfter`) | a view could not be read, the node rejected the tx before including it, or the outcome is not known yet — retrying the SAME request is safe |
+| `UNAUTHORIZED` (401) | missing or wrong token |
 
 ## 7. Events (NEP-297, `standard: "pactora"`, `version: "1.0.0"`)
 
@@ -188,4 +224,6 @@ The funding graph uses the token contract's `nep141` `ft_transfer` events, kept 
 | The EOA calldata allowlist | The signer only calls the allowed methods above, on `Pactora`. |
 | AgentAccount `execute` wrapping | The agent signs directly with its own scoped key. |
 | keccak / EIP-191 / ABIs | Replaced by sha256, NEP-413 and JSON arguments. |
-| AWS KMS `ECC_SECG_P256K1` | NEAR keys are ed25519. Whether KMS can sign ed25519 is checked before it is ported; until then the keystore is the key source. |
+| AWS KMS `ECC_SECG_P256K1` | NEAR keys are ed25519. KMS signs them: `ECC_NIST_EDWARDS25519`, `ED25519_SHA_512`, `MessageType: RAW` (AWS KMS developer guide, key spec reference; checked 2026-11-05). `SIGNER_KMS_KEYS` maps wallet account → key id. |
+| The geth keystore (`SIGNER_KEYSTORE_JSON`) | Keys the signer generates (`POST /keys`) are stored encrypted in `signer_keys` under `SIGNER_KEY_PASSPHRASE`; testnet dev keys come as near-cli credential JSON (`SIGNER_DEV_CREDENTIALS`). |
+| `spend_policies` reservation in the signer | The contract's purse caps bound every wallet; the signer reads `purse_of` under the wallet lock after the previous call is FINAL. |
