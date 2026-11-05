@@ -1,145 +1,107 @@
-import {secp256k1} from '@noble/curves/secp256k1';
-import {
-  keccak256,
-  parseTransaction,
-  recoverMessageAddress,
-  recoverTransactionAddress,
-  recoverTypedDataAddress,
-  type Hex,
-} from 'viem';
-import {privateKeyToAccount} from 'viem/accounts';
 import {describe, expect, it} from 'vitest';
-import {KmsKeySource, kmsAccount, parseDerSignature, type KmsClient} from '../src/kms.js';
+import {KeyPair, PublicKey, baseEncode, signFunctionCall, signFunctionCallWith, TGAS} from '@pactora/near';
+import {KmsKeySource, kmsKey, nearPublicKeyOfSpki, type KmsClient} from '../src/kms.js';
 
 /**
- * A KMS stand-in that does what AWS KMS does: holds the key, returns a DER
- * SubjectPublicKeyInfo and DER signatures of the digest it is given, with no
- * recovery id — and, like KMS, does not promise a low `s`.
+ * Keys that never leave AWS KMS: `ECC_NIST_EDWARDS25519`, signed with
+ * `ED25519_SHA_512` over the RAW 32-byte transaction hash. The KMS here is a
+ * double holding an ordinary ed25519 key, so what is tested is everything
+ * this code does with KMS's answers — SPKI parsing, signature checks, the
+ * transaction it produces. That AWS answers in exactly these formats is
+ * documented only in part; see kms.ts.
  */
-const SPKI_PREFIX = '3056301006072a8648ce3d020106052b8104000a034200';
-const N = secp256k1.CURVE.n;
+
+/** RFC 8410 SubjectPublicKeyInfo of an ed25519 key. */
+const spkiOf = (kp: KeyPair) =>
+  new Uint8Array([...Buffer.from('302a300506032b6570032100', 'hex'), ...kp.getPublicKey().data]);
 
 function fakeKms(
-  keys: Record<string, Hex>,
-  opts: {highS?: boolean; wrongKey?: Hex} = {},
-): KmsClient & {calls: number} {
-  const fake = {
-    calls: 0,
-    async getPublicKey(keyId: string) {
-      const pub = secp256k1.getPublicKey(keys[keyId]!.slice(2), false);
-      return Uint8Array.from(Buffer.concat([Buffer.from(SPKI_PREFIX, 'hex'), Buffer.from(pub)]));
+  keys: Record<string, KeyPair>,
+  tamper?: (sig: Uint8Array) => Uint8Array,
+): KmsClient & {
+  signed: Uint8Array[];
+} {
+  const signed: Uint8Array[] = [];
+  return {
+    signed,
+    async getPublicKey(keyId) {
+      return spkiOf(keys[keyId]!);
     },
-    async sign(keyId: string, digest: Uint8Array) {
-      fake.calls++;
-      expect(digest.length).toBe(32);
-      const key = (opts.wrongKey ?? keys[keyId]!).slice(2);
-      const sig = secp256k1.sign(digest, key, {lowS: true});
-      const out = opts.highS ? new secp256k1.Signature(sig.r, N - sig.s) : sig;
-      return out.toDERRawBytes();
+    async sign(keyId, message) {
+      signed.push(message);
+      const sig = keys[keyId]!.sign(message).signature;
+      return tamper ? tamper(sig) : sig;
     },
   };
-  return fake;
 }
 
-const KEY_A: Hex = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
-const KEY_B: Hex = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
-const ADDR_A = privateKeyToAccount(KEY_A).address;
-const ADDR_B = privateKeyToAccount(KEY_B).address;
+const tx = {
+  signerId: 'bot.alice.testnet',
+  receiverId: 'pactora.testnet',
+  nonce: 9n,
+  blockHash: '11111111111111111111111111111111',
+  method: 'accept_job',
+  args: {job_id: 2},
+  gas: 100n * TGAS,
+  deposit: 0n,
+};
 
-const TX = {
-  chainId: 143,
-  type: 'eip1559',
-  nonce: 7,
-  to: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
-  data: '0xdeadbeef',
-  gas: 300_000n,
-  maxFeePerGas: 200_000_000_000n,
-  maxPriorityFeePerGas: 1_000_000_000n,
-  value: 0n,
-} as const;
-
-describe('kmsAccount', () => {
-  it('derives the address from the KMS public key', async () => {
-    const account = await kmsAccount(fakeKms({a: KEY_A}), 'a');
-    expect(account.address).toBe(ADDR_A);
+describe('a KMS ed25519 key', () => {
+  it('reads the NEAR public key out of the SPKI', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    expect(nearPublicKeyOfSpki(spkiOf(kp))).toBe(kp.getPublicKey().toString());
+    expect(`ed25519:${baseEncode(kp.getPublicKey().data)}`).toBe(kp.getPublicKey().toString());
   });
 
-  it('signs a transaction the chain attributes to that address', async () => {
-    const account = await kmsAccount(fakeKms({a: KEY_A}), 'a');
-    const raw = await account.signTransaction(TX);
-    expect(await recoverTransactionAddress({serializedTransaction: raw as never})).toBe(ADDR_A);
-    expect(parseTransaction(raw)).toMatchObject({nonce: 7, chainId: 143, data: '0xdeadbeef'});
+  it('refuses an SPKI that is not ed25519 (a secp256k1 key, say)', () => {
+    const secpSpki = new Uint8Array(88).fill(4);
+    expect(() => nearPublicKeyOfSpki(secpSpki)).toThrow(/not an ed25519/);
   });
 
-  it('produces the same transaction a local key would', async () => {
-    const kms = await kmsAccount(fakeKms({a: KEY_A}), 'a');
-    // RFC 6979 is deterministic, so the same key and digest give the same bytes.
-    expect(await kms.signTransaction(TX)).toBe(await privateKeyToAccount(KEY_A).signTransaction(TX));
+  it('produces exactly the transaction a local key would, signing the 32-byte hash', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    const kms = fakeKms({k1: kp});
+    const remote = await signFunctionCallWith({...tx, key: await kmsKey(kms, 'k1')});
+    const local = await signFunctionCall({...tx, keyPair: kp});
+    expect(remote.hash).toBe(local.hash);
+    expect(Buffer.from(remote.bytes).equals(Buffer.from(local.bytes))).toBe(true);
+    expect(kms.signed[0]).toHaveLength(32);
   });
 
-  it('turns a high-s KMS signature into the low-s one Ethereum accepts', async () => {
-    const account = await kmsAccount(fakeKms({a: KEY_A}, {highS: true}), 'a');
-    const raw = await account.signTransaction(TX);
-    const {s} = parseTransaction(raw) as {s: Hex};
-    expect(BigInt(s) <= N / 2n).toBe(true);
-    expect(await recoverTransactionAddress({serializedTransaction: raw as never})).toBe(ADDR_A);
-  });
-
-  it('signs messages and typed data (ERC-1271 / owner challenges)', async () => {
-    const account = await kmsAccount(fakeKms({a: KEY_A}), 'a');
-    const message = 'pactora re-issue challenge 42';
-    expect(await recoverMessageAddress({message, signature: await account.signMessage({message})})).toBe(
-      ADDR_A,
-    );
-    const typed = {
-      domain: {name: 'Pactora', version: '1', chainId: 143},
-      types: {Grant: [{name: 'key', type: 'address'}]},
-      primaryType: 'Grant',
-      message: {key: ADDR_B},
-    } as const;
-    expect(await recoverTypedDataAddress({...typed, signature: await account.signTypedData(typed)})).toBe(
-      ADDR_A,
+  it('refuses a signature that is not 64 bytes', async () => {
+    const kms = fakeKms({k1: KeyPair.fromRandom('ed25519')}, (s) => new Uint8Array([0x30, ...s]));
+    await expect(signFunctionCallWith({...tx, key: await kmsKey(kms, 'k1')})).rejects.toThrow(
+      /returned a 65-byte signature, not 64/,
     );
   });
 
   it('refuses a signature that is not from its own key', async () => {
-    const account = await kmsAccount(fakeKms({a: KEY_A}, {wrongKey: KEY_B}), 'a');
-    await expect(account.signTransaction(TX)).rejects.toThrow(/not from/);
+    const other = KeyPair.fromRandom('ed25519');
+    const kms = fakeKms(
+      {k1: KeyPair.fromRandom('ed25519')},
+      (s) => other.sign(new Uint8Array(s.length)).signature,
+    );
+    await expect(signFunctionCallWith({...tx, key: await kmsKey(kms, 'k1')})).rejects.toThrow(
+      /does not verify/,
+    );
   });
 });
 
-describe('KmsKeySource', () => {
-  it('selects by agent id, then by wallet, and has nothing for anyone else', async () => {
-    const keys = await KmsKeySource.create(fakeKms({a: KEY_A, b: KEY_B}), {'12': 'a', [ADDR_B]: 'b'});
-    expect((await keys.accountFor(12))?.address).toBe(ADDR_A);
-    expect((await keys.accountFor(99, ADDR_B.toLowerCase()))?.address).toBe(ADDR_B);
-    expect(await keys.accountFor(99, '0x' + '11'.repeat(20))).toBeNull();
-    expect(await keys.accountFor(99)).toBeNull();
-    expect(
-      keys
-        .all()
-        .map((a) => a.address)
-        .sort(),
-    ).toEqual([ADDR_A, ADDR_B].sort());
-    expect(keys.kind).toBe('aws-kms');
+describe('SIGNER_KMS_KEYS', () => {
+  it('selects by wallet account, and has nothing for anyone else', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    const src = await KmsKeySource.create(fakeKms({k1: kp}), {'bot.alice.testnet': 'k1'});
+    const key = await src.keyFor('bot.alice.testnet');
+    expect(key?.publicKey).toBe(kp.getPublicKey().toString());
+    const msg = new Uint8Array(32).fill(1);
+    expect(PublicKey.from(key!.publicKey).verify(msg, await key!.sign(msg))).toBe(true);
+    expect(await src.keyFor('someone.testnet')).toBeNull();
+    expect(await src.accounts()).toEqual(['bot.alice.testnet']);
   });
 
-  it('refuses an address entry whose KMS key is a different address', async () => {
-    await expect(KmsKeySource.create(fakeKms({a: KEY_A}), {[ADDR_B]: 'a'})).rejects.toThrow(/not 0x/);
-  });
-
-  it('refuses an entry that is neither an id nor an address', async () => {
-    await expect(KmsKeySource.create(fakeKms({a: KEY_A}), {alice: 'a'})).rejects.toThrow(/neither/);
-  });
-});
-
-describe('parseDerSignature', () => {
-  it('reads r and s, including a leading zero byte', async () => {
-    const sig = secp256k1.sign(keccak256('0x01').slice(2), KEY_A.slice(2));
-    expect(parseDerSignature(sig.toDERRawBytes())).toEqual({r: sig.r, s: sig.s});
-  });
-
-  it('refuses what is not a DER signature', () => {
-    expect(() => parseDerSignature(Uint8Array.from([0x31, 0x02, 0x02, 0x00]))).toThrow(/malformed/);
+  it('refuses an entry that is not a NEAR account id', async () => {
+    await expect(
+      KmsKeySource.create(fakeKms({k1: KeyPair.fromRandom('ed25519')}), {'Bot.Alice!': 'k1'}),
+    ).rejects.toThrow(/not a NEAR account id/);
   });
 });

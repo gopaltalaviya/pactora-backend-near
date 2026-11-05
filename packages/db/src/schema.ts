@@ -302,15 +302,75 @@ export const signerTxs = pgTable(
      * for. NULL only on rows from before it existed, which never replay.
      */
     payloadHash: text('payload_hash'),
+    /**
+     * The access-key nonce. NEAR's start at (block height × 10^6), about
+     * 2·10^14 on testnet today — inside a JS number's exact range (2^53).
+     */
     nonce: bigint('nonce', {mode: 'number'}).notNull(),
     txHash: text('tx_hash'),
+    /**
+     * pending (claimed, not signed) → signed (hash known before broadcast,
+     * outcome not yet) → final | reverted; failed = never left the building.
+     */
     status: text('status').notNull().default('pending'),
+    /** The call's JSON return value once final — a replay returns it (the job id of a hire). */
+    result: jsonb('result'),
+    /** The node's failure, as JSON, when the transaction reverted on chain. */
+    failure: text('failure'),
     createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('signer_idempotency_uk').on(t.chainId, t.agentId, t.idempotencyKey),
     uniqueIndex('signer_nonce_uk').on(t.chainId, t.agentId, t.nonce),
   ],
+);
+
+/**
+ * The signer's generated keys (NEAR function-call keys, one per wallet
+ * account), encrypted.
+ *
+ * In the database rather than files: every replica sees the same key, the
+ * unique index makes "create if missing" race-free across replicas, and the
+ * key is backed up with the rows that refer to it. The ciphertext alone is
+ * useless — the passphrase lives only in the signer's environment
+ * (`SIGNER_KEY_PASSPHRASE`), never in this database.
+ */
+export const signerKeys = pgTable(
+  'signer_keys',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    chainId: text('chain_id').notNull(),
+    accountId: text('account_id').notNull(),
+    /** `ed25519:<base58>` — public, so it is stored in the clear for lookup. */
+    publicKey: text('public_key').notNull(),
+    /** AES-256-GCM of the near-cli credential JSON; see apps/signer keystore.ts. */
+    ciphertext: text('ciphertext').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('signer_keys_account_uk').on(t.chainId, t.accountId)],
+);
+
+/**
+ * Transactions the signer sent for a wallet that has no agent row yet —
+ * `accept_wallet` during registration, before the API inserts the agent.
+ * Kept so the per-wallet nonce discipline sees them.
+ */
+export const signerWalletTxs = pgTable(
+  'signer_wallet_txs',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    chainId: text('chain_id').notNull(),
+    walletAddress: text('wallet_address').notNull(),
+    method: text('method').notNull(),
+    /** The contract agent id the call was for (decimal u64). */
+    chainAgentId: text('chain_agent_id').notNull(),
+    nonce: bigint('nonce', {mode: 'number'}).notNull(),
+    txHash: text('tx_hash'),
+    status: text('status').notNull().default('pending'),
+    failure: text('failure'),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('signer_wallet_txs_nonce_uk').on(t.chainId, t.walletAddress, t.nonce)],
 );
 
 // ─────────────────────────── disputes & auth ───────────────────────────

@@ -15,7 +15,6 @@
     "db:migrate": "pnpm --filter @pactora/db migrate",
     "dev": "pnpm -r --parallel dev",
     "verify:indexer": "node scripts/verify-indexer.mjs",
-    "verify:keystore": "node scripts/verify-keystore.mjs",
     "e2e": "node scripts/e2e.mjs",
     "demo": "node scripts/demo.mjs",
     "prepare": "git config core.hooksPath .githooks || true",

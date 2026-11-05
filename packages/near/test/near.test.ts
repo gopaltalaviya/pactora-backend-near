@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {createServer} from 'node:http';
 import {
   KeyPair,
   decodeSigned,
@@ -9,12 +10,16 @@ import {
   rpcSource,
   sha256Hex,
   signFunctionCall,
+  signFunctionCallWith,
+  keyPairKey,
+  nearClient,
   verifyNep413,
   TGAS,
   type AccessKeyInfo,
+  type TxKey,
 } from '../src/index.js';
 import {signMessage} from 'near-api-js/nep413';
-import {Account, KeyPairSigner} from 'near-api-js';
+import {Account, KeyPairSigner, baseEncode} from 'near-api-js';
 
 const ev = (event: string, data: unknown) =>
   `EVENT_JSON:${JSON.stringify({standard: 'pactora', version: '1.0.0', event, data})}`;
@@ -143,6 +148,56 @@ describe('signFunctionCall', () => {
   });
 });
 
+describe('signFunctionCallWith (a key held elsewhere, e.g. a KMS)', () => {
+  const base = {
+    signerId: 'bot.alice.testnet',
+    receiverId: 'pactora.testnet',
+    nonce: 7n,
+    blockHash: '11111111111111111111111111111111',
+    method: 'cancel',
+    args: {job_id: 1},
+    gas: 100n * TGAS,
+    deposit: 0n,
+  };
+
+  it('produces exactly the bytes and hash a local key pair does', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    const local = await signFunctionCall({...base, keyPair: kp});
+    const remote = await signFunctionCallWith({...base, key: keyPairKey(kp)});
+    expect(remote.hash).toBe(local.hash);
+    expect(Buffer.from(remote.bytes).equals(Buffer.from(local.bytes))).toBe(true);
+  });
+
+  it('signs sha256 of the borsh transaction, and the signature verifies', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    let signedMessage: Uint8Array | undefined;
+    const key: TxKey = {
+      publicKey: kp.getPublicKey().toString(),
+      async sign(message) {
+        signedMessage = message;
+        return kp.sign(message).signature;
+      },
+    };
+    const signed = await signFunctionCallWith({...base, key});
+    expect(signedMessage).toHaveLength(32);
+    const decoded = decodeSigned(signed.bytes);
+    expect(
+      kp.getPublicKey().verify(signedMessage!, Uint8Array.from(decoded.signature.ed25519Signature!.data)),
+    ).toBe(true);
+    expect(baseEncode(signedMessage!)).toBe(signed.hash);
+  });
+
+  it('refuses a signature that does not verify against the declared key', async () => {
+    const kp = KeyPair.fromRandom('ed25519');
+    const other = KeyPair.fromRandom('ed25519');
+    const key: TxKey = {
+      publicKey: kp.getPublicKey().toString(),
+      sign: async (m) => other.sign(m).signature,
+    };
+    await expect(signFunctionCallWith({...base, key})).rejects.toThrow(/does not verify/);
+  });
+});
+
 describe('verifyNep413', () => {
   const kp = KeyPair.fromRandom('ed25519');
   const publicKey = kp.getPublicKey().toString();
@@ -261,5 +316,67 @@ describe('block sources', () => {
     const b = await src.blockAt(5);
     expect(seen).toEqual(['T1']);
     expect(b!.receipts.map((r) => r.receiptId)).toEqual(['R1']);
+  });
+});
+
+describe('nearClient against nearcore error shapes', () => {
+  /** One JSON-RPC error per method, in nearcore's structured form (HANDLER_ERROR + cause.name). */
+  async function nodeAnswering(errors: Record<string, {name: string; info: Record<string, unknown>}>) {
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        const {id, method} = JSON.parse(body) as {id: string; method: string};
+        const cause = errors[method];
+        res.setHeader('content-type', 'application/json');
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id,
+            error: {name: 'HANDLER_ERROR', cause, code: -32000, message: 'Server error'},
+          }),
+        );
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as {port: number}).port}`;
+    return {
+      client: nearClient(url, {retries: 1}),
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  }
+
+  it('reads UNKNOWN_TRANSACTION as pending, not as a failure', async () => {
+    const node = await nodeAnswering({
+      EXPERIMENTAL_tx_status: {name: 'UNKNOWN_TRANSACTION', info: {requested_transaction_hash: 'H'}},
+    });
+    try {
+      await expect(node.client.txOutcome('H', 'a.testnet')).resolves.toMatchObject({status: 'pending'});
+    } finally {
+      await node.close();
+    }
+  });
+
+  it('reads UNKNOWN_ACCESS_KEY and UNKNOWN_ACCOUNT as null', async () => {
+    const pk = KeyPair.fromRandom('ed25519').getPublicKey().toString();
+    const node = await nodeAnswering({
+      query: {name: 'UNKNOWN_ACCESS_KEY', info: {public_key: pk, block_hash: 'B', block_height: 1}},
+    });
+    try {
+      await expect(node.client.accessKey('a.testnet', pk)).resolves.toBeNull();
+    } finally {
+      await node.close();
+    }
+    const node2 = await nodeAnswering({
+      query: {
+        name: 'UNKNOWN_ACCOUNT',
+        info: {requested_account_id: 'a.testnet', block_hash: 'B', block_height: 1},
+      },
+    });
+    try {
+      await expect(node2.client.balance('a.testnet')).resolves.toBeNull();
+    } finally {
+      await node2.close();
+    }
   });
 });

@@ -13,6 +13,7 @@ import {
   KeyPairSigner,
   PublicKey,
   SignedTransaction,
+  Signer,
   actions,
   baseDecode,
   baseEncode,
@@ -20,7 +21,7 @@ import {
 } from 'near-api-js';
 import {signMessage, verifyMessage} from 'near-api-js/nep413';
 
-export {KeyPair, PublicKey};
+export {KeyPair, PublicKey, baseEncode};
 
 // ── hashes ───────────────────────────────────────────────────────────────
 
@@ -197,6 +198,61 @@ export async function signFunctionCall(tx: FunctionCallTx): Promise<SignedTx> {
     baseDecode(tx.blockHash),
   );
   const {txHash, signedTransaction} = await new KeyPairSigner(tx.keyPair).signTransaction(transaction);
+  return {hash: baseEncode(txHash), bytes: signedTransaction.encode()};
+}
+
+/**
+ * An ed25519 key that may live somewhere else — in this process (`keyPairKey`)
+ * or in a KMS. `sign` receives the 32-byte sha256 of the borsh transaction,
+ * which is what NEAR verifies the signature against, and returns the raw
+ * 64-byte ed25519 signature.
+ */
+export interface TxKey {
+  /** `ed25519:<base58>` */
+  readonly publicKey: string;
+  sign(message: Uint8Array): Promise<Uint8Array>;
+}
+
+/** A `TxKey` over an in-memory key pair. */
+export function keyPairKey(keyPair: KeyPair): TxKey {
+  return {
+    publicKey: keyPair.getPublicKey().toString(),
+    sign: async (message) => keyPair.sign(message).signature,
+  };
+}
+
+/** near-api-js's own `Signer`, over a `TxKey`: the transaction hashing stays theirs. */
+class TxKeySigner extends Signer {
+  constructor(private readonly key: TxKey) {
+    super();
+  }
+  async getPublicKey(): Promise<PublicKey> {
+    return PublicKey.from(this.key.publicKey);
+  }
+  protected async signBytes(bytes: Uint8Array): Promise<Uint8Array> {
+    const signature = await this.key.sign(bytes);
+    // A remote signer (a KMS) answering with the wrong key or format would
+    // otherwise produce a transaction the node rejects only after broadcast.
+    if (!PublicKey.from(this.key.publicKey).verify(bytes, signature)) {
+      throw new Error(`the signature does not verify against ${this.key.publicKey}`);
+    }
+    return signature;
+  }
+}
+
+/** `signFunctionCall`, with a `TxKey` in place of a key pair. Same bytes, same hash. */
+export async function signFunctionCallWith(
+  tx: Omit<FunctionCallTx, 'keyPair'> & {key: TxKey},
+): Promise<SignedTx> {
+  const transaction = createTransaction(
+    tx.signerId,
+    PublicKey.from(tx.key.publicKey),
+    tx.receiverId,
+    tx.nonce,
+    [actions.functionCall(tx.method, tx.args, tx.gas, tx.deposit)],
+    baseDecode(tx.blockHash),
+  );
+  const {txHash, signedTransaction} = await new TxKeySigner(tx.key).signTransaction(transaction);
   return {hash: baseEncode(txHash), bytes: signedTransaction.encode()};
 }
 
@@ -405,7 +461,9 @@ export function nearClient(rpcUrl: string, opts: NearClientOptions = {}): NearCl
         });
         return parseOutcome(raw, txHash);
       } catch (err) {
-        if (isMissing(err, 'UNKNOWN_TRANSACTION', "doesn't exist", 'does not exist')) {
+        // near-api-js 7 turns nearcore's UNKNOWN_TRANSACTION into an
+        // UnknownTransactionError ("Unknown transaction <hash>").
+        if (isMissing(err, 'UNKNOWN_TRANSACTION', 'UnknownTransaction', "doesn't exist", 'does not exist')) {
           return {status: 'pending', txHash, receipts: []};
         }
         throw err;

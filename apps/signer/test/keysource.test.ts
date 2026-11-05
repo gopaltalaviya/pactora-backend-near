@@ -1,116 +1,140 @@
-import {secp256k1} from '@noble/curves/secp256k1';
-import {privateKeyToAccount} from 'viem/accounts';
 import {describe, expect, it, vi} from 'vitest';
+import {KeyPair} from '@pactora/near';
 import type {KmsClient} from '../src/kms.js';
-import {serviceAccount, sessionManagerAccount, signerKeys} from '../src/keysource.js';
-import {makeKeystore} from './helpers/keystore.js';
+import {keeperAccount, signerKeys} from '../src/keysource.js';
 
-const KEY_A = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' as const;
-const KEY_B = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a' as const;
-const ADDR_A = privateKeyToAccount(KEY_A).address;
-const SPKI_PREFIX = '3056301006072a8648ce3d020106052b8104000a034200';
+/** Which keys the signer runs on, decided once at boot from the environment. */
 
-/** A KMS holding KEY_A under every key id. */
+const KP = KeyPair.fromRandom('ed25519');
+const SPKI = new Uint8Array([...Buffer.from('302a300506032b6570032100', 'hex'), ...KP.getPublicKey().data]);
+
+/** A KMS holding KP under every key id. */
 const kms = vi.fn(async (): Promise<KmsClient> => ({
-  async getPublicKey() {
-    const pub = secp256k1.getPublicKey(KEY_A.slice(2), false);
-    return Uint8Array.from(Buffer.concat([Buffer.from(SPKI_PREFIX, 'hex'), Buffer.from(pub)]));
-  },
-  async sign(_id, digest) {
-    return secp256k1.sign(digest, KEY_A.slice(2)).toDERRawBytes();
-  },
+  getPublicKey: async () => SPKI,
+  sign: async (_id, message) => KP.sign(message).signature,
 }));
 
+/** The store is never queried in these tests; a database is not needed. */
+const db = undefined as never;
+const PASS = 'p'.repeat(40);
+const cred = (account: string, kp = KP) =>
+  JSON.stringify({account_id: account, public_key: kp.getPublicKey().toString(), private_key: kp.toString()});
+
 describe('signerKeys', () => {
-  it('uses the KMS on a mainnet', async () => {
-    const keys = await signerKeys({SIGNER_KMS_KEYS: JSON.stringify({'5': 'alias/agent-5'})}, false, kms);
+  it('uses the KMS, on any chain', async () => {
+    const keys = await signerKeys({
+      env: {SIGNER_KMS_KEYS: JSON.stringify({'bot.alice.near': 'alias/agent-5'})},
+      testnet: false,
+      chainId: 'near:mainnet',
+      db,
+      kms,
+    });
     expect(keys.kind).toBe('aws-kms');
-    expect((await keys.accountFor(5))?.address).toBe(ADDR_A);
+    expect((await keys.keyFor('bot.alice.near'))?.publicKey).toBe(KP.getPublicKey().toString());
   });
 
-  it('refuses two key sources at once', async () => {
-    const env = {SIGNER_KMS_KEYS: '{}', SIGNER_KEYSTORE_JSON: '{}'};
-    await expect(signerKeys(env, true, kms)).rejects.toThrow(/both set/);
+  it('refuses two imported sources at once', async () => {
+    await expect(
+      signerKeys({
+        env: {SIGNER_KMS_KEYS: '{}', SIGNER_DEV_CREDENTIALS: cred('a.testnet')},
+        testnet: true,
+        chainId: 'near:testnet',
+        db,
+        kms,
+      }),
+    ).rejects.toThrow(/both set/);
   });
 
-  it('refuses a KMS map that is not id → key id', async () => {
-    await expect(signerKeys({SIGNER_KMS_KEYS: 'alias/x'}, false, kms)).rejects.toThrow(/not JSON/);
-    await expect(signerKeys({SIGNER_KMS_KEYS: '["a"]'}, false, kms)).rejects.toThrow(/object/);
+  it('refuses a KMS map that is not account → key id', async () => {
+    for (const bad of ['not json', '["k1"]', '{"a.testnet": 5}']) {
+      await expect(
+        signerKeys({env: {SIGNER_KMS_KEYS: bad}, testnet: true, chainId: 'near:testnet', db, kms}),
+      ).rejects.toThrow(/SIGNER_KMS_KEYS/);
+    }
   });
 
-  it('falls back to the keystore, then to raw keys on a testnet', async () => {
-    const pass = 'p';
-    const ks = await signerKeys(
-      {
-        SIGNER_KEYSTORE_JSON: JSON.stringify({'1': makeKeystore(KEY_B, pass)}),
-        SIGNER_KEYSTORE_PASSPHRASE: pass,
-      },
+  it('takes dev credentials on a testnet, and refuses them anywhere else', async () => {
+    const keys = await signerKeys({
+      env: {SIGNER_DEV_CREDENTIALS: cred('a.testnet')},
+      testnet: true,
+      chainId: 'near:testnet',
+      db,
+      kms,
+    });
+    expect(keys.kind).toBe('dev-credentials-testnet-only');
+    await expect(
+      signerKeys({
+        env: {SIGNER_DEV_CREDENTIALS: cred('a.near')},
+        testnet: false,
+        chainId: 'near:mainnet',
+        db,
+        kms,
+      }),
+    ).rejects.toThrow(/testnet only/);
+  });
+
+  it('adds the encrypted store when a passphrase is set', async () => {
+    const keys = await signerKeys({
+      env: {SIGNER_KEY_PASSPHRASE: PASS, SIGNER_DEV_CREDENTIALS: cred('a.testnet')},
+      testnet: true,
+      chainId: 'near:testnet',
+      db,
+      kms,
+    });
+    expect(keys.kind).toBe('dev-credentials-testnet-only+db-keystore');
+  });
+
+  it('refuses a short passphrase at boot', async () => {
+    await expect(
+      signerKeys({env: {SIGNER_KEY_PASSPHRASE: 'short'}, testnet: true, chainId: 'near:testnet', db, kms}),
+    ).rejects.toThrow(/at least 32/);
+  });
+});
+
+describe('the keeper account', () => {
+  it('is off when nothing is set', async () => {
+    expect(await keeperAccount({}, true, kms)).toBeUndefined();
+  });
+
+  it('takes an ed25519 secret key on a testnet', async () => {
+    const k = await keeperAccount(
+      {KEEPER_ACCOUNT_ID: 'keeper.testnet', KEEPER_SECRET_KEY: KP.toString()},
+      true,
+      kms,
+    );
+    expect(k?.accountId).toBe('keeper.testnet');
+    expect(k?.key.publicKey).toBe(KP.getPublicKey().toString());
+  });
+
+  it('refuses a raw key off testnet, and names the KMS variable', async () => {
+    await expect(
+      keeperAccount({KEEPER_ACCOUNT_ID: 'keeper.near', KEEPER_SECRET_KEY: KP.toString()}, false, kms),
+    ).rejects.toThrow(/KEEPER_KMS_KEY_ID/);
+  });
+
+  it('runs from a KMS key on any chain', async () => {
+    const k = await keeperAccount(
+      {KEEPER_ACCOUNT_ID: 'keeper.near', KEEPER_KMS_KEY_ID: 'alias/keeper'},
       false,
       kms,
     );
-    expect(ks.kind).toBe('env-keystore');
-    expect((await signerKeys({SIGNER_DEV_PRIVATE_KEY: KEY_B}, true, kms)).kind).toBe('raw-key-dev-only');
+    expect(k?.key.publicKey).toBe(KP.getPublicKey().toString());
   });
 
-  it('refuses raw keys on a mainnet', async () => {
-    await expect(signerKeys({SIGNER_DEV_PRIVATE_KEY: KEY_B}, false, kms)).rejects.toThrow(/non-testnet/);
-  });
-});
-
-describe('serviceAccount (keeper, renewer)', () => {
-  it('runs from a KMS key on a mainnet', async () => {
-    const account = await serviceAccount('KEEPER', {KEEPER_KMS_KEY_ID: 'alias/keeper'}, false, kms);
-    expect(account?.address).toBe(ADDR_A);
-  });
-
-  it('refuses a raw key on a mainnet, and names the KMS variable', async () => {
+  it('refuses a key without an account, both keys at once, and a malformed key', async () => {
+    await expect(keeperAccount({KEEPER_SECRET_KEY: KP.toString()}, true, kms)).rejects.toThrow(
+      /KEEPER_ACCOUNT_ID/,
+    );
     await expect(
-      serviceAccount('SESSION_OWNER', {SESSION_OWNER_PRIVATE_KEY: KEY_B}, false, kms),
-    ).rejects.toThrow(/SESSION_OWNER_KMS_KEY_ID/);
-  });
-
-  it('accepts a raw key on a testnet', async () => {
-    const account = await serviceAccount('KEEPER', {KEEPER_PRIVATE_KEY: KEY_B}, true, kms);
-    expect(account?.address).toBe(privateKeyToAccount(KEY_B).address);
-  });
-
-  it('is off when neither is set, and refuses both', async () => {
-    expect(await serviceAccount('KEEPER', {}, false, kms)).toBeUndefined();
-    await expect(
-      serviceAccount('KEEPER', {KEEPER_KMS_KEY_ID: 'k', KEEPER_PRIVATE_KEY: KEY_B}, true, kms),
-    ).rejects.toThrow(/both set/);
-  });
-});
-
-/**
- * Audit F1: the renewer is the hosted accounts' session MANAGER, not their
- * owner, and its key is named for what it is. The old name still works, with
- * a warning, so an existing server is not left without renewals.
- */
-describe('the session manager key', () => {
-  it('is SESSION_MANAGER_*', async () => {
-    const r = await sessionManagerAccount({SESSION_MANAGER_KMS_KEY_ID: 'alias/manager'}, false, kms);
-    expect(r?.account.address).toBe(ADDR_A);
-    expect(r?.deprecatedName).toBe(false);
-  });
-
-  it('still reads the old SESSION_OWNER_* name, and says it is deprecated', async () => {
-    const r = await sessionManagerAccount({SESSION_OWNER_PRIVATE_KEY: KEY_B}, true, kms);
-    expect(r?.account.address).toBe(privateKeyToAccount(KEY_B).address);
-    expect(r?.deprecatedName).toBe(true);
-  });
-
-  it('refuses both names at once', async () => {
-    await expect(
-      sessionManagerAccount(
-        {SESSION_MANAGER_PRIVATE_KEY: KEY_A, SESSION_OWNER_PRIVATE_KEY: KEY_B},
+      keeperAccount(
+        {KEEPER_ACCOUNT_ID: 'k.testnet', KEEPER_SECRET_KEY: KP.toString(), KEEPER_KMS_KEY_ID: 'x'},
         true,
         kms,
       ),
-    ).rejects.toThrow(/SESSION_MANAGER.*SESSION_OWNER|both/);
-  });
-
-  it('is off when neither is set', async () => {
-    expect(await sessionManagerAccount({}, false, kms)).toBeUndefined();
+    ).rejects.toThrow(/both set/);
+    await expect(
+      keeperAccount({KEEPER_ACCOUNT_ID: 'k.testnet', KEEPER_SECRET_KEY: 'ed25519:1111'}, true, kms),
+    ).rejects.toThrow(/not a valid/);
+    await expect(keeperAccount({KEEPER_ACCOUNT_ID: 'k.testnet'}, true, kms)).rejects.toThrow(/neither/);
   });
 });

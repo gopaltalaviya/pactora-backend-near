@@ -1,15 +1,19 @@
-import {describe, expect, it} from 'vitest';
-import {Keeper, JobState, dueExit, type Exit, type OnChainJob} from '../src/keeper.js';
+import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
+import {fileURLToPath} from 'node:url';
+import {loadConfig} from '@pactora/config';
+import {KeyPair, TGAS, keyPairKey, nearClient} from '@pactora/near';
+import {Keeper, JobState, chainKeeper, dueExit, type Exit, type OnChainJob} from '../src/keeper.js';
+import {FakeNear} from './helpers/fake-near.js';
 
 /**
- * The keeper exists because `TaskEscrow`'s permissionless exits had no caller.
- * The contract promised that no job holds funds forever; nothing in this
- * system ever sent the transaction that keeps the promise.
+ * The keeper exists because the contract's permissionless exits need a
+ * caller. The contract promises that no job holds funds forever; something
+ * has to send the transaction that keeps the promise.
  *
  * The timing rule under test is the contract's: an exit is valid strictly
- * AFTER its deadline (`block.timestamp <= deadline` reverts). Getting the
- * boundary wrong in the safe direction wastes a sweep; in the other it buys
- * a certain revert and pays gas for it.
+ * AFTER its deadline (`now_s() > deadline`, else `DeadlineNotPassed`).
+ * Getting the boundary wrong in the safe direction wastes a sweep; in the
+ * other it buys a certain failure and pays gas for it.
  */
 
 const job = (over: Partial<OnChainJob>): OnChainJob => ({
@@ -17,22 +21,23 @@ const job = (over: Partial<OnChainJob>): OnChainJob => ({
   acceptDeadline: 1_000n,
   workDeadline: 2_000n,
   reviewDeadline: 0n,
+  disputeDeadline: 0n,
   ...over,
 });
 
 describe('which exit is due', () => {
   it('refunds an offer nobody accepted, once the accept deadline has passed', () => {
-    expect(dueExit(job({}), 1_001n)).toBe('expireUnaccepted');
+    expect(dueExit(job({}), 1_001n)).toBe('expire_unaccepted');
   });
 
-  it('sends nothing on the deadline second itself — the contract would revert', () => {
+  it('sends nothing on the deadline second itself — the contract would refuse', () => {
     expect(dueExit(job({}), 1_000n)).toBeNull();
     expect(dueExit(job({state: JobState.ACCEPTED}), 2_000n)).toBeNull();
     expect(dueExit(job({state: JobState.SUBMITTED, reviewDeadline: 3_000n}), 3_000n)).toBeNull();
   });
 
   it('refunds accepted work that was never delivered', () => {
-    expect(dueExit(job({state: JobState.ACCEPTED}), 2_001n)).toBe('expireUndelivered');
+    expect(dueExit(job({state: JobState.ACCEPTED}), 2_001n)).toBe('expire_undelivered');
   });
 
   it('does not expire accepted work on the ACCEPT deadline', () => {
@@ -41,43 +46,39 @@ describe('which exit is due', () => {
 
   /** The client going quiet must not let it keep a result without paying. */
   it('pays for a result nobody reviewed, once the review window closes', () => {
-    expect(dueExit(job({state: JobState.SUBMITTED, reviewDeadline: 3_000n}), 3_001n)).toBe('autoApprove');
+    expect(dueExit(job({state: JobState.SUBMITTED, reviewDeadline: 3_000n}), 3_001n)).toBe('auto_approve');
   });
 
-  it('leaves every terminal state alone', () => {
-    for (const state of [0, 5, 6, 7]) {
+  it('leaves every terminal state alone, and any state it does not know', () => {
+    for (const state of [JobState.SETTLED, JobState.REFUNDED, 'SomethingNew']) {
       expect(dueExit(job({state, reviewDeadline: 1n, disputeDeadline: 1n}), 10_000_000n)).toBeNull();
     }
   });
 
-  /**
-   * v1 listed DISPUTED (4) among the states to leave alone, because it HAD no
-   * exit: an arbiter who never ruled held the funds forever. v2's escrow gives
-   * it one, and the keeper sends it.
-   */
+  /** An arbiter who never rules must not hold the funds forever. */
   it('settles a dispute nobody ruled on, once its timeout passes', () => {
-    const disputed = job({state: 4, reviewDeadline: 3_000n, disputeDeadline: 5_000n});
+    const disputed = job({state: JobState.DISPUTED, reviewDeadline: 3_000n, disputeDeadline: 5_000n});
     expect(dueExit(disputed, 5_000n)).toBeNull();
-    expect(dueExit(disputed, 5_001n)).toBe('expireDispute');
+    expect(dueExit(disputed, 5_001n)).toBe('expire_dispute');
   });
 
   it('never expires a dispute whose deadline the chain has not set', () => {
-    expect(dueExit(job({state: 4, disputeDeadline: 0n}), 10_000_000n)).toBeNull();
+    expect(dueExit(job({state: JobState.DISPUTED, disputeDeadline: 0n}), 10_000_000n)).toBeNull();
   });
 });
 
 describe('a sweep', () => {
-  const build = (jobs: Record<string, OnChainJob>, now: bigint, failOn: string[] = []) => {
+  const build = (jobs: Record<string, OnChainJob | null>, now: bigint, failOn: string[] = []) => {
     const sent: {exit: Exit; id: string}[] = [];
     const keeper = new Keeper({
       openJobs: async () => Object.keys(jobs).map(BigInt),
-      readJob: async (id) => jobs[id.toString()]!,
+      readJob: async (id) => jobs[id.toString()] ?? null,
       now: async () => now,
       send: async (exit, id) => {
         if (failOn.includes(id.toString()))
-          throw new Error('execution reverted: InvalidState()\nmore detail');
+          throw new Error('the contract refused: InvalidState\nmore detail');
         sent.push({exit, id: id.toString()});
-        return `0x${id.toString().padStart(64, '0')}`;
+        return `tx-${id.toString()}`;
       },
     });
     return {keeper, sent};
@@ -86,21 +87,22 @@ describe('a sweep', () => {
   it('sends only what is due, and the right exit for each', async () => {
     const {keeper, sent} = build(
       {
-        '1': job({}), //                                      unaccepted, overdue
+        '1': job({}), //                                         unaccepted, overdue
         '2': job({acceptDeadline: 9_000n, workDeadline: 9_500n}), // still open
-        '3': job({state: JobState.ACCEPTED}), //                undelivered, overdue
+        '3': job({state: JobState.ACCEPTED}), //                   undelivered, overdue
         '4': job({state: JobState.SUBMITTED, reviewDeadline: 2_500n}), // unreviewed
+        '5': null, //                                             not on chain
       },
       5_000n,
     );
 
     const result = await keeper.sweep();
 
-    expect(result.checked).toBe(4);
+    expect(result.checked).toBe(5);
     expect(sent).toEqual([
-      {exit: 'expireUnaccepted', id: '1'},
-      {exit: 'expireUndelivered', id: '3'},
-      {exit: 'autoApprove', id: '4'},
+      {exit: 'expire_unaccepted', id: '1'},
+      {exit: 'expire_undelivered', id: '3'},
+      {exit: 'auto_approve', id: '4'},
     ]);
   });
 
@@ -115,7 +117,7 @@ describe('a sweep', () => {
 
     expect(sent.map((s) => s.id)).toEqual(['1', '3']);
     expect(result.failed).toEqual([
-      {chainJobId: '2', exit: 'expireUnaccepted', reason: 'execution reverted: InvalidState()'},
+      {chainJobId: '2', exit: 'expire_unaccepted', reason: 'the contract refused: InvalidState'},
     ]);
   });
 
@@ -140,54 +142,89 @@ describe('a sweep', () => {
   });
 });
 
-/**
- * Audit M-1 (2026-10-26): a review the registry refused at settlement is now
- * kept by the escrow, the agent cannot hire or be hired until it is written,
- * and anyone may write it with `retryFeedback`. The keeper is that anyone —
- * otherwise a registry outage would leave honest agents unhireable.
- */
-describe('refused reviews', () => {
-  it('writes every refused review the registry now takes, and leaves the rest for later', async () => {
-    const sent: string[] = [];
-    const keeper = new Keeper({
-      openJobs: async () => [],
-      readJob: async () => {
-        throw new Error('should not read');
-      },
-      now: async () => 0n,
-      send: async () => {
-        throw new Error('no exits here');
-      },
-      unwrittenReviews: async () => [
-        {chainJobId: 7n, client: false},
-        {chainJobId: 7n, client: true},
-        {chainJobId: 9n, client: false},
-      ],
-      retryReview: async (id, client) => {
-        if (id === 9n) throw new Error('execution reverted: Self-feedback not allowed');
-        sent.push(`${id}:${client}`);
-        return '0xabc';
-      },
-    });
-    const result = await keeper.retryReviews();
-    expect(sent).toEqual(['7:false', '7:true']);
-    expect(result.written).toHaveLength(2);
-    expect(result.stillRefused).toEqual([
-      {chainJobId: '9', client: false, reason: 'execution reverted: Self-feedback not allowed'},
-    ]);
+describe('on a NEAR chain', () => {
+  const config = loadConfig({
+    contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+    env: {ENABLED_CHAINS: 'near:sandbox'},
+  });
+  const chain = config.chain('near:sandbox');
+  const PACTORA = chain.contracts.Pactora;
+  const KEEPER = 'keeper.test.near';
+  const fake = new FakeNear();
+  const key = keyPairKey(KeyPair.fromRandom('ed25519'));
+  let onChain: Record<number, unknown>;
+
+  beforeAll(() => fake.start());
+  afterAll(() => fake.stop());
+  beforeEach(() => {
+    fake.reset();
+    fake.addAccount(KEEPER, 10n ** 24n);
+    fake.addKey(KEEPER, key.publicKey, 'FullAccess', 70n);
+    onChain = {};
+    fake.view(PACTORA, 'get_job', (a) => onChain[a['job_id'] as number] ?? null);
   });
 
-  it('does nothing when it was not given a way to find them', async () => {
-    const keeper = new Keeper({
-      openJobs: async () => [],
-      readJob: async () => {
-        throw new Error('should not read');
-      },
-      now: async () => 0n,
-      send: async () => {
-        throw new Error('should not send');
-      },
+  const nowS = () => Number(fake.state.block.timestampNs / 1_000_000_000n);
+  const jobView = (state: string, over: Record<string, number> = {}) => ({
+    state,
+    accept_deadline: 0,
+    work_deadline: 0,
+    review_deadline: 0,
+    dispute_deadline: 0,
+    ...over,
+  });
+
+  const keeper = (ids: bigint[]) =>
+    chainKeeper({
+      db: undefined as never,
+      chain,
+      near: nearClient(fake.url, {retries: 1}),
+      account: {accountId: KEEPER, key},
+      openJobs: async () => ids,
     });
-    expect(await keeper.retryReviews()).toEqual({written: [], stillRefused: []});
+
+  it('reads get_job, judges by the final block clock, and sends each exit from its own account', async () => {
+    const t = nowS();
+    onChain[1] = jobView('Created', {accept_deadline: t - 1});
+    onChain[2] = jobView('Created', {accept_deadline: t}); // the boundary second: not yet
+    onChain[3] = jobView('Submitted', {review_deadline: t - 10});
+    onChain[4] = jobView('Disputed', {dispute_deadline: t - 1});
+    onChain[5] = jobView('Settled');
+
+    const result = await keeper([1n, 2n, 3n, 4n, 5n, 6n]).sweep();
+
+    expect(result.failed).toEqual([]);
+    expect(fake.state.sent.map((s) => [s.method, s.args])).toEqual([
+      ['expire_unaccepted', {job_id: 1}],
+      ['auto_approve', {job_id: 3}],
+      ['expire_dispute', {job_id: 4}],
+    ]);
+    for (const tx of fake.state.sent) {
+      expect(tx).toMatchObject({signerId: KEEPER, receiverId: PACTORA, deposit: 0n, gas: 100n * TGAS});
+    }
+    expect(fake.state.sent.map((s) => s.nonce)).toEqual([71n, 72n, 73n]);
+    expect(result.sent.map((s) => s.txHash)).toEqual(fake.state.sent.map((s) => s.hash));
+  });
+
+  it('never reuses a nonce when the node has not caught up', async () => {
+    fake.state.advanceNonce = false;
+    const t = nowS();
+    onChain[1] = jobView('Created', {accept_deadline: t - 1});
+    onChain[2] = jobView('Accepted', {work_deadline: t - 1});
+    await keeper([1n, 2n]).sweep();
+    expect(fake.state.sent.map((s) => s.nonce)).toEqual([71n, 72n]);
+  });
+
+  it('reports an exit someone else sent first by the contract’s name, and carries on', async () => {
+    const t = nowS();
+    onChain[1] = jobView('Created', {accept_deadline: t - 1});
+    onChain[2] = jobView('Created', {accept_deadline: t - 1});
+    fake.state.onSend = (tx) =>
+      tx.args['job_id'] === 1 ? {kind: 'panic', name: 'InvalidState'} : {kind: 'success', value: null};
+    const result = await keeper([1n, 2n]).sweep();
+    expect(result.failed).toEqual([
+      {chainJobId: '1', exit: 'expire_unaccepted', reason: expect.stringContaining('InvalidState')},
+    ]);
+    expect(result.sent.map((s) => s.chainJobId)).toEqual(['2']);
   });
 });

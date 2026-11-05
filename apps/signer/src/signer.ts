@@ -1,118 +1,219 @@
-import {
-  BaseError,
-  HttpRequestError,
-  createPublicClient,
-  createWalletClient,
-  decodeErrorResult,
-  decodeFunctionData,
-  encodeFunctionData,
-  encodePacked,
-  http,
-  keccak256,
-  type Abi,
-  type Account,
-  type Chain,
-  type Hex,
-  type PublicClient,
-} from 'viem';
-import {and, eq, gte, isNull, sql} from 'drizzle-orm';
+import {and, eq, sql} from 'drizzle-orm';
+import {z} from 'zod';
 import type {ChainConfig} from '@pactora/config';
-import {type Db, signerTxs, agents, withAdvisoryLock, type LockPool} from '@pactora/db';
-import {PactoraError, ErrorCode} from '@pactora/shared';
+import {type Db, agents, signerTxs, signerWalletTxs, withAdvisoryLock, type LockPool} from '@pactora/db';
+import {
+  TGAS,
+  sha256Hex,
+  signFunctionCallWith,
+  type AccessKeyInfo,
+  type NearClient,
+  type TxKey,
+  type TxOutcome,
+} from '@pactora/near';
+import {PactoraError, ErrorCode, canonicalize} from '@pactora/shared';
 import type {KeySource} from './keystore.js';
-import {viemChainOf, walletVerifier, type WalletVerifier} from './accounts.js';
 
 /**
  * The signer: one process, one job, refuses everything else.
  *
  * Key material lives here and nowhere else — the API never touches it. Every
- * request is policy-checked, deduplicated, nonce-ordered, and only then
- * signed.
+ * request is checked, deduplicated, nonce-ordered, and only then signed.
  *
- * The off-chain policy check duplicates what AgentAccount enforces on-chain,
- * deliberately: the off-chain one gives a useful error, the on-chain one gives
- * the guarantee. If they ever disagree, the chain wins and the caller gets a
- * revert — which is the correct failure direction.
+ * On NEAR (docs/NEAR-PORT.md §6) every call is a single function call to the
+ * Pactora contract, signed with the agent wallet's FUNCTION-CALL key, 0
+ * deposit, 100 Tgas, sent with `send_tx` and waited on until FINAL. The
+ * checks here mirror what the contract enforces — its purse caps, its
+ * balance — so the caller gets a useful error before any gas is spent; the
+ * contract is still the authority, and if the two ever disagree the chain
+ * refuses and the caller gets its error by name.
  */
+
+/** The calls the API makes for an agent, and nothing else (NEAR-PORT §6). */
+export const ALLOWED_METHODS = [
+  'create_job',
+  'direct_pay',
+  'accept_job',
+  'submit_result',
+  'approve',
+  'dispute',
+  'cancel',
+  'accept_wallet',
+] as const;
+export type SignMethod = (typeof ALLOWED_METHODS)[number];
 
 export interface SignRequest {
   agentId: number;
-  chainId: number;
-  target: Hex;
-  data: Hex;
-  /** The spend this call is expected to make, in base units. */
+  chainId: string;
+  method: string;
+  /** The call's JSON arguments, by the contract's names. */
+  args: unknown;
+  /** The spend this call is expected to make, in token base units. */
   spend: bigint;
   /** Required. Agents retry, and a retried hire must not create a second job. */
   idempotencyKey: string;
 }
 
 export interface SignResult {
-  txHash: Hex;
+  /** base58 */
+  txHash: string;
   nonce: number;
-  /** True when this was a replay and the original hash is being returned. */
+  /** True when this was a replay and the original transaction is being returned. */
   replayed: boolean;
+  /** The call's JSON return value; the job id for `create_job` and `direct_pay`. */
+  result: unknown;
 }
+
+export interface AcceptRequest {
+  chainId: string;
+  walletAddress: string;
+  /** Decimal u64. */
+  chainAgentId: string;
+}
+
+export interface AcceptResult {
+  /** base58; '' when the wallet had already accepted and nothing was sent. */
+  txHash: string;
+  alreadyAccepted: boolean;
+}
+
+type Logger = {
+  info: (o: unknown, m?: string) => void;
+  warn: (o: unknown, m?: string) => void;
+  error: (o: unknown, m?: string) => void;
+};
 
 export interface SignerDeps {
   db: Db;
   /**
-   * A pool used ONLY for the per-agent advisory lock. Separate from `db`,
+   * A pool used ONLY for the per-wallet advisory lock. Separate from `db`,
    * because the signing work inside the lock queries `db` too — sharing one
    * pool lets concurrent holders exhaust it and wait on each other.
    */
   locks: LockPool;
   chain: ChainConfig;
   keys: KeySource;
-  abis: Record<string, Abi>;
-  /** Refuse to sign below this much native currency, rather than emitting a failing tx. */
-  gasFloorWei?: bigint;
-  /** The most gas one transaction may use; a larger estimate is refused, not paid. */
-  maxGas?: bigint;
-  logger?: {
-    info: (o: unknown, m?: string) => void;
-    warn: (o: unknown, m?: string) => void;
-    error: (o: unknown, m?: string) => void;
-  };
+  near: NearClient;
+  /** Refuse to sign when the wallet holds less NEAR than this. */
+  gasFloorYocto?: bigint;
+  /** Refuse to sign when the key's remaining allowance is below this. */
+  allowanceFloorYocto?: bigint;
+  logger?: Logger;
 }
 
-/**
- * Monad charges the whole gas LIMIT, not the gas used, so the limit is money.
- * A v3 settlement — the costliest call sent — reserves two review budgets,
- * ~1.1 M gas (PROGRESS, v3); this leaves a third again over that. A call
- * estimating higher is not one this system makes, and is refused.
- */
-export const DEFAULT_MAX_GAS = 1_500_000n;
+/** Every call: 100 Tgas (NEAR-PORT §6). */
+export const GAS = 100n * TGAS;
+
+const NEAR = 10n ** 24n;
 
 /**
- * What a plain-EOA agent may sign: the escrow calls the API makes, and
- * nothing else. Nothing on chain bounds such an agent, so this list is the
- * bound.
+ * A call prepays its gas: 100 Tgas × the gas price. Testnet's gas price on
+ * 2026-11-05 was 10^8 yocto/gas (RPC `gas_price`) with a pessimistic
+ * inflation ratio of 1 (`EXPERIMENTAL_protocol_config`), so one call costs
+ * at most 10^22 yocto = 0.01 NEAR, and unused gas is refunded. 0.05 NEAR
+ * leaves room for five such calls, and some for the account's own storage
+ * stake, before the signer starts refusing instead of sending something the
+ * node would reject.
  */
-const EOA_CALLS = new Set([
-  'createJob',
-  'directPay',
-  'acceptJob',
-  'submitResult',
-  'approve',
-  'dispute',
-  'cancel',
-]);
+export const DEFAULT_GAS_FLOOR_YOCTO = (5n * NEAR) / 100n;
+
+/**
+ * A function-call key pays gas out of its allowance, and a transaction
+ * whose prepaid gas exceeds what is left is rejected (`NotEnoughAllowance`).
+ * One 100 Tgas call at the price above is 0.01 NEAR.
+ */
+export const DEFAULT_ALLOWANCE_FLOOR_YOCTO = NEAR / 100n;
+
+const DAY_SECONDS = 24 * 60 * 60;
+
+// ── argument shapes (the contract's JSON) ────────────────────────────────
+
+/** u64: a JSON number on the wire, as near-sdk deserialises it. Accepts a decimal string. */
+const U64 = z
+  .union([z.number().int().nonnegative(), z.string().regex(/^\d{1,16}$/, 'must be a decimal u64')])
+  .transform(Number)
+  .refine(Number.isSafeInteger, 'too large for an id');
+/** U128: a decimal string on the wire. */
+const U128 = z
+  .union([z.string().regex(/^\d{1,39}$/, 'must be a decimal amount'), z.number().int().nonnegative()])
+  .transform((v) => BigInt(v))
+  .refine((v) => v < 2n ** 128n, 'exceeds u128')
+  .transform((v) => v.toString());
+/** What the contract's `check_hash` accepts. */
+const Hash = z.string().regex(/^[0-9a-f]{64}$/, 'must be sha256 as 64 lowercase hex, no 0x');
+const OptionalHash = Hash.nullable()
+  .optional()
+  .transform((v) => v ?? null);
+
+const ARGS: Record<SignMethod, z.ZodType<Record<string, unknown>>> = {
+  create_job: z
+    .object({
+      client_id: U64,
+      worker_id: U64,
+      amount: U128,
+      spec_hash: Hash,
+      accept_window: U64,
+      work_window: U64,
+    })
+    .strict(),
+  direct_pay: z.object({client_id: U64, worker_id: U64, amount: U128, spec_hash: Hash}).strict(),
+  accept_job: z.object({job_id: U64}).strict(),
+  submit_result: z.object({job_id: U64, result_hash: Hash}).strict(),
+  approve: z.object({job_id: U64, review_hash: OptionalHash}).strict(),
+  dispute: z.object({job_id: U64, reason_hash: OptionalHash}).strict(),
+  cancel: z.object({job_id: U64}).strict(),
+  accept_wallet: z.object({agent_id: U64}).strict(),
+};
+
+/** The contract's `PurseView`. */
+interface PurseView {
+  balance: string;
+  per_task_cap: string;
+  daily_cap: string;
+  spent_today: string;
+  daily_remaining: string;
+  next_release_at: number;
+}
+
+/** The parts of the contract's `Job` the signer reads. */
+interface JobView {
+  client: number;
+  worker: number;
+  amount: string;
+  state: string;
+  dispute_bond: string;
+}
+
+interface AgentView {
+  id: number;
+  owner: string;
+  wallet: string | null;
+  pending_wallet: string | null;
+  frozen: boolean;
+}
+
+/** Where one transaction's progress is written: `signer_txs` or `signer_wallet_txs`. */
+interface Ledger {
+  signed(txHash: string): Promise<void>;
+  final(result: unknown): Promise<void>;
+  reverted(failure: string): Promise<void>;
+  /** Never reached the chain: the nonce was not used. */
+  unsent(): Promise<void>;
+}
 
 export class SignerService {
-  private readonly pub: PublicClient;
-  private readonly log: NonNullable<SignerDeps['logger']>;
+  private readonly log: Logger;
   private readonly gasFloor: bigint;
-  private readonly maxGas: bigint;
-  private readonly wallets: WalletVerifier;
-  private readonly viemChain: Chain;
+  private readonly allowanceFloor: bigint;
 
   constructor(private readonly deps: SignerDeps) {
-    this.pub = createPublicClient({transport: http(deps.chain.rpcUrl)});
     this.log = deps.logger ?? {info: () => {}, warn: () => {}, error: () => {}};
-    this.gasFloor = deps.gasFloorWei ?? 10n ** 16n; // 0.01 native
-    this.maxGas = deps.maxGas ?? DEFAULT_MAX_GAS;
-    this.wallets = walletVerifier(this.pub, deps.chain);
-    this.viemChain = viemChainOf(deps.chain);
+    this.gasFloor = deps.gasFloorYocto ?? DEFAULT_GAS_FLOOR_YOCTO;
+    this.allowanceFloor = deps.allowanceFloorYocto ?? DEFAULT_ALLOWANCE_FLOOR_YOCTO;
+  }
+
+  private get pactora(): string {
+    return this.deps.chain.contracts.Pactora;
   }
 
   async sign(req: SignRequest): Promise<SignResult> {
@@ -124,286 +225,531 @@ export class SignerService {
         `signer serves chain ${chain.chainId}, request was for ${req.chainId}`,
       );
     }
+    if (!(ALLOWED_METHODS as readonly string[]).includes(req.method)) {
+      throw new PactoraError(
+        ErrorCode.FORBIDDEN,
+        `"${req.method}" is not a call this signer makes for an agent (${ALLOWED_METHODS.join(', ')})`,
+      );
+    }
+    const method = req.method as SignMethod;
+    const parsed = ARGS[method].safeParse(req.args ?? {});
+    if (!parsed.success) {
+      throw new PactoraError(
+        ErrorCode.SCHEMA_MISMATCH,
+        `${method} args: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'args'}: ${i.message}`).join('; ')}`,
+      );
+    }
+    const args = parsed.data;
 
     // What this key is being used FOR. A replay must be the same call by the
     // same agent; anything else under the key is a conflict, never a replay.
-    const payloadHash = payloadHashOf(req);
+    const payloadHash = payloadHashOf({method, args, spend: req.spend});
 
-    // 1. Replay first — cheapest, and the answer is already final.
+    // 1. Replay first — cheapest, and a final answer is already final.
     const existing = await this.findKey(req);
-    if (existing) assertSamePayload(existing, payloadHash);
-    if (existing?.txHash) {
-      this.log.info({idempotencyKey: req.idempotencyKey, txHash: existing.txHash}, 'replay');
-      return {txHash: existing.txHash as Hex, nonce: existing.nonce, replayed: true};
+    if (existing) {
+      assertSamePayload(existing, payloadHash);
+      const settled = settledReplay(existing);
+      if (settled) {
+        this.log.info({idempotencyKey: req.idempotencyKey, txHash: existing.txHash}, 'replay');
+        return settled;
+      }
     }
 
-    // The agent's registered wallet — the address the CHAIN will check.
-    //
-    // `TaskEscrow` resolves a job's worker and client through the identity
-    // registry and compares the result to `msg.sender`. So the key is not a
-    // detail of custody: it IS the agent's identity, and the keystore has to
-    // be told which address it must produce.
+    // 2. The agent, its on-chain id, its wallet, and the key held for it.
     const agent = await this.loadAgent(req.agentId);
-    const wallet = agent.walletAddress as Hex;
+    const wallet = agent.walletAddress;
+    const chainAgentId = agent.chainAgentId === null ? null : Number(agent.chainAgentId);
+    const own = (field: string) => {
+      if (chainAgentId === null) {
+        throw new PactoraError(
+          ErrorCode.AGENT_NOT_HIREABLE,
+          `agent ${req.agentId} has no on-chain id yet — it cannot act on chain`,
+        );
+      }
+      if (args[field] !== chainAgentId) {
+        throw new PactoraError(
+          ErrorCode.FORBIDDEN,
+          `${method}.${field} is ${String(args[field])}, but agent ${req.agentId} is on-chain agent ${chainAgentId}`,
+        );
+      }
+    };
+    if (method === 'create_job' || method === 'direct_pay') own('client_id');
+    if (method === 'accept_wallet') own('agent_id');
 
-    // 2. What the wallet IS, from its code — never from what it answers.
-    const kind = await this.wallets.kindOf(wallet);
-    if (kind === 'foreign') {
+    const key = await keys.keyFor(wallet);
+    if (!key) {
       throw new PactoraError(
         ErrorCode.AGENT_NOT_HIREABLE,
-        `agent ${req.agentId}'s wallet ${wallet} is a contract, but not an AgentAccount from this ` +
-          "deployment's factory or an EOA delegated to its AgentDelegate — nothing is signed for it",
-      );
-    }
-    const capsOnChain = kind === 'account';
-
-    // 3. Policy: the account's own caps, mirrored for a useful error; or, for
-    //    a plain EOA, what the call actually spends — decoded, not declared.
-    let spend = req.spend;
-    if (capsOnChain) await this.checkPolicy(req, wallet);
-    else spend = await this.eoaSpend(req);
-
-    // Two kinds of wallet, two ways to sign.
-    //
-    // An AgentAccount is a contract: the call goes TO the account as
-    // `execute(target, data)`, signed by its owner or a session key it has
-    // granted, and the account makes the call — so `msg.sender` at the escrow
-    // is the account, the registered wallet, and the caps are enforced by the
-    // account itself, on chain. A plain EOA signs for itself.
-    let account: Account | null;
-    let to: Hex = req.target;
-    let data: Hex = req.data;
-
-    if (capsOnChain) {
-      account = await this.keyTrustedBy(wallet, req.agentId);
-      if (!account) {
-        throw new PactoraError(
-          ErrorCode.AGENT_NOT_HIREABLE,
-          `agent ${req.agentId}'s wallet ${wallet} is an AgentAccount, and no key held here for it is its owner ` +
-            'or an unexpired session key — the owner must grant one',
-        );
-      }
-      to = wallet;
-      data = encodeFunctionData({abi: EXECUTE_ABI, functionName: 'execute', args: [req.target, req.data]});
-    } else {
-      account = await keys.accountFor(req.agentId, wallet);
-      if (!account) {
-        throw new PactoraError(ErrorCode.AGENT_NOT_HIREABLE, `no signing key for agent ${req.agentId}`);
-      }
-
-      // Signing with somebody else's key produces a transaction that is valid,
-      // costs gas, and reverts — `NotAgentWallet`, surfaced as "execution
-      // reverted for an unknown reason" because the revert data is a custom
-      // error. A single shared dev key made that the outcome of every accept,
-      // submitResult and approve in the system. Refusing here says which two
-      // addresses disagree, before any gas is spent.
-      if (account.address.toLowerCase() !== wallet.toLowerCase()) {
-        throw new PactoraError(
-          ErrorCode.AGENT_NOT_HIREABLE,
-          `agent ${req.agentId} is registered to wallet ${wallet}, but the only key available signs as ` +
-            `${account.address} — the chain checks msg.sender against the registered wallet, so this would revert`,
-        );
-      }
-    }
-    const signer = account;
-
-    // 4. Gas. Refusing is better than broadcasting a transaction that will
-    //    fail and still consume a nonce.
-    const balance = await this.pub.getBalance({address: signer.address});
-    if (balance < this.gasFloor) {
-      throw new PactoraError(
-        ErrorCode.INSUFFICIENT_FUNDS,
-        `agent ${req.agentId} has ${balance} wei, below the ${this.gasFloor} gas floor — top up from FUNDER`,
+        `no signing key held for agent ${req.agentId}'s wallet ${wallet} — create one with POST /keys`,
       );
     }
 
-    // 5. The RPC must serve the chain this signer is configured for (audit
-    //    M2). viem checks again at send; this says so in words, and before
-    //    a slot is claimed.
-    const served = await this.pub.getChainId();
-    if (served !== chain.chainId) {
+    // 3. Everything that reads a nonce or a balance happens under the wallet's lock.
+    return this.withWalletLock(wallet, async () => {
+      // Re-read under the lock: another holder may have finished this key.
+      const row = await this.findKey(req);
+      if (row) assertSamePayload(row, payloadHash);
+      const settled = row && settledReplay(row);
+      if (settled) return settled;
+
+      let reuseNonce: number | null = null;
+      if (row?.status === 'signed' && row.txHash) {
+        const resolved = await this.resolveUncertain(row.txHash, row.nonce, wallet, key, {
+          final: async (result) => {
+            await db.update(signerTxs).set({status: 'final', result}).where(eq(signerTxs.id, row.id));
+            return {txHash: row.txHash!, nonce: row.nonce, replayed: true, result};
+          },
+          reverted: async (failure) => {
+            await db.update(signerTxs).set({status: 'reverted', failure}).where(eq(signerTxs.id, row.id));
+          },
+        });
+        if (resolved.done) return resolved.done;
+        reuseNonce = resolved.reuseNonce;
+      }
+
+      const access = await this.checkKey(wallet, key, method);
+      await this.checkGas(wallet, req.agentId);
+      const block = await this.deps.near.finalBlock();
+
+      // 4. What the call spends, read from the arguments and the chain — not
+      //    taken on trust from the request — and whether the purse allows it.
+      const spend = await this.spendOf(method, args, chainAgentId);
+      if (req.spend < spend) {
+        throw new PactoraError(
+          ErrorCode.SCHEMA_MISMATCH,
+          `the call spends ${chain.formatToken(spend)}, but the request declared ${chain.formatToken(req.spend)}`,
+        );
+      }
+      if (spend > 0n) await this.checkPurse(chainAgentId!, spend, block.timestampNs);
+
+      const nonce = reuseNonce ?? (await this.nextNonce(wallet, access.nonce));
+
+      // 5. Claim the slot BEFORE signing. If we crash after this, the row is
+      //    'pending' with no hash: provably never sent, safely retried.
+      let slotId: number;
+      if (row) {
+        await db
+          .update(signerTxs)
+          .set({status: 'pending', nonce, txHash: null, failure: null})
+          .where(eq(signerTxs.id, row.id));
+        slotId = row.id;
+        this.log.warn({agentId: req.agentId, nonce, previous: row.txHash}, 'retrying an unfinished request');
+      } else {
+        const [claimed] = await db
+          .insert(signerTxs)
+          .values({
+            chainId: chain.chainId,
+            agentId: req.agentId,
+            idempotencyKey: req.idempotencyKey,
+            payloadHash,
+            nonce,
+            status: 'pending',
+          })
+          .onConflictDoNothing()
+          .returning({id: signerTxs.id});
+        // Under the lock, a conflict means the same key arrived for another
+        // wallet's lock (the agent's wallet changed mid-flight). Refuse.
+        if (!claimed) {
+          throw new PactoraError(ErrorCode.IDEMPOTENCY_CONFLICT, 'a request with this key is in flight');
+        }
+        slotId = claimed.id;
+      }
+
+      const ledger: Ledger = {
+        signed: async (txHash) => {
+          await db.update(signerTxs).set({txHash, status: 'signed'}).where(eq(signerTxs.id, slotId));
+        },
+        final: async (result) => {
+          await db
+            .update(signerTxs)
+            .set({status: 'final', result: result ?? null})
+            .where(eq(signerTxs.id, slotId));
+        },
+        reverted: async (failure) => {
+          await db.update(signerTxs).set({status: 'reverted', failure}).where(eq(signerTxs.id, slotId));
+        },
+        unsent: async () => {
+          await db.update(signerTxs).set({status: 'failed', txHash: null}).where(eq(signerTxs.id, slotId));
+        },
+      };
+
+      const sent = await this.send({wallet, key, nonce, blockHash: block.hash, method, args, ledger});
+      this.log.info({agentId: req.agentId, method, nonce, txHash: sent.txHash}, 'signed, final');
+      return {txHash: sent.txHash, nonce, replayed: false, result: sent.result};
+    });
+  }
+
+  /**
+   * `accept_wallet` for a wallet whose agent row does not exist yet: during
+   * registration the wallet must accept BEFORE the API inserts the agent
+   * (NEAR-PORT §5 (d)), so there is no agent id to key `/sign` on.
+   *
+   * Idempotent through the chain itself: an already-accepted wallet answers
+   * `alreadyAccepted` and nothing is sent. Its transactions are recorded in
+   * `signer_wallet_txs` so the wallet's nonce discipline sees them.
+   */
+  async acceptWallet(req: AcceptRequest): Promise<AcceptResult> {
+    const {db, chain, keys, near} = this.deps;
+    if (req.chainId !== chain.chainId) {
       throw new PactoraError(
         ErrorCode.CHAIN_MISMATCH,
-        `the RPC serves chain ${served}, not ${chain.chainId} — refusing to sign`,
+        `signer serves chain ${chain.chainId}, request was for ${req.chainId}`,
+      );
+    }
+    const agentId = Number(req.chainAgentId);
+    if (!/^\d{1,16}$/.test(req.chainAgentId) || !Number.isSafeInteger(agentId)) {
+      throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, 'chainAgentId must be a decimal u64');
+    }
+    const wallet = req.walletAddress;
+    const key = await keys.keyFor(wallet);
+    if (!key) {
+      throw new PactoraError(
+        ErrorCode.NOT_FOUND,
+        `this signer holds no key for ${wallet} — create one with POST /keys first`,
       );
     }
 
-    // 6. Nonce under a per-agent advisory lock. Two concurrent hires for the
-    //    same agent must not produce the same nonce, and a database lock is
-    //    the only thing that holds across process restarts and replicas.
-    return this.withAgentLock(req.agentId, async () => {
-      const nonce = await this.pub.getTransactionCount({
-        address: signer.address,
-        blockTag: 'pending',
-      });
-
-      // A failed broadcast that never reached the chain still holds its
-      // nonce in our ledger, and the next request — given that same nonce by
-      // the node — collided with it and was refused as "in flight". The
-      // chain's own pending count proves such a nonce was never used (had
-      // the transaction reached even the mempool, the count would be past
-      // it), so the stale claim is released. A retry of that request simply
-      // claims a fresh slot.
-      await db
-        .delete(signerTxs)
-        .where(
-          and(
-            eq(signerTxs.chainId, chain.chainId),
-            eq(signerTxs.agentId, req.agentId),
-            eq(signerTxs.status, 'failed'),
-            isNull(signerTxs.txHash),
-            gte(signerTxs.nonce, nonce),
-          ),
+    const decide = async (): Promise<AcceptResult | null> => {
+      const agent = await this.view<AgentView | null>('get_agent', {agent_id: agentId});
+      if (!agent) throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${agentId} on ${this.pactora}`);
+      if (agent.wallet === wallet) return {txHash: '', alreadyAccepted: true};
+      if (agent.pending_wallet !== wallet) {
+        throw new PactoraError(
+          ErrorCode.INVALID_STATE,
+          `agent ${agentId}'s pending wallet is ${agent.pending_wallet ?? 'none'}, not ${wallet} ` +
+            `(its wallet is ${agent.wallet ?? 'none'}) — the owner must propose ${wallet} first`,
         );
+      }
+      return null;
+    };
 
-      // Claim the slot BEFORE broadcasting. If we crash between claiming and
-      // broadcasting, the row is 'pending' with no hash and is visible for
-      // reconciliation — far better than an untracked in-flight transaction.
-      const [claimed] = await db
-        .insert(signerTxs)
+    const early = await decide();
+    if (early) return early;
+
+    return this.withWalletLock(wallet, async () => {
+      // Again under the lock: a concurrent accept may have just landed.
+      const now = await decide();
+      if (now) return now;
+
+      const access = await this.checkKey(wallet, key, 'accept_wallet');
+      await this.checkGas(wallet, null);
+      const block = await near.finalBlock();
+      const nonce = await this.nextNonce(wallet, access.nonce);
+
+      const [row] = await db
+        .insert(signerWalletTxs)
         .values({
           chainId: chain.chainId,
-          agentId: req.agentId,
-          idempotencyKey: req.idempotencyKey,
-          payloadHash,
+          walletAddress: wallet,
+          method: 'accept_wallet',
+          chainAgentId: String(agentId),
           nonce,
           status: 'pending',
         })
-        .onConflictDoNothing()
-        .returning();
+        .returning({id: signerWalletTxs.id});
+      const id = row!.id;
+      const set = (v: Partial<typeof signerWalletTxs.$inferInsert>) =>
+        db.update(signerWalletTxs).set(v).where(eq(signerWalletTxs.id, id));
 
-      let slot = claimed;
-
-      if (!slot) {
-        const now = await this.findKey(req);
-        // Claimed meanwhile for a different call: a conflict, not a replay.
-        if (now) assertSamePayload(now, payloadHash);
-        if (now?.txHash) return {txHash: now.txHash as Hex, nonce: now.nonce, replayed: true};
-
-        // A previous attempt claimed the key and then failed to broadcast —
-        // the wallet was out of gas, or the RPC was down.
-        //
-        // Without this the key is burned forever: the row exists, has no
-        // hash, and every retry is refused as "in flight". Topping the wallet
-        // up would not help, which is the opposite of the recovery the chaos
-        // checklist asks for.
-        //
-        // The retry REUSES THE STORED NONCE. If the original somehow did
-        // reach the mempool after all, two transactions with one nonce means
-        // only one can ever be mined — so recovering cannot double-spend.
-        // And it is the SAME call, checked above: a failed row's key cannot
-        // be taken over to send something else on its nonce.
-        if (now && now.status === 'failed') {
-          const [reclaimed] = await db
-            .update(signerTxs)
-            .set({status: 'pending'})
-            .where(eq(signerTxs.id, now.id))
-            .returning();
-          slot = reclaimed;
-          this.log.warn({agentId: req.agentId, nonce: now.nonce}, 'retrying a failed broadcast');
-        }
-      }
-
-      if (!slot) {
-        // Another request holds this key right now.
-        throw new PactoraError(ErrorCode.IDEMPOTENCY_CONFLICT, 'a request with this key is in flight');
-      }
-
-      // No AgentAccount, so nothing on-chain will stop this spend: the cap
-      // is ours to hold. Reserved here — under the lock, after a replay has
-      // already returned, before anything is broadcast — so two concurrent
-      // hires cannot both fit into the same remaining budget.
-      const reserved = !capsOnChain && spend > 0n;
-      if (reserved) {
-        try {
-          await this.reserveOffChain(req.agentId, spend);
-        } catch (err) {
-          // Free the key: a spend refused today may be allowed tomorrow.
-          await db.update(signerTxs).set({status: 'failed'}).where(eq(signerTxs.id, slot.id));
-          throw err;
-        }
-      }
-
-      const client = createWalletClient({
-        account: signer,
-        chain: this.viemChain,
-        transport: http(chain.rpcUrl),
-      });
-
-      let txHash: Hex;
       try {
-        // Estimated, then bounded: the estimate is what the code says it
-        // needs, the ceiling what this system will ever pay for one call. On
-        // Monad the limit is charged in full, so it is not padded either.
-        const gas = await this.pub.estimateGas({account: signer, to, data});
-        if (gas > this.maxGas) {
-          throw new PactoraError(
-            ErrorCode.INVALID_STATE,
-            `the call would use ${gas} gas, over this signer's ceiling of ${this.maxGas} — not sent`,
-          );
-        }
-        txHash = await client.sendTransaction({
-          // For an AgentAccount this is the account, carrying execute(...).
-          to,
-          data,
-          // The slot's nonce, which on a retry is the original one.
-          nonce: slot.nonce,
-          gas,
-          // Explicit, never null: viem then checks the RPC serves this chain
-          // and signs for it, rather than for whatever the RPC says it is.
-          chain: this.viemChain,
-        });
-      } catch (err) {
-        // Nothing left the building, so nothing was spent.
-        // Neither of these may hide the broadcast error below, so neither
-        // rethrows — but neither is silent any more. A lost release leaves the
-        // agent's budget wrongly reduced; a lost status update leaves the row
-        // 'pending', and every retry of the key is refused as "in flight".
-        // Both are an operator's to fix, so both are logged at error level.
-        if (reserved) {
-          await this.releaseOffChain(req.agentId, spend).catch((releaseErr: unknown) =>
-            this.log.error(
-              {err: releaseErr, agentId: req.agentId, spend: spend.toString()},
-              'could not release a reserved spend after a failed broadcast — the budget is under-reported',
-            ),
-          );
-        }
-
-        await db
-          .update(signerTxs)
-          .set({status: 'failed'})
-          .where(eq(signerTxs.id, slot.id))
-          .catch((statusErr: unknown) =>
-            this.log.error(
-              {err: statusErr, signerTxId: slot.id, idempotencyKey: req.idempotencyKey},
-              'could not mark a failed broadcast as failed — the key stays "in flight" until fixed',
-            ),
-          );
-
-        // The caller gets a sentence; the log keeps the whole error. A live
-        // run once failed as "Missing or invalid parameters" and nothing
-        // anywhere recorded what the node had actually said.
-        const e = err as {shortMessage?: string; details?: string; message?: string};
-        this.log.warn(
-          {
-            agentId: req.agentId,
-            to,
-            signer: signer.address,
-            short: e.shortMessage,
-            details: e.details,
-            message: e.message?.slice(0, 2000),
+        const sent = await this.send({
+          wallet,
+          key,
+          nonce,
+          blockHash: block.hash,
+          method: 'accept_wallet',
+          args: {agent_id: agentId},
+          ledger: {
+            signed: async (txHash) => void (await set({txHash, status: 'signed'})),
+            final: async () => void (await set({status: 'final'})),
+            reverted: async (failure) => void (await set({status: 'reverted', failure})),
+            unsent: async () => void (await set({status: 'failed', txHash: null})),
           },
-          'broadcast failed',
-        );
-        if (err instanceof PactoraError) throw err;
-        throw asActionableError(err, chain.network.nativeCurrency.symbol, signer.address, this.deps.abis);
+        });
+        this.log.info({wallet, agentId, txHash: sent.txHash}, 'wallet accepted');
+        return {txHash: sent.txHash, alreadyAccepted: false};
+      } catch (err) {
+        // An earlier accept whose outcome we never saw may have landed first,
+        // and this one then fails NotPendingWallet: the goal is reached.
+        const after = await this.view<AgentView | null>('get_agent', {agent_id: agentId}).catch(() => null);
+        if (after?.wallet === wallet) return {txHash: '', alreadyAccepted: true};
+        throw err;
       }
-
-      await db.update(signerTxs).set({txHash, status: 'broadcast'}).where(eq(signerTxs.id, slot.id));
-
-      this.log.info({agentId: req.agentId, nonce: slot.nonce, txHash}, 'signed and broadcast');
-      return {txHash, nonce: slot.nonce, replayed: false};
     });
+  }
+
+  // ── the checks ─────────────────────────────────────────────────────────
+
+  /**
+   * The key must be on chain, and must be a function-call key for the
+   * Pactora contract. Asked of the chain on every call, never cached: a
+   * deleted key must stop working on the next request.
+   *
+   * A FULL-ACCESS key is refused even though it would work: it can move the
+   * account's NEAR, deploy code, add keys — it is an owner's key, and the
+   * signer must never hold one. A key for another receiver is refused
+   * because every call this signer makes goes to Pactora; the node would
+   * reject it anyway, after a round trip.
+   */
+  private async checkKey(wallet: string, key: TxKey, method: string): Promise<AccessKeyInfo> {
+    const access = await this.deps.near.accessKey(wallet, key.publicKey);
+    if (!access) {
+      throw new PactoraError(
+        ErrorCode.AGENT_NOT_HIREABLE,
+        `${wallet} has no access key ${key.publicKey} — its owner must add it (AddKey, FunctionCall for ${this.pactora})`,
+      );
+    }
+    const p = access.permission;
+    if (p === 'FullAccess') {
+      throw new PactoraError(
+        ErrorCode.FORBIDDEN,
+        `the key held for ${wallet} is a FULL-ACCESS key — the signer only signs with a function-call key ` +
+          `scoped to ${this.pactora}; the owner must replace it`,
+      );
+    }
+    const fc = p.FunctionCall;
+    if (fc.receiver_id !== this.pactora) {
+      throw new PactoraError(
+        ErrorCode.FORBIDDEN,
+        `the key held for ${wallet} may call ${fc.receiver_id}, not ${this.pactora}`,
+      );
+    }
+    if (fc.allowance !== null && BigInt(fc.allowance) < this.allowanceFloor) {
+      throw new PactoraError(
+        ErrorCode.INSUFFICIENT_FUNDS,
+        `the key held for ${wallet} has ${fc.allowance} yocto of gas allowance left, below ${this.allowanceFloor} — ` +
+          'the owner must add a new key',
+      );
+    }
+    // An empty list means every method of the receiver (NEAR-PORT §5 adds it so).
+    if (fc.method_names.length > 0 && !fc.method_names.includes(method)) {
+      throw new PactoraError(ErrorCode.FORBIDDEN, `the key held for ${wallet} may not call ${method}`);
+    }
+    return access;
+  }
+
+  private async checkGas(wallet: string, agentId: number | null): Promise<void> {
+    const balance = await this.deps.near.balance(wallet);
+    if (balance === null) {
+      throw new PactoraError(ErrorCode.AGENT_NOT_HIREABLE, `the wallet account ${wallet} does not exist`);
+    }
+    if (balance < this.gasFloor) {
+      throw new PactoraError(
+        ErrorCode.INSUFFICIENT_FUNDS,
+        `${agentId === null ? '' : `agent ${agentId}'s `}wallet ${wallet} has ${balance} yocto, below the ` +
+          `${this.gasFloor} gas floor — top it up with NEAR`,
+      );
+    }
+  }
+
+  /** What the call takes from the client's purse: the amount for a hire, the job's bond for a dispute. */
+  private async spendOf(
+    method: SignMethod,
+    args: Record<string, unknown>,
+    chainAgentId: number | null,
+  ): Promise<bigint> {
+    if (method === 'create_job' || method === 'direct_pay') return BigInt(args['amount'] as string);
+    if (method !== 'dispute') return 0n;
+    // The contract spends `job.dispute_bond` — fixed when the job was created
+    // (`dispute_bond_of(amount)` with the params of that moment), so reading
+    // it back is exact even if `set_params` changed the bond rule since.
+    const job = await this.view<JobView | null>('get_job', {job_id: args['job_id']});
+    if (!job)
+      throw new PactoraError(ErrorCode.NOT_FOUND, `no job ${String(args['job_id'])} on ${this.pactora}`);
+    if (chainAgentId === null || job.client !== chainAgentId) {
+      throw new PactoraError(
+        ErrorCode.FORBIDDEN,
+        `job ${String(args['job_id'])}'s client is agent ${job.client}, not this agent`,
+      );
+    }
+    return BigInt(job.dispute_bond);
+  }
+
+  /**
+   * The purse rules, in the contract's order (`spend`, then `budget::charge`):
+   * balance, per-task cap, rolling daily cap. Read under the wallet lock and
+   * after the previous call from this wallet is FINAL, so the view already
+   * counts it. So the EVM build's off-chain reservation in `spend_policies`
+   * is gone: it bounded plain-EOA wallets that nothing on chain bounded,
+   * and here the contract bounds every wallet; a second, off-chain copy of
+   * the caps could only disagree with it.
+   */
+  private async checkPurse(chainAgentId: number, spend: bigint, nowNs: bigint): Promise<void> {
+    const {chain} = this.deps;
+    const purse = await this.view<PurseView | null>('purse_of', {agent_id: chainAgentId});
+    if (!purse) throw new PactoraError(ErrorCode.AGENT_NOT_HIREABLE, `agent ${chainAgentId} has no purse`);
+    const balance = BigInt(purse.balance);
+    if (spend > balance) {
+      throw new PactoraError(
+        ErrorCode.INSUFFICIENT_FUNDS,
+        `spend ${chain.formatToken(spend)} exceeds the agent's balance of ${chain.formatToken(balance)} — fund it`,
+      );
+    }
+    const perTask = BigInt(purse.per_task_cap);
+    if (spend > perTask) {
+      throw new PactoraError(
+        ErrorCode.BUDGET_EXCEEDED,
+        `spend ${chain.formatToken(spend)} exceeds the per-task cap of ${chain.formatToken(perTask)}`,
+      );
+    }
+    const remaining = BigInt(purse.daily_remaining);
+    if (spend > remaining) {
+      // The cap rolls: nothing "resets". next_release_at is when the oldest
+      // counted spend leaves the window — the earliest anything changes.
+      const now = Number(nowNs / 1_000_000_000n);
+      const retry = purse.next_release_at > 0 ? Math.max(1, purse.next_release_at - now) : DAY_SECONDS;
+      throw new PactoraError(
+        ErrorCode.BUDGET_EXCEEDED,
+        `spend ${chain.formatToken(spend)} exceeds today's remaining budget of ${chain.formatToken(remaining)}`,
+        retry,
+      );
+    }
+  }
+
+  // ── nonce, send, outcome ───────────────────────────────────────────────
+
+  /**
+   * The access key's nonce + 1 — or past the highest nonce this signer has
+   * already claimed for the wallet, if that is higher: a claimed nonce whose
+   * transaction the node has not seen yet must never be handed out twice.
+   * NEAR accepts any nonce above the key's, so a gap left by a request that
+   * was never sent costs nothing.
+   */
+  private async nextNonce(wallet: string, chainNonce: bigint): Promise<number> {
+    const {db, chain} = this.deps;
+    const rows = (await db.execute(sql`
+      SELECT GREATEST(
+        (SELECT max(t.nonce) FROM signer_txs t JOIN agents a ON a.id = t.agent_id
+          WHERE t.chain_id = ${chain.chainId} AND a.wallet_address = ${wallet}),
+        (SELECT max(nonce) FROM signer_wallet_txs WHERE chain_id = ${chain.chainId} AND wallet_address = ${wallet})
+      )::text AS last
+    `)) as unknown as {last: string | null}[];
+    const last = rows[0]?.last ? BigInt(rows[0].last) : 0n;
+    const next = (chainNonce > last ? chainNonce : last) + 1n;
+    if (next > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`nonce ${next} exceeds 2^53`);
+    return Number(next);
+  }
+
+  /**
+   * Sign, record the hash, broadcast, wait for FINAL, record the outcome.
+   *
+   * The hash is known before broadcast and written first, so a crash or a
+   * timeout after this point leaves a row that says exactly which
+   * transaction to look for (`resolveUncertain`).
+   */
+  private async send(opts: {
+    wallet: string;
+    key: TxKey;
+    nonce: number;
+    blockHash: string;
+    method: string;
+    args: Record<string, unknown>;
+    ledger: Ledger;
+  }): Promise<{txHash: string; result: unknown}> {
+    const {near} = this.deps;
+    const {ledger, wallet} = opts;
+
+    let signed;
+    try {
+      signed = await signFunctionCallWith({
+        signerId: wallet,
+        key: opts.key,
+        receiverId: this.pactora,
+        nonce: BigInt(opts.nonce),
+        blockHash: opts.blockHash,
+        method: opts.method,
+        args: opts.args,
+        gas: GAS,
+        deposit: 0n,
+      });
+    } catch (err) {
+      await ledger.unsent();
+      throw err;
+    }
+    await ledger.signed(signed.hash);
+
+    let outcome: TxOutcome;
+    try {
+      outcome = await near.sendSigned(signed);
+    } catch (err) {
+      const name = errorName(err);
+      if (REJECTED.has(name)) {
+        // The node refused the transaction itself: it was never included, so
+        // its nonce is unused and the request may be retried as it is.
+        await ledger.unsent().catch((e: unknown) => this.log.error({err: e}, 'could not mark a rejected tx'));
+        this.log.warn({wallet, txHash: signed.hash, rejected: name}, 'transaction rejected by the node');
+        throw rejectedError(name, wallet);
+      }
+      // Timed out, or the RPC failed: it may or may not have landed. Ask once.
+      outcome = await near.txOutcome(signed.hash, wallet).catch(() => ({
+        status: 'pending' as const,
+        txHash: signed.hash,
+        receipts: [],
+      }));
+      if (outcome.status === 'pending') {
+        this.log.warn(
+          {wallet, txHash: signed.hash, error: (err as Error).message?.slice(0, 500)},
+          'broadcast outcome unknown',
+        );
+        throw uncertainError(signed.hash);
+      }
+    }
+
+    if (outcome.status === 'success') {
+      await ledger.final(outcome.returnValue ?? null);
+      return {txHash: signed.hash, result: outcome.returnValue ?? null};
+    }
+    if (outcome.status === 'failure') {
+      const failure = outcome.failure ?? 'unknown failure';
+      await ledger.reverted(failure);
+      this.log.warn(
+        {wallet, txHash: signed.hash, failure: failure.slice(0, 1000)},
+        'transaction failed on chain',
+      );
+      throw refusalOf(failure, signed.hash);
+    }
+    throw uncertainError(signed.hash);
+  }
+
+  /**
+   * A transaction that was signed and maybe broadcast, whose outcome was never
+   * seen. Ask the chain: final or failed settles it. Still unknown and the
+   * key's nonce has not reached it → it never landed (yet); re-sign on the
+   * SAME nonce, so at most one of the two can ever execute. Unknown but the
+   * nonce is used → the node has not caught up; say so and keep the row.
+   */
+  private async resolveUncertain(
+    txHash: string,
+    nonce: number,
+    wallet: string,
+    key: TxKey,
+    on: {final: (result: unknown) => Promise<SignResult>; reverted: (failure: string) => Promise<void>},
+  ): Promise<{done: SignResult; reuseNonce?: never} | {done?: never; reuseNonce: number}> {
+    const outcome = await this.deps.near.txOutcome(txHash, wallet);
+    if (outcome.status === 'success') return {done: await on.final(outcome.returnValue ?? null)};
+    if (outcome.status === 'failure') {
+      await on.reverted(outcome.failure ?? 'unknown failure');
+      throw refusalOf(outcome.failure ?? '', txHash);
+    }
+    const access = await this.deps.near.accessKey(wallet, key.publicKey);
+    if (access && access.nonce >= BigInt(nonce)) throw uncertainError(txHash);
+    return {reuseNonce: nonce};
+  }
+
+  // ── plumbing ───────────────────────────────────────────────────────────
+
+  private async view<T>(method: string, args: Record<string, unknown>): Promise<T> {
+    try {
+      return await this.deps.near.view<T>(this.pactora, method, args);
+    } catch (err) {
+      this.log.warn({method, error: (err as Error).message?.slice(0, 500)}, 'view failed');
+      throw new PactoraError(
+        ErrorCode.UPSTREAM_UNAVAILABLE,
+        `could not read ${method} from ${this.pactora} — nothing was sent; retry shortly`,
+        5,
+      );
+    }
   }
 
   /** This agent's use of this key, if any. A key belongs to the agent that used it. */
@@ -430,273 +776,33 @@ export class SignerService {
   }
 
   /**
-   * The on-chain caps of a PROVEN AgentAccount, checked here so the caller
-   * gets an actionable error instead of a bare revert.
-   *
-   * Whether the wallet is an account is no longer read from these answers —
-   * any contract can answer them (audit H3). The account enforces its caps
-   * regardless, so a cap that cannot be read is left to it.
+   * Serialise per wallet account using a Postgres advisory lock — the unit a
+   * nonce belongs to. One agent has one wallet, so this is the per-agent lock
+   * of the EVM build; keying it on the wallet also covers `acceptWallet`,
+   * which runs before there is an agent row. A database lock holds across
+   * process restarts and replicas; an in-process mutex would not.
    */
-  private async checkPolicy(req: SignRequest, wallet: Hex): Promise<void> {
-    const {chain, abis} = this.deps;
-
-    const accountAbi = abis['AgentAccount'];
-    if (!accountAbi) return;
-
-    // Read the caps from the chain, not from our cache. The cache exists for
-    // fast rejection; the contract is the authority, and a stale cache that
-    // lets a call through only to have it revert is the worse failure.
-    const [perTaskCap, dailyRemaining, nextReleaseAt] = await Promise.all([
-      this.pub
-        .readContract({
-          address: wallet,
-          abi: accountAbi,
-          functionName: 'policy',
-        })
-        .then((p) => (p as readonly [bigint, bigint, boolean])[0])
-        .catch(() => null),
-      this.pub
-        .readContract({
-          address: wallet,
-          abi: accountAbi,
-          functionName: 'dailyRemaining',
-        })
-        .then((v) => v as bigint)
-        .catch(() => null),
-      this.pub
-        .readContract({
-          address: wallet,
-          abi: accountAbi,
-          functionName: 'nextReleaseAt',
-        })
-        .then((v) => v as bigint)
-        .catch(() => null),
-    ]);
-
-    if (perTaskCap !== null && req.spend > perTaskCap) {
-      throw new PactoraError(
-        ErrorCode.BUDGET_EXCEEDED,
-        `spend ${chain.formatToken(req.spend)} exceeds the per-task cap of ${chain.formatToken(perTaskCap)}`,
-      );
-    }
-
-    if (dailyRemaining !== null && req.spend > dailyRemaining) {
-      throw new PactoraError(
-        ErrorCode.BUDGET_EXCEEDED,
-        `spend ${chain.formatToken(req.spend)} exceeds today's remaining budget of ${chain.formatToken(dailyRemaining)}`,
-        this.secondsUntilRelease(nextReleaseAt),
-      );
-    }
-  }
-
-  /**
-   * What a plain-EOA agent's call spends — and whether it may be signed at
-   * all (audit M3).
-   *
-   * Nothing on chain bounds an EOA, so this is the bound: the escrow, one of
-   * the calls the API makes, and a spend read from the calldata rather than
-   * taken on trust from the request. A declared spend below what the call
-   * moves is refused; that was `USDC.transfer(attacker, balance)` signed as
-   * spend 0. The amount reserved against the cap is the decoded one.
-   */
-  private async eoaSpend(req: SignRequest): Promise<bigint> {
-    const {chain, abis} = this.deps;
-    const escrow = chain.contracts['TaskEscrow'];
-    const abi = abis['TaskEscrow'];
-    if (!escrow || !abi || req.target.toLowerCase() !== escrow.toLowerCase()) {
-      throw new PactoraError(
-        ErrorCode.FORBIDDEN,
-        `agent ${req.agentId} has a plain wallet: it may call only the TaskEscrow, not ${req.target}`,
-      );
-    }
-
-    let call: {functionName: string; args?: readonly unknown[] | undefined};
-    try {
-      call = decodeFunctionData({abi, data: req.data});
-    } catch {
-      throw new PactoraError(ErrorCode.FORBIDDEN, 'the calldata is not a TaskEscrow call');
-    }
-    if (!EOA_CALLS.has(call.functionName)) {
-      throw new PactoraError(
-        ErrorCode.FORBIDDEN,
-        `TaskEscrow.${call.functionName} is not a call this signer makes for an agent`,
-      );
-    }
-
-    const args = call.args ?? [];
-    let moves = 0n;
-    if (call.functionName === 'createJob' || call.functionName === 'directPay') {
-      moves = args[2] as bigint;
-    } else if (call.functionName === 'dispute') {
-      // v3: the bond the job captured at creation, read from the chain.
-      const job = await this.pub
-        .readContract({address: escrow as Hex, abi, functionName: 'getJob', args: [args[0]]})
-        .catch(() => null);
-      if (!job) {
-        throw new PactoraError(
-          ErrorCode.CHAIN_NOT_ENABLED,
-          "the job's dispute bond could not be read — nothing was sent; retry shortly",
-          5,
-        );
-      }
-      moves = BigInt((job as {disputeBond: bigint}).disputeBond);
-    }
-
-    if (req.spend < moves) {
-      throw new PactoraError(
-        ErrorCode.SCHEMA_MISMATCH,
-        `the call spends ${chain.formatToken(moves)}, but the request declared ${chain.formatToken(req.spend)}`,
-      );
-    }
-    return moves;
-  }
-
-  /**
-   * A key held here that this AgentAccount will accept: its owner, or a
-   * session key it granted that has not expired. Asked of the account every
-   * time rather than cached — a revoke must take effect on the next call.
-   *
-   * The key mapped to this agent is asked first, and off testnet it is the
-   * only one asked: anyone can deploy a genuine AgentAccount and grant OUR
-   * hot key a session in it, and a signer that tried every key it held would
-   * then pay that stranger's gas from ours. Testnet dev keys are listed
-   * without agent ids, so there every held key is still tried.
-   */
-  private async keyTrustedBy(wallet: Hex, agentId: number): Promise<Account | null> {
-    const {keys, chain} = this.deps;
-    const bound = await keys.accountFor(agentId, wallet);
-    const others = chain.testnet ? (keys.all?.() ?? []).filter((k) => k.address !== bound?.address) : [];
-    const held = [...(bound ? [bound] : []), ...others];
-    if (held.length === 0) return null;
-
-    const owner = await this.pub
-      .readContract({address: wallet, abi: ACCOUNT_KEYS_ABI, functionName: 'owner'})
-      .catch(() => null);
-    const now = BigInt(Math.floor(Date.now() / 1000));
-
-    // Prefer a session key: bounded in time and budget, which is the point.
-    // The owner's key is the fallback, and on a real deployment is not here.
-    let ownerKey: Account | null = null;
-    for (const key of held) {
-      const [expiry] = await this.pub
-        .readContract({
-          address: wallet,
-          abi: ACCOUNT_KEYS_ABI,
-          functionName: 'sessionKeys',
-          args: [key.address],
-        })
-        .catch(() => [0n, 0n, 0n] as const);
-      // A minute of margin: a key that expires while its transaction is in
-      // the mempool reverts, and costs gas doing it.
-      if (expiry > now + 60n) return key;
-      if (owner && owner.toLowerCase() === key.address.toLowerCase()) ownerKey = key;
-    }
-    return ownerKey;
-  }
-
-  /**
-   * Check and reserve a spend against the stored policy, atomically.
-   *
-   * One UPDATE decides and records: the window rolls over after 24 hours
-   * (rolling, like AgentAccount's, not UTC midnight), the per-task cap and
-   * the daily cap are both tested, and if either fails no row changes.
-   */
-  private async reserveOffChain(agentId: number, spend: bigint): Promise<void> {
-    const {db, chain} = this.deps;
-    const amount = spend.toString();
-    const rows = (await db.execute(sql`
-      UPDATE spend_policies SET
-        spent_today = CASE WHEN day_start <= now() - interval '24 hours'
-                           THEN ${amount}::numeric ELSE spent_today + ${amount}::numeric END,
-        day_start   = CASE WHEN day_start <= now() - interval '24 hours' THEN now() ELSE day_start END
-      WHERE agent_id = ${agentId}
-        AND per_task_cap >= ${amount}::numeric
-        AND (CASE WHEN day_start <= now() - interval '24 hours' THEN 0 ELSE spent_today END)
-            + ${amount}::numeric <= daily_cap
-      RETURNING agent_id
-    `)) as unknown as {agent_id: number}[];
-    if (rows.length > 0) return;
-
-    // Refused. Say which rule, and when it lifts.
-    const [policy] = (await db.execute(sql`
-      SELECT per_task_cap, daily_cap, spent_today,
-             GREATEST(0, EXTRACT(EPOCH FROM (day_start + interval '24 hours' - now())))::int AS resets_in
-      FROM spend_policies WHERE agent_id = ${agentId}
-    `)) as unknown as {per_task_cap: string; daily_cap: string; spent_today: string; resets_in: number}[];
-
-    if (!policy) {
-      throw new PactoraError(
-        ErrorCode.BUDGET_EXCEEDED,
-        `agent ${agentId} has no spending policy — nothing may be spent until one is set`,
-      );
-    }
-    if (spend > BigInt(policy.per_task_cap)) {
-      throw new PactoraError(
-        ErrorCode.BUDGET_EXCEEDED,
-        `spend ${chain.formatToken(spend)} exceeds the per-task cap of ${chain.formatToken(BigInt(policy.per_task_cap))}`,
-      );
-    }
-    const remaining = BigInt(policy.daily_cap) - BigInt(policy.spent_today);
-    throw new PactoraError(
-      ErrorCode.BUDGET_EXCEEDED,
-      `spend ${chain.formatToken(spend)} exceeds today's remaining budget of ${chain.formatToken(remaining > 0n ? remaining : 0n)}`,
-      Math.max(1, policy.resets_in),
-    );
-  }
-
-  private async releaseOffChain(agentId: number, spend: bigint): Promise<void> {
-    await this.deps.db.execute(sql`
-      UPDATE spend_policies SET spent_today = GREATEST(0, spent_today - ${spend.toString()}::numeric)
-      WHERE agent_id = ${agentId}
-    `);
-  }
-
-  /**
-   * Serialise per agent using a Postgres advisory lock.
-   *
-   * Two concurrent hires for the same agent must not read the same nonce. An
-   * in-process mutex would not survive a second replica, which Railway will
-   * happily give us.
-   */
-  private async withAgentLock<T>(agentId: number, fn: () => Promise<T>): Promise<T> {
-    const key = BigInt(this.deps.chain.chainId) * 1_000_000n + BigInt(agentId);
-    // Lock and unlock on ONE reserved connection. Through the shared pool
-    // they landed on different connections, the unlock silently failed, and
-    // the lock stayed held by an idle connection — the next sign for the
-    // agent waited forever (reproduced in signer.test.ts, "the per-agent lock").
-    return withAdvisoryLock(this.deps.locks, key, fn);
-  }
-
-  /**
-   * When the daily cap next gives capacity back.
-   *
-   * v3: `AgentAccount`'s cap is ROLLING — no 24 hours may see more than the
-   * cap — so nothing "resets". `nextReleaseAt` is when the oldest counted
-   * spend leaves the window. That may free less than this request needs, but
-   * it is the earliest moment anything changes; a later hint would make a
-   * caller wait longer than it must, an earlier one would just be refused
-   * again. Zero means nothing is counted (the cap itself is too small): a
-   * full day is the honest answer.
-   */
-  private secondsUntilRelease(nextReleaseAt: bigint | null): number {
-    if (nextReleaseAt === null || nextReleaseAt === 0n) return DAY_SECONDS;
-    return Math.max(0, Number(nextReleaseAt) - Math.floor(Date.now() / 1000));
+  private async withWalletLock<T>(wallet: string, fn: () => Promise<T>): Promise<T> {
+    return withAdvisoryLock(this.deps.locks, walletLockKey(this.deps.chain.chainId, wallet), fn);
   }
 }
 
-const DAY_SECONDS = 24 * 60 * 60;
+/** A signed 64-bit lock key for (chain, wallet): the first 8 bytes of a sha256. */
+export function walletLockKey(chainId: string, wallet: string): bigint {
+  return BigInt.asIntN(64, BigInt(`0x${sha256Hex(`pactora-signer|${chainId}|${wallet}`).slice(0, 16)}`));
+}
 
-/** keccak256(target ‖ data ‖ spend): the call an idempotency key was first used for. */
-export function payloadHashOf(req: Pick<SignRequest, 'target' | 'data' | 'spend'>): Hex {
-  return keccak256(encodePacked(['address', 'bytes', 'uint256'], [req.target, req.data, req.spend]));
+/** sha256 of the canonical {method, args, spend}: the call an idempotency key was first used for. */
+export function payloadHashOf(p: {method: string; args: Record<string, unknown>; spend: bigint}): string {
+  return sha256Hex(canonicalize({method: p.method, args: p.args, spend: p.spend.toString()}));
 }
 
 /**
  * A key reused for a different call is a conflict, never a replay of the
  * first. A row from before payload hashes were stored never replays either.
  */
-function assertSamePayload(row: {payloadHash: string | null}, payloadHash: Hex): void {
-  if (row.payloadHash?.toLowerCase() !== payloadHash.toLowerCase()) {
+function assertSamePayload(row: {payloadHash: string | null}, payloadHash: string): void {
+  if (row.payloadHash !== payloadHash) {
     throw new PactoraError(
       ErrorCode.IDEMPOTENCY_CONFLICT,
       'this idempotency key was already used for a different call — a new request needs a new key',
@@ -704,136 +810,134 @@ function assertSamePayload(row: {payloadHash: string | null}, payloadHash: Hex):
   }
 }
 
-/** AgentAccount.execute — the only way a call leaves an account. */
-const EXECUTE_ABI = [
-  {
-    type: 'function',
-    name: 'execute',
-    stateMutability: 'nonpayable',
-    inputs: [
-      {name: 'target', type: 'address'},
-      {name: 'data', type: 'bytes'},
-    ],
-    outputs: [{name: 'result', type: 'bytes'}],
-  },
-] as const;
+/** A row whose answer is already known: final → the original result; reverted → the original error. */
+function settledReplay(row: {
+  status: string;
+  txHash: string | null;
+  nonce: number;
+  result: unknown;
+  failure: string | null;
+}): SignResult | null {
+  if (row.status === 'final' && row.txHash) {
+    return {txHash: row.txHash, nonce: row.nonce, replayed: true, result: row.result ?? null};
+  }
+  if (row.status === 'reverted' && row.txHash) throw refusalOf(row.failure ?? '', row.txHash);
+  return null;
+}
 
-/** Who an AgentAccount will take a call from. */
-const ACCOUNT_KEYS_ABI = [
-  {
-    type: 'function',
-    name: 'owner',
-    stateMutability: 'view',
-    inputs: [],
-    outputs: [{name: '', type: 'address'}],
-  },
-  {
-    type: 'function',
-    name: 'sessionKeys',
-    stateMutability: 'view',
-    inputs: [{name: 'key', type: 'address'}],
-    outputs: [
-      {name: 'expiry', type: 'uint64'},
-      {name: 'budget', type: 'uint128'},
-      {name: 'spent', type: 'uint128'},
-    ],
-  },
-] as const;
+// ── what a failure is reported as ────────────────────────────────────────
 
 /**
- * Turn a broadcast failure into something the operator can act on.
- *
- * "execution reverted" and a 900-character viem stack are the same thing to
- * whoever is watching a demo fail: unreadable. The two that actually happen —
- * an empty gas wallet and an unreachable RPC — get a sentence each, naming
- * the address to fund, because at that moment the useful output is an
- * address and not a stack trace.
+ * Contract panic names (pactora-contracts-near `errors.rs`) → the codes the
+ * API and agents already branch on. A name not listed is INVALID_STATE, with
+ * the name in the detail.
  */
-function asActionableError(
-  err: unknown,
-  gasSymbol: string,
-  from: string,
-  abis: Record<string, Abi> = {},
-): PactoraError {
-  const message = err instanceof Error ? err.message : String(err);
+export const PANIC_CODES: Record<string, ErrorCode> = {
+  PerTaskCapExceeded: ErrorCode.BUDGET_EXCEEDED,
+  DailyCapExceeded: ErrorCode.BUDGET_EXCEEDED,
+  InsufficientBalance: ErrorCode.INSUFFICIENT_FUNDS,
+  InsufficientBond: ErrorCode.INSUFFICIENT_FUNDS,
+  InsufficientStorage: ErrorCode.INSUFFICIENT_FUNDS,
+  NotHireable: ErrorCode.AGENT_NOT_HIREABLE,
+  AgentFrozen: ErrorCode.AGENT_NOT_HIREABLE,
+  SameOwner: ErrorCode.AGENT_NOT_HIREABLE,
+  SelfDealing: ErrorCode.AGENT_NOT_HIREABLE,
+  DeadlinePassed: ErrorCode.DEADLINE_PASSED,
+  NoSuchJob: ErrorCode.NOT_FOUND,
+  NoSuchAgent: ErrorCode.NOT_FOUND,
+  NotAgentWallet: ErrorCode.FORBIDDEN,
+  NotAgentOwner: ErrorCode.FORBIDDEN,
+  NotPendingWallet: ErrorCode.FORBIDDEN,
+  BadHash: ErrorCode.SCHEMA_MISMATCH,
+  ZeroAmount: ErrorCode.SCHEMA_MISMATCH,
+  AmountBelowMinimum: ErrorCode.SCHEMA_MISMATCH,
+  AmountAboveMaximum: ErrorCode.SCHEMA_MISMATCH,
+  AmountTooLargeForFastPath: ErrorCode.SCHEMA_MISMATCH,
+  WindowTooLong: ErrorCode.SCHEMA_MISMATCH,
+  InvalidState: ErrorCode.INVALID_STATE,
+  DeadlineNotPassed: ErrorCode.INVALID_STATE,
+  Paused: ErrorCode.INVALID_STATE,
+  WalletTaken: ErrorCode.INVALID_STATE,
+  NotEnoughGas: ErrorCode.INVALID_STATE,
+};
 
-  // A contract said no, and said which rule. Name it — and only it: viem's
-  // message can carry the whole signed transaction, which is the log's
-  // business, not the caller's.
-  const refused = contractRefusal(err, abis);
-  if (refused) {
-    return new PactoraError(ErrorCode.INVALID_STATE, `the contract refused: ${refused}`);
+/** An on-chain failure (the outcome's `Failure`, as JSON) as an actionable error. */
+export function refusalOf(failure: string, txHash: string): PactoraError {
+  // near-sdk's `require!`/`panic_str` surface as
+  // FunctionCallError.ExecutionError "Smart contract panicked: <name>".
+  const panic = /Smart contract panicked: ([A-Za-z]+)/.exec(failure)?.[1];
+  if (panic) {
+    return new PactoraError(
+      PANIC_CODES[panic] ?? ErrorCode.INVALID_STATE,
+      `the contract refused: ${panic} (transaction ${txHash}, nothing changed)`,
+    );
   }
-  // Classify on what the node SAID, not on viem's full message: that carries
-  // the whole request body, and "503" inside a transaction's hex once turned
-  // an empty gas wallet into "the RPC endpoint is unreachable".
-  const e = err as {shortMessage?: string; details?: string};
-  const said = [e.shortMessage, e.details].filter(Boolean).join(' ') || message;
-
-  if (/insufficient (funds|balance)|exceeds the balance|gas required exceeds/i.test(said)) {
+  if (/LackBalanceForState|NotEnoughBalance|NotEnoughAllowance/.test(failure)) {
     return new PactoraError(
       ErrorCode.INSUFFICIENT_FUNDS,
-      `the agent wallet ${from} has no ${gasSymbol} left for gas — top it up and retry the same request`,
+      `the wallet could not pay for the call (transaction ${txHash}) — top it up`,
     );
   }
-
-  // A proxy or load balancer answering for the node puts its status on the
-  // error, not in its words: viem says only "HTTP request failed." — which was
-  // called INVALID_STATE, so a worker gave up a submit that was safe to retry.
-  const httpStatus =
-    err instanceof BaseError
-      ? (err.walk((c) => c instanceof HttpRequestError) as HttpRequestError | null)?.status
-      : undefined;
-  const transportDown = httpStatus !== undefined && (httpStatus === 429 || httpStatus >= 500);
-
-  if (transportDown || /fetch failed|ECONNREFUSED|ETIMEDOUT|socket hang up|\b50[234]\b/i.test(said)) {
-    return new PactoraError(
-      ErrorCode.CHAIN_NOT_ENABLED,
-      `the RPC endpoint is unreachable — the transaction was NOT broadcast, so retrying the same request is safe (${message})`,
-      5,
-    );
-  }
-
-  return new PactoraError(ErrorCode.INVALID_STATE, `broadcast failed: ${said.slice(0, 300)}`);
+  return new PactoraError(
+    ErrorCode.INVALID_STATE,
+    `the transaction ${txHash} failed on chain: ${failure.slice(0, 300)}`,
+  );
 }
 
 /**
- * The custom error a contract reverted with, decoded against the escrow and
- * account ABIs, as `Name(arg, arg)`. An AgentAccount wraps its target's revert
- * in `CallFailed(bytes)`, so that is unwrapped once to reach the real reason.
+ * near-api-js error class names for a transaction the node REJECTED
+ * (`INVALID_TRANSACTION`): never included, so its nonce is unused.
  */
-function contractRefusal(err: unknown, abis: Record<string, Abi>): string | null {
-  const data = revertData(err);
-  if (!data) return null;
-  const abi = [
-    ...(abis['TaskEscrow'] ?? []),
-    ...(abis['AgentAccount'] ?? []),
-    ...(abis['StakeVault'] ?? []),
-  ] as Abi;
-  const decode = (hex: Hex): string | null => {
-    try {
-      const {errorName, args} = decodeErrorResult({abi, data: hex});
-      if (errorName === 'CallFailed' && typeof args?.[0] === 'string') {
-        return decode(args[0] as Hex) ?? errorName;
-      }
-      return `${errorName}(${(args ?? []).map(String).join(', ')})`;
-    } catch {
-      return null;
-    }
-  };
-  return decode(data);
+const REJECTED = new Set([
+  'InvalidNonceError',
+  'NonceTooLargeError',
+  'NotEnoughBalanceError',
+  'NotEnoughBalanceForDepositError',
+  'LackBalanceForStateActionError',
+  'InvalidSignatureError',
+  'InvalidSignerIdError',
+  'InvalidReceiverIdError',
+  'SignerDoesNotExistError',
+  'TransactionExpiredError',
+  'InvalidChainError',
+  'ShardCongestedError',
+  'ShardStuckError',
+  'CostOverflowError',
+  'TransactionSizeExceededError',
+  'AccessKeyNotFoundActionError',
+  'AccessKeyReceiverMismatchActionError',
+  'AccessKeyMethodNameMismatchActionError',
+  'AccessKeyNotEnoughAllowanceActionError',
+  'AccessKeyRequiresFullAccessActionError',
+  'AccessKeyDepositWithFunctionCallActionError',
+]);
+
+function errorName(err: unknown): string {
+  return (err as {name?: string})?.name ?? (err as object)?.constructor?.name ?? '';
 }
 
-/** Revert data carried anywhere in a viem error's cause chain. */
-function revertData(err: unknown): Hex | null {
-  let current: unknown = err;
-  for (let depth = 0; current && depth < 8; depth++) {
-    const data = (current as {data?: unknown}).data;
-    if (typeof data === 'string' && /^0x[0-9a-fA-F]{8,}$/.test(data)) return data as Hex;
-    if (data && typeof data === 'object' && typeof (data as {data?: unknown}).data === 'string') {
-      return (data as {data: Hex}).data;
-    }
-    current = (current as {cause?: unknown}).cause;
+function rejectedError(name: string, wallet: string): PactoraError {
+  if (/Balance|Allowance/.test(name)) {
+    return new PactoraError(
+      ErrorCode.INSUFFICIENT_FUNDS,
+      `the node rejected the transaction (${name}): ${wallet} cannot pay for it — top it up, then retry the same request`,
+    );
   }
-  return null;
+  if (/^AccessKey/.test(name)) {
+    return new PactoraError(ErrorCode.FORBIDDEN, `the node rejected the transaction: ${name}`);
+  }
+  return new PactoraError(
+    ErrorCode.UPSTREAM_UNAVAILABLE,
+    `the node rejected the transaction (${name}); nothing was executed — retrying the same request is safe`,
+    2,
+  );
+}
+
+function uncertainError(txHash: string): PactoraError {
+  return new PactoraError(
+    ErrorCode.UPSTREAM_UNAVAILABLE,
+    `transaction ${txHash} was sent but its outcome is not known yet — retry the same request ` +
+      '(same idempotency key): it returns this transaction, never a second one',
+    5,
+  );
 }
