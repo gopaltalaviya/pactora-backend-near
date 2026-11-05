@@ -1,6 +1,6 @@
 import Fastify, {type FastifyInstance} from 'fastify';
 import {z, ZodError} from 'zod';
-import {PactoraError, ErrorCode} from '@pactora/shared';
+import {ACCOUNT_ID_RE, PactoraError, ErrorCode} from '@pactora/shared';
 import {
   registerHealth,
   registerMetrics,
@@ -9,6 +9,7 @@ import {
   type Metrics,
 } from '@pactora/service';
 import {authorised} from './auth.js';
+import type {KeyStore} from './keystore.js';
 import type {SignerService, SignRequest} from './signer.js';
 
 /**
@@ -21,24 +22,35 @@ import type {SignerService, SignRequest} from './signer.js';
  * `err.message`. Now the body is a schema, every refusal is RFC 7807 with a
  * traceId, and an internal error says only that it was internal.
  */
-const Hex = z.string().regex(/^0x([0-9a-fA-F]{2})*$/, 'must be 0x-prefixed hex');
-
 export const SignBody = z.object({
   agentId: z.coerce.number().int().positive(),
-  chainId: z.coerce.number().int().positive().optional(),
-  target: z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 20-byte address'),
-  data: Hex,
+  chainId: z.string().min(1).optional(),
+  method: z.string().min(1).max(64),
+  /** Checked per method by the service: the contract's argument names (NEAR-PORT §6). */
+  args: z.record(z.string(), z.unknown()).default({}),
   spend: z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]).default('0'),
   idempotencyKey: z.string().min(8).max(200),
 });
 
+const Account = z.string().min(2).max(64).regex(ACCOUNT_ID_RE, 'must be a NEAR account id');
+
+export const KeysBody = z.object({walletAddress: Account, chainId: z.string().min(1).optional()});
+
+export const AcceptBody = z.object({
+  chainId: z.string().min(1),
+  walletAddress: Account,
+  chainAgentId: z.string().regex(/^\d{1,16}$/, 'must be a decimal u64'),
+});
+
 export interface SignerAppDeps {
-  service: Pick<SignerService, 'sign'>;
-  chainId: number;
+  service: Pick<SignerService, 'sign' | 'acceptWallet'>;
+  /** `POST /keys` creates keys here. */
+  keys: Pick<KeyStore, 'ensure'>;
+  chainId: string;
   keysKind: string;
   /** What is running — reported on `/health`. */
   build?: BuildInfo;
-  /** The latest gas reading of the wallets it sends from (v3) — reported on `/health`. */
+  /** The latest NEAR balances (`balanceYocto`) of the accounts it sends from — reported on `/health`. */
   wallets?: () => unknown;
   token?: string;
   checks: Record<string, () => Promise<unknown>>;
@@ -113,21 +125,50 @@ export function buildSignerApp(deps: SignerAppDeps): FastifyInstance {
     });
   });
 
-  app.post('/sign', async (request, reply) => {
-    if (!authorised(request.headers.authorization, deps.token)) {
+  const guard = (header: string | undefined) => {
+    if (!authorised(header, deps.token)) {
       throw new PactoraError(ErrorCode.UNAUTHORIZED, 'the signer requires its SIGNER_TOKEN');
     }
+  };
+  const sameChain = (chainId: string | undefined) => {
+    if (chainId !== undefined && chainId !== deps.chainId) {
+      throw new PactoraError(
+        ErrorCode.CHAIN_MISMATCH,
+        `signer serves chain ${deps.chainId}, request was for ${chainId}`,
+      );
+    }
+  };
+
+  app.post('/sign', async (request, reply) => {
+    guard(request.headers.authorization);
     const body = SignBody.parse(request.body ?? {});
     const req: SignRequest = {
       agentId: body.agentId,
       chainId: body.chainId ?? deps.chainId,
-      target: body.target as `0x${string}`,
-      data: body.data as `0x${string}`,
+      method: body.method,
+      args: body.args,
       spend: BigInt(body.spend),
       idempotencyKey: body.idempotencyKey,
     };
     const result = await deps.service.sign(req);
     signed?.labels(String(result.replayed)).inc();
+    return reply.send(result);
+  });
+
+  /** The wallet's function-call key, created if missing (NEAR-PORT §6). Never the secret half. */
+  app.post('/keys', async (request, reply) => {
+    guard(request.headers.authorization);
+    const body = KeysBody.parse(request.body ?? {});
+    sameChain(body.chainId);
+    const {publicKey} = await deps.keys.ensure(body.walletAddress);
+    return reply.send({publicKey});
+  });
+
+  /** `accept_wallet` for a wallet that has no agent row yet (registration, NEAR-PORT §5 (d)). */
+  app.post('/keys/accept', async (request, reply) => {
+    guard(request.headers.authorization);
+    const body = AcceptBody.parse(request.body ?? {});
+    const result = await deps.service.acceptWallet(body);
     return reply.send(result);
   });
 

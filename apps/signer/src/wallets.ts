@@ -1,23 +1,23 @@
 /**
- * Gas balances of the wallets this signer sends from (v3).
+ * NEAR balances of the accounts this signer sends from.
  *
- * docs/17 had "wallet balance monitoring: none; checked by hand before
- * demos", and a drained key fails a run with a bare revert or an
- * insufficient-funds error at the worst moment. This reads the balances in
- * the background and keeps the last reading, so `/health` — a liveness check
- * a restart policy acts on — reports them without ever waiting on an RPC, and
- * `/v1/status` can say "degraded: the keeper is nearly out of gas" before it
- * actually is.
+ * A drained wallet fails a run with an error at the worst moment. This reads
+ * the balances in the background and keeps the last reading, so `/health` —
+ * a liveness check a restart policy acts on — reports them without ever
+ * waiting on an RPC, and `/v1/status` can say "the keeper is nearly out of
+ * gas" before it actually is.
  */
 
 export interface WatchedWallet {
-  address: string;
-  /** What the wallet is for: `signing-key`, `keeper`. */
+  /** The NEAR account. */
+  account: string;
+  /** What the account is for: `signing-key`, `keeper`. */
   role: string;
 }
 
 export interface WalletReading extends WatchedWallet {
-  balanceWei: string;
+  /** Liquid balance in yoctoNEAR, as a decimal string; null when the account does not exist. */
+  balanceYocto: string | null;
   low: boolean;
 }
 
@@ -29,7 +29,7 @@ export interface WalletSnapshot {
 }
 
 interface BalanceReader {
-  getBalance(args: {address: `0x${string}`}): Promise<bigint>;
+  balance(accountId: string): Promise<bigint | null>;
 }
 
 interface GaugeLike {
@@ -41,11 +41,12 @@ export class WalletWatch {
 
   constructor(
     private readonly deps: {
-      pub: BalanceReader;
-      wallets: WatchedWallet[];
+      near: BalanceReader;
+      /** Read on every check: the signer creates keys while it runs. */
+      wallets: () => Promise<WatchedWallet[]> | WatchedWallet[];
       /** Below this, a wallet is low. */
-      lowWei: bigint;
-      /** `signer_wallet_balance` in native units, one series per wallet. */
+      lowYocto: bigint;
+      /** `signer_wallet_balance` in NEAR, one series per account. */
       gauge?: GaugeLike;
     },
   ) {}
@@ -53,19 +54,20 @@ export class WalletWatch {
   /** Read every balance once. A failed read keeps the previous snapshot. */
   async check(): Promise<void> {
     try {
-      const balances = await Promise.all(
-        this.deps.wallets.map((w) => this.deps.pub.getBalance({address: w.address as `0x${string}`})),
-      );
-      const wallets = this.deps.wallets.map((w, i) => ({
-        ...w,
-        balanceWei: balances[i]!.toString(),
-        low: balances[i]! < this.deps.lowWei,
-      }));
-      for (const [i, w] of this.deps.wallets.entries()) {
-        // Native units for the gauge: wei overflows a float's exact range.
-        this.deps.gauge
-          ?.labels({address: w.address, role: w.role})
-          .set(Number(balances[i]! / 10n ** 12n) / 1e6);
+      const watched = await this.deps.wallets();
+      const balances = await Promise.all(watched.map((w) => this.deps.near.balance(w.account)));
+      const wallets = watched.map((w, i) => {
+        const b = balances[i] ?? null;
+        return {
+          ...w,
+          balanceYocto: b === null ? null : b.toString(),
+          low: b === null || b < this.deps.lowYocto,
+        };
+      });
+      for (const [i, w] of watched.entries()) {
+        // NEAR for the gauge: yocto overflows a float's exact range.
+        const b = balances[i] ?? 0n;
+        this.deps.gauge?.labels({address: w.account, role: w.role}).set(Number(b / 10n ** 18n) / 1e6);
       }
       this.last = {checkedAt: new Date().toISOString(), wallets, anyLow: wallets.some((w) => w.low)};
     } catch {

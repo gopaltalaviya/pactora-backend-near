@@ -1,33 +1,37 @@
-import type {LocalAccount} from 'viem';
-import {privateKeyToAccount} from 'viem/accounts';
-import {EnvKeystoreSource, RawKeySource, type KeySource} from './keystore.js';
-import {KmsKeySource, kmsAccount, type KmsClient} from './kms.js';
+import {KeyPair, keyPairKey, type TxKey} from '@pactora/near';
+import type {Db} from '@pactora/db';
+import {DbKeyStore, EnvCredentialsSource, Keys, isAccountId, type KeySource} from './keystore.js';
+import {KmsKeySource, kmsKey, type KmsClient} from './kms.js';
 
 /**
  * Which keys the signer runs on, decided once at boot from the environment.
  *
- * - `SIGNER_KMS_KEYS` → AWS KMS (any chain; the only choice on a mainnet that
- *   does not want a decryptable key in its environment).
- * - `SIGNER_KEYSTORE_JSON` → an encrypted keystore; off testnet, one per agent.
- * - otherwise raw `SIGNER_DEV_PRIVATE_KEY(S)` → testnet only.
+ * Imported keys (one source at most — which one signs must never be a guess):
+ * - `SIGNER_KMS_KEYS` → AWS KMS ed25519 keys, `{"<wallet account>": "<key id>"}`;
+ * - `SIGNER_DEV_CREDENTIALS` → near-cli credential JSON, testnet only.
  *
- * Two sources at once is refused: which one signs must never be a guess.
+ * Generated keys (`POST /keys`): the encrypted store in the database, when
+ * `SIGNER_KEY_PASSPHRASE` is set.
  */
-export async function signerKeys(
-  env: NodeJS.ProcessEnv,
-  testnet: boolean,
-  kms: () => Promise<KmsClient>,
-): Promise<KeySource> {
+export async function signerKeys(opts: {
+  env: NodeJS.ProcessEnv;
+  testnet: boolean;
+  chainId: string;
+  db: Db;
+  kms: () => Promise<KmsClient>;
+}): Promise<Keys> {
+  const {env} = opts;
   const kmsKeys = env['SIGNER_KMS_KEYS'];
-  if (kmsKeys && env['SIGNER_KEYSTORE_JSON']) {
-    throw new Error('SIGNER_KMS_KEYS and SIGNER_KEYSTORE_JSON are both set; set one');
+  if (kmsKeys && env['SIGNER_DEV_CREDENTIALS']) {
+    throw new Error('SIGNER_KMS_KEYS and SIGNER_DEV_CREDENTIALS are both set; set one');
   }
+  let imported: KeySource | null = null;
   if (kmsKeys) {
     let map: unknown;
     try {
       map = JSON.parse(kmsKeys);
     } catch {
-      throw new Error('SIGNER_KMS_KEYS is not JSON: expected {"<agentId or wallet>": "<KMS key id>"}');
+      throw new Error('SIGNER_KMS_KEYS is not JSON: expected {"<wallet account>": "<KMS key id>"}');
     }
     if (
       !map ||
@@ -35,55 +39,55 @@ export async function signerKeys(
       Array.isArray(map) ||
       !Object.values(map).every((v) => typeof v === 'string')
     ) {
-      throw new Error('SIGNER_KMS_KEYS must be an object of agent id or wallet → KMS key id');
+      throw new Error('SIGNER_KMS_KEYS must be an object of wallet account → KMS key id');
     }
-    return KmsKeySource.create(await kms(), map as Record<string, string>);
+    imported = await KmsKeySource.create(await opts.kms(), map as Record<string, string>);
+  } else if (env['SIGNER_DEV_CREDENTIALS']) {
+    // The constructor refuses raw keys off testnet.
+    imported = new EnvCredentialsSource(env, opts.testnet);
   }
-  if (env['SIGNER_KEYSTORE_JSON']) return new EnvKeystoreSource(env, testnet);
-  // Raw keys are permitted on a testnet only, and the constructor enforces it.
-  return new RawKeySource(env, testnet);
+  const passphrase = env['SIGNER_KEY_PASSPHRASE'];
+  const store = passphrase ? new DbKeyStore(opts.db, opts.chainId, passphrase) : null;
+  return new Keys(imported, store);
+}
+
+/** The keeper's account: a normal NEAR account with a key of its own. */
+export interface ServiceAccount {
+  accountId: string;
+  key: TxKey;
 }
 
 /**
- * The keeper's or the renewer's account: `<NAME>_KMS_KEY_ID` on any chain,
- * `<NAME>_PRIVATE_KEY` on a testnet only, neither → not running.
+ * `KEEPER_ACCOUNT_ID` with `KEEPER_KMS_KEY_ID` (any chain) or
+ * `KEEPER_SECRET_KEY` = `ed25519:...` (testnet only); no account → no keeper.
  */
-export async function serviceAccount(
-  name: 'KEEPER' | 'SESSION_MANAGER' | 'SESSION_OWNER',
+export async function keeperAccount(
   env: NodeJS.ProcessEnv,
   testnet: boolean,
   kms: () => Promise<KmsClient>,
-): Promise<LocalAccount | undefined> {
-  const keyId = env[`${name}_KMS_KEY_ID`];
-  const raw = env[`${name}_PRIVATE_KEY`];
-  if (keyId && raw) throw new Error(`${name}_KMS_KEY_ID and ${name}_PRIVATE_KEY are both set; set one`);
-  if (keyId) return kmsAccount(await kms(), keyId);
-  if (!raw) return undefined;
-  if (!testnet)
-    throw new Error(
-      `${name}_PRIVATE_KEY is a raw key; raw keys are for testnet only — use ${name}_KMS_KEY_ID`,
-    );
-  return privateKeyToAccount(raw as `0x${string}`);
-}
-
-/**
- * The renewer's account: the hosted accounts' session manager (audit F1). It
- * used to be their owner and was named `SESSION_OWNER_*`; that name is still
- * read, flagged deprecated, so an existing server keeps renewing.
- */
-export async function sessionManagerAccount(
-  env: NodeJS.ProcessEnv,
-  testnet: boolean,
-  kms: () => Promise<KmsClient>,
-): Promise<{account: LocalAccount; deprecatedName: boolean} | undefined> {
-  const named = (n: string) => Boolean(env[`${n}_KMS_KEY_ID`] || env[`${n}_PRIVATE_KEY`]);
-  if (named('SESSION_MANAGER') && named('SESSION_OWNER')) {
-    throw new Error(
-      'SESSION_MANAGER_* and SESSION_OWNER_* are both set; SESSION_OWNER_* is the old name — keep one',
-    );
+): Promise<ServiceAccount | undefined> {
+  const accountId = env['KEEPER_ACCOUNT_ID'];
+  const keyId = env['KEEPER_KMS_KEY_ID'];
+  const raw = env['KEEPER_SECRET_KEY'];
+  if (!accountId) {
+    if (keyId || raw)
+      throw new Error('KEEPER_SECRET_KEY / KEEPER_KMS_KEY_ID is set but KEEPER_ACCOUNT_ID is not');
+    return undefined;
   }
-  const current = await serviceAccount('SESSION_MANAGER', env, testnet, kms);
-  if (current) return {account: current, deprecatedName: false};
-  const old = await serviceAccount('SESSION_OWNER', env, testnet, kms);
-  return old ? {account: old, deprecatedName: true} : undefined;
+  if (!isAccountId(accountId)) throw new Error(`KEEPER_ACCOUNT_ID "${accountId}" is not a NEAR account id`);
+  if (keyId && raw) throw new Error('KEEPER_KMS_KEY_ID and KEEPER_SECRET_KEY are both set; set one');
+  if (keyId) return {accountId, key: await kmsKey(await kms(), keyId)};
+  if (!raw)
+    throw new Error('KEEPER_ACCOUNT_ID is set but neither KEEPER_SECRET_KEY nor KEEPER_KMS_KEY_ID is');
+  if (!testnet) {
+    throw new Error('KEEPER_SECRET_KEY is a raw key; raw keys are for testnet only — use KEEPER_KMS_KEY_ID');
+  }
+  if (!raw.startsWith('ed25519:')) throw new Error('KEEPER_SECRET_KEY must be an ed25519:<base58> key');
+  let keyPair: KeyPair;
+  try {
+    keyPair = KeyPair.fromString(raw as `ed25519:${string}`);
+  } catch {
+    throw new Error('KEEPER_SECRET_KEY is not a valid ed25519 key');
+  }
+  return {accountId, key: keyPairKey(keyPair)};
 }

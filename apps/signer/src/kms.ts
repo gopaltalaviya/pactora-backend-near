@@ -1,118 +1,86 @@
-import {
-  hashMessage,
-  hashTypedData,
-  keccak256,
-  recoverAddress,
-  serializeSignature,
-  serializeTransaction,
-  type Hex,
-  type LocalAccount,
-} from 'viem';
-import {publicKeyToAddress, toAccount} from 'viem/accounts';
+import {PublicKey, baseEncode, type TxKey} from '@pactora/near';
 import type {KeySource} from './keystore.js';
+import {isAccountId} from './keystore.js';
 
 /**
- * Keys that never leave a KMS (v3, docs/20 §3). On a mainnet the signer
- * refuses raw keys, so this is how it signs there.
+ * Keys that never leave AWS KMS. On a chain that is not a testnet this is
+ * how the signer holds a key without a decryptable copy in its environment.
  *
- * Why keys at all: agents act through the API with no human present, so
- * something must sign their transactions. What it holds is narrow — an
- * agent's SESSION key, which its AgentAccount or EIP-7702 delegate caps per
- * task and per day and its owner can revoke; the keeper's; the renewer's.
- * The funds stay with the owner. A KMS means even those keys cannot be
- * copied out of this process: it asks the KMS to sign each digest.
+ * AWS KMS supports ed25519 signing (checked 2026-11-05 against
+ * https://docs.aws.amazon.com/kms/latest/developerguide/symm-asymm-choose-key-spec.html
+ * and https://docs.aws.amazon.com/kms/latest/APIReference/API_Sign.html):
+ * key spec `ECC_NIST_EDWARDS25519`, signing algorithm `ED25519_SHA_512`
+ * (pure EdDSA, RFC 8032 / FIPS 186-5 §7.6), which KMS requires to be called
+ * with `MessageType: RAW`. NEAR signs the 32-byte sha256 of the borsh
+ * transaction with pure ed25519, so that hash is the RAW message.
+ * `ED25519_PH_SHA_512` (HashEdDSA) is a different signature that NEAR does
+ * not accept, and is never used here.
  *
- * AWS KMS, `ECC_SECG_P256K1` keys, `ECDSA_SHA_256` over a 32-byte DIGEST (the
- * keccak-256 hash; KMS does not hash a digest again). KMS returns a DER
- * signature with no recovery id and a possibly high `s`; both are fixed here,
- * because Ethereum accepts only low-s (EIP-2).
+ * The AWS pages do not state the byte format of an ed25519 signature; every
+ * signature is therefore verified against the key's public key before it is
+ * used (`signFunctionCallWith` does), and anything but 64 bytes is refused.
  */
 
 /** The two KMS calls the signer makes — the AWS client, or a test double. */
 export interface KmsClient {
   /** DER SubjectPublicKeyInfo of the key. */
   getPublicKey(keyId: string): Promise<Uint8Array>;
-  /** DER ECDSA signature of a 32-byte digest. */
-  sign(keyId: string, digest: Uint8Array): Promise<Uint8Array>;
+  /** ed25519 signature (ED25519_SHA_512, MessageType RAW) of `message`. */
+  sign(keyId: string, message: Uint8Array): Promise<Uint8Array>;
 }
 
-const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+/** SPKI prefix of an ed25519 key: SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING (32 bytes) } (RFC 8410). */
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
-/** An Ethereum account whose key is `keyId` in the KMS. */
-export async function kmsAccount(kms: KmsClient, keyId: string): Promise<LocalAccount> {
-  const address = publicKeyToAddress(uncompressedKey(await kms.getPublicKey(keyId)));
+/** The `ed25519:<base58>` key in an ed25519 SubjectPublicKeyInfo. */
+export function nearPublicKeyOfSpki(spki: Uint8Array): string {
+  const der = Buffer.from(spki);
+  if (der.length !== 44 || !der.subarray(0, 12).equals(ED25519_SPKI_PREFIX)) {
+    throw new Error('not an ed25519 SubjectPublicKeyInfo');
+  }
+  return `ed25519:${baseEncode(der.subarray(12))}`;
+}
 
-  const sign = async (hash: Hex): Promise<Hex> => {
-    const {r, s} = parseDerSignature(await kms.sign(keyId, hexToBytes(hash)));
-    const low = s > N / 2n ? N - s : s;
-    for (const yParity of [0, 1] as const) {
-      const signature = serializeSignature({r: toHex32(r), s: toHex32(low), yParity});
-      if ((await recoverAddress({hash, signature})).toLowerCase() === address.toLowerCase()) {
-        return signature;
+/** A `TxKey` whose private half is `keyId` in the KMS. */
+export async function kmsKey(kms: KmsClient, keyId: string): Promise<TxKey> {
+  const publicKey = nearPublicKeyOfSpki(await kms.getPublicKey(keyId));
+  PublicKey.from(publicKey);
+  return {
+    publicKey,
+    async sign(message) {
+      const signature = await kms.sign(keyId, message);
+      if (signature.length !== 64) {
+        throw new Error(`KMS key ${keyId} returned a ${signature.length}-byte signature, not 64`);
       }
-    }
-    throw new Error(`KMS key ${keyId} returned a signature that is not from ${address}`);
+      return signature;
+    },
   };
-
-  const account = toAccount({
-    address,
-    async sign({hash}) {
-      return sign(hash);
-    },
-    async signMessage({message}) {
-      return sign(hashMessage(message));
-    },
-    async signTypedData(typedData) {
-      return sign(hashTypedData(typedData));
-    },
-    async signTransaction(transaction, options) {
-      const serializer = options?.serializer ?? serializeTransaction;
-      const signature = await sign(keccak256(await serializer(transaction)));
-      const {r, s, yParity} = splitSignature(signature);
-      return serializer(transaction, {r, s, yParity});
-    },
-  });
-  return account;
 }
 
 /**
- * Keys by agent: `SIGNER_KMS_KEYS` is a JSON object of agent id or wallet
- * address → KMS key id (or ARN). Resolved once at boot; an agent with no
- * entry has no key, and the signer refuses it.
+ * `SIGNER_KMS_KEYS`: a JSON object of wallet account → KMS key id (or ARN).
+ * Resolved once at boot; an account with no entry has no KMS key.
  */
 export class KmsKeySource implements KeySource {
   readonly kind = 'aws-kms';
 
-  private constructor(
-    private readonly byId: Map<number, LocalAccount>,
-    private readonly byAddress: Map<string, LocalAccount>,
-  ) {}
+  private constructor(private readonly byAccount: Map<string, TxKey>) {}
 
   static async create(kms: KmsClient, keys: Record<string, string>): Promise<KmsKeySource> {
-    const byId = new Map<number, LocalAccount>();
-    const byAddress = new Map<string, LocalAccount>();
-    for (const [agent, keyId] of Object.entries(keys)) {
-      const account = await kmsAccount(kms, keyId);
-      if (/^0x[0-9a-fA-F]{40}$/.test(agent)) {
-        if (agent.toLowerCase() !== account.address.toLowerCase()) {
-          throw new Error(`SIGNER_KMS_KEYS: key ${keyId} is ${account.address}, not ${agent}`);
-        }
-      } else if (/^\d+$/.test(agent)) {
-        byId.set(Number(agent), account);
-      } else {
-        throw new Error(`SIGNER_KMS_KEYS: "${agent}" is neither an agent id nor an address`);
-      }
-      byAddress.set(account.address.toLowerCase(), account);
+    const byAccount = new Map<string, TxKey>();
+    for (const [account, keyId] of Object.entries(keys)) {
+      if (!isAccountId(account)) throw new Error(`SIGNER_KMS_KEYS: "${account}" is not a NEAR account id`);
+      byAccount.set(account, await kmsKey(kms, keyId));
     }
-    return new KmsKeySource(byId, byAddress);
+    return new KmsKeySource(byAccount);
   }
 
-  async accountFor(agentId: number, wallet?: string): Promise<LocalAccount | null> {
-    return this.byId.get(agentId) ?? (wallet ? (this.byAddress.get(wallet.toLowerCase()) ?? null) : null);
+  async keyFor(accountId: string): Promise<TxKey | null> {
+    return this.byAccount.get(accountId) ?? null;
   }
 
-  all(): LocalAccount[] {
-    return [...this.byAddress.values()];
+  async accounts(): Promise<string[]> {
+    return [...this.byAccount.keys()];
   }
 }
 
@@ -123,18 +91,18 @@ export async function awsKms(region?: string): Promise<KmsClient> {
   return {
     async getPublicKey(keyId) {
       const out = await client.send(new GetPublicKeyCommand({KeyId: keyId}));
-      if (out.KeySpec !== 'ECC_SECG_P256K1' || !out.PublicKey) {
-        throw new Error(`KMS key ${keyId} is ${out.KeySpec ?? 'unknown'}, not ECC_SECG_P256K1`);
+      if (out.KeySpec !== 'ECC_NIST_EDWARDS25519' || !out.PublicKey) {
+        throw new Error(`KMS key ${keyId} is ${out.KeySpec ?? 'unknown'}, not ECC_NIST_EDWARDS25519`);
       }
       return out.PublicKey;
     },
-    async sign(keyId, digest) {
+    async sign(keyId, message) {
       const out = await client.send(
         new SignCommand({
           KeyId: keyId,
-          Message: digest,
-          MessageType: 'DIGEST',
-          SigningAlgorithm: 'ECDSA_SHA_256',
+          Message: message,
+          MessageType: 'RAW',
+          SigningAlgorithm: 'ED25519_SHA_512',
         }),
       );
       if (!out.Signature) throw new Error(`KMS key ${keyId} returned no signature`);
@@ -142,50 +110,3 @@ export async function awsKms(region?: string): Promise<KmsClient> {
     },
   };
 }
-
-/** The 65-byte uncompressed point at the end of a secp256k1 SPKI. */
-export function uncompressedKey(spki: Uint8Array): Hex {
-  const point = spki.slice(-65);
-  if (point.length !== 65 || point[0] !== 0x04) throw new Error('not an uncompressed secp256k1 public key');
-  return bytesToHex(point);
-}
-
-/** (r, s) from a DER `SEQUENCE { INTEGER r, INTEGER s }`. */
-export function parseDerSignature(der: Uint8Array): {r: bigint; s: bigint} {
-  let i = 0;
-  const expect = (tag: number) => {
-    if (der[i++] !== tag) throw new Error('malformed DER signature');
-  };
-  const length = () => {
-    const first = der[i++]!;
-    if (first < 0x80) return first;
-    let n = 0;
-    for (let k = 0; k < (first & 0x7f); k++) n = (n << 8) | der[i++]!;
-    return n;
-  };
-  const integer = () => {
-    expect(0x02);
-    const len = length();
-    const value = BigInt(bytesToHex(der.slice(i, i + len)));
-    i += len;
-    return value;
-  };
-  expect(0x30);
-  length();
-  const r = integer();
-  const s = integer();
-  if (r === 0n || s === 0n || r >= N || s >= N) throw new Error('DER signature out of range');
-  return {r, s};
-}
-
-function splitSignature(signature: Hex): {r: Hex; s: Hex; yParity: 0 | 1} {
-  return {
-    r: `0x${signature.slice(2, 66)}`,
-    s: `0x${signature.slice(66, 130)}`,
-    yParity: Number.parseInt(signature.slice(130, 132), 16) === 28 ? 1 : 0,
-  };
-}
-
-const toHex32 = (n: bigint): Hex => `0x${n.toString(16).padStart(64, '0')}`;
-const bytesToHex = (b: Uint8Array): Hex => `0x${Buffer.from(b).toString('hex')}`;
-const hexToBytes = (h: Hex): Uint8Array => Uint8Array.from(Buffer.from(h.slice(2), 'hex'));
