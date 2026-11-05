@@ -61,4 +61,23 @@ describe.skipIf(!LIVE)('NEAR testnet, live (read-only)', () => {
     }
     throw new Error('no transaction in the last 60 testnet blocks');
   }, 120_000);
+
+  it('reads a transaction the node does not know as pending (UNKNOWN_TRANSACTION)', async () => {
+    const out = await client.txOutcome('11111111111111111111111111111111', 'sputnikv2.testnet');
+    expect(out.status).toBe('pending');
+  });
+
+  /** The shape the signer's key check reads: FunctionCall {receiver_id, method_names, allowance}. */
+  it('reads a function-call key with its receiver, methods and allowance', async () => {
+    const key = await client.accessKey(
+      'sputnikv2.testnet',
+      'ed25519:7z4jUthSWpRbpUGBmw7g6G5Z3gMTMZM3aLKAJLyYRQKJ',
+    );
+    expect(key).not.toBeNull();
+    expect(typeof key!.nonce).toBe('bigint');
+    expect(key!.nonce).toBeLessThan(BigInt(Number.MAX_SAFE_INTEGER));
+    expect(key!.permission).toMatchObject({
+      FunctionCall: {receiver_id: 'sputnikv2.testnet', method_names: expect.any(Array)},
+    });
+  });
 });
