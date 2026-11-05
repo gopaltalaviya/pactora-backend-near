@@ -20,7 +20,7 @@ import {
 } from 'near-api-js';
 import {verifyMessage} from 'near-api-js/nep413';
 
-export {KeyPair, PublicKey};
+export {KeyPair, PublicKey, baseEncode};
 
 // ── hashes ───────────────────────────────────────────────────────────────
 
@@ -437,7 +437,9 @@ export function nearClient(rpcUrl: string, opts: NearClientOptions = {}): NearCl
         });
         return parseOutcome(raw, txHash);
       } catch (err) {
-        if (isMissing(err, 'UNKNOWN_TRANSACTION', "doesn't exist", 'does not exist')) {
+        // near-api-js 7 turns nearcore's UNKNOWN_TRANSACTION into an
+        // UnknownTransactionError ("Unknown transaction <hash>").
+        if (isMissing(err, 'UNKNOWN_TRANSACTION', 'UnknownTransaction', "doesn't exist", 'does not exist')) {
           return {status: 'pending', txHash, receipts: []};
         }
         throw err;

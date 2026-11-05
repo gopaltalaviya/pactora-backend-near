@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {createServer} from 'node:http';
 import {
   KeyPair,
   decodeSigned,
@@ -11,6 +12,7 @@ import {
   signFunctionCall,
   signFunctionCallWith,
   keyPairKey,
+  nearClient,
   verifyNep413,
   TGAS,
   type AccessKeyInfo,
@@ -311,5 +313,67 @@ describe('block sources', () => {
     const b = await src.blockAt(5);
     expect(seen).toEqual(['T1']);
     expect(b!.receipts.map((r) => r.receiptId)).toEqual(['R1']);
+  });
+});
+
+describe('nearClient against nearcore error shapes', () => {
+  /** One JSON-RPC error per method, in nearcore's structured form (HANDLER_ERROR + cause.name). */
+  async function nodeAnswering(errors: Record<string, {name: string; info: Record<string, unknown>}>) {
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        const {id, method} = JSON.parse(body) as {id: string; method: string};
+        const cause = errors[method];
+        res.setHeader('content-type', 'application/json');
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id,
+            error: {name: 'HANDLER_ERROR', cause, code: -32000, message: 'Server error'},
+          }),
+        );
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as {port: number}).port}`;
+    return {
+      client: nearClient(url, {retries: 1}),
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  }
+
+  it('reads UNKNOWN_TRANSACTION as pending, not as a failure', async () => {
+    const node = await nodeAnswering({
+      EXPERIMENTAL_tx_status: {name: 'UNKNOWN_TRANSACTION', info: {requested_transaction_hash: 'H'}},
+    });
+    try {
+      await expect(node.client.txOutcome('H', 'a.testnet')).resolves.toMatchObject({status: 'pending'});
+    } finally {
+      await node.close();
+    }
+  });
+
+  it('reads UNKNOWN_ACCESS_KEY and UNKNOWN_ACCOUNT as null', async () => {
+    const pk = KeyPair.fromRandom('ed25519').getPublicKey().toString();
+    const node = await nodeAnswering({
+      query: {name: 'UNKNOWN_ACCESS_KEY', info: {public_key: pk, block_hash: 'B', block_height: 1}},
+    });
+    try {
+      await expect(node.client.accessKey('a.testnet', pk)).resolves.toBeNull();
+    } finally {
+      await node.close();
+    }
+    const node2 = await nodeAnswering({
+      query: {
+        name: 'UNKNOWN_ACCOUNT',
+        info: {requested_account_id: 'a.testnet', block_hash: 'B', block_height: 1},
+      },
+    });
+    try {
+      await expect(node2.client.balance('a.testnet')).resolves.toBeNull();
+    } finally {
+      await node2.close();
+    }
   });
 });
