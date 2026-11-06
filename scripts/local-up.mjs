@@ -74,14 +74,19 @@ for (let i = 0; ; i++) {
   }
   await sleep(2000);
 }
-const env = {SANDBOX_KEY_FILE: KEY_FILE};
+// The compose Postgres above, unless the caller points elsewhere. A fresh clone
+// has no .env, and the migrator refuses to guess a database on its own.
+const env = {
+  SANDBOX_KEY_FILE: KEY_FILE,
+  DATABASE_URL: process.env.DATABASE_URL ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near',
+};
 if (!existsSync(join(CONTRACTS, 'node_modules', 'near-api-js')))
   step('contracts tooling', 'npm', ['ci'], {cwd: CONTRACTS});
 step('deploy the contracts to the sandbox', 'node', ['scripts/deploy.mjs', '--network', 'sandbox'], {
   cwd: CONTRACTS,
   env,
 });
-step('database migrations', 'pnpm', ['db:migrate']);
+step('database migrations', 'pnpm', ['db:migrate'], {env});
 step('build', 'pnpm', ['build']);
 step('the demo (cached models: no key, no quota)', 'node', ['scripts/demo.mjs', ...process.argv.slice(2)], {
   env: {...env, AGENT_MODE: process.env.AGENT_MODE ?? 'cached'},
