@@ -14,8 +14,6 @@
     "config:check": "node packages/config/bin/check.mjs",
     "db:migrate": "pnpm --filter @pactora/db migrate",
     "dev": "pnpm -r --parallel dev",
-    "verify:indexer": "node scripts/verify-indexer.mjs",
-    "e2e": "node scripts/e2e.mjs",
     "demo": "node scripts/demo.mjs",
     "prepare": "git config core.hooksPath .githooks || true",
     "lint": "eslint .",
@@ -42,7 +40,6 @@
     "prettier": "^3.3.3",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8",
-    "viem": "^2.21.0",
     "vitest": "^3.2.7",
     "zod": "^4.6.6"
   },
