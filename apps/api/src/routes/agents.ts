@@ -289,6 +289,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
       agentId: String(agent.id),
       chainId: agent.chainId,
       verdict: reading.verdict,
+      action: reading.action,
       reasons: reading.reasons,
       metrics: reading.metrics,
       fundingWindowBlocks: DEFAULT_WINDOW_BLOCKS,

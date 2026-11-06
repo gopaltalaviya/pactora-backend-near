@@ -26,6 +26,11 @@ export const ErrorCode = {
   UPSTREAM_UNAVAILABLE: 'UPSTREAM_UNAVAILABLE',
   /** Too many requests, or a run cap reached — retry after `retry-after`. */
   RATE_LIMITED: 'RATE_LIMITED',
+  /**
+   * The worker's trust verdict is `block` (self-funded or failing record). A
+   * refusal the caller's model cannot argue with: hire someone else.
+   */
+  COUNTERPARTY_BLOCKED: 'COUNTERPARTY_BLOCKED',
 } as const;
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
@@ -46,6 +51,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
   UPSTREAM_UNAVAILABLE: 503,
   RATE_LIMITED: 429,
+  COUNTERPARTY_BLOCKED: 403,
 };
 
 export interface Problem {

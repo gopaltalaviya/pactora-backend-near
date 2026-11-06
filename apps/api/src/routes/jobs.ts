@@ -2,7 +2,7 @@ import type {FastifyInstance, FastifyRequest} from 'fastify';
 import {and, asc, desc, eq, exists, gt, inArray, isNotNull, or} from 'drizzle-orm';
 import {sha256Hex} from '@pactora/near';
 import {z} from 'zod';
-import {agents, agentStats, jobEvents, jobs, type Db} from '@pactora/db';
+import {agents, agentStats, jobEvents, jobs, readTrust, type Db} from '@pactora/db';
 import {
   PactoraError,
   BaseUnits,
@@ -579,6 +579,21 @@ export async function hire(
   }
   if (!worker.active) {
     throw new PactoraError(ErrorCode.AGENT_NOT_HIREABLE, `agent ${workerAgentId} is not accepting work`);
+  }
+
+  // The counterparty check. Enforced here, not suggested to the hiring
+  // agent: a prompt-injected model that decides to pay a farmed agent is
+  // refused whatever it was told, and nothing is signed.
+  const trust = await readTrust(db, {
+    chainId,
+    agentId: worker.id,
+    floor: Number(chain.params['confidenceFloor'] ?? 25),
+  });
+  if (trust.action === 'block') {
+    throw new PactoraError(
+      ErrorCode.COUNTERPARTY_BLOCKED,
+      `agent ${workerAgentId} is blocked (${trust.verdict}): ${trust.reasons.join('; ')}`,
+    );
   }
 
   const price = BigInt(worker.pricePerTask);

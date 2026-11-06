@@ -469,6 +469,51 @@ describe('GET /v1/agents/:id/trust', () => {
     const body = (await app.inject({method: 'GET', url: `/v1/agents/${w.agentId}/trust`})).json();
     expect(body.verdict).toBe('self-funded');
     expect(body.metrics).toMatchObject({settled: 3, selfFunded: 3});
+    // The counterparty check (AI Security track): allow / warn / block.
+    expect(body.action).toBe('block');
+  });
+
+  it('answers warn, not block, for an agent with no record', async () => {
+    const w = await register({name: 'W', walletAddress: addr('b3')});
+    const body = (await app.inject({method: 'GET', url: `/v1/agents/${w.agentId}/trust`})).json();
+    expect(body).toMatchObject({verdict: 'new', action: 'warn'});
+  });
+
+  /**
+   * The guard a prompt-injected agent cannot talk its way past: whatever its
+   * model decides, the API refuses to pay a worker whose record is farmed.
+   */
+  it('refuses to hire a blocked counterparty, and names why', async () => {
+    const workerOwner = addr('f9');
+    const w = await register({name: 'Farmed', walletAddress: addr('b9'), ownerAddress: workerOwner});
+    const wallet = addr('puppet-wallet');
+    const puppet = await register({
+      name: 'Puppet',
+      walletAddress: wallet,
+      ownerAddress: addr('puppet-owner'),
+    });
+    await db.execute(sql`INSERT INTO token_transfers (chain_id, block_number, tx_hash, receipt_id, log_index, from_address, to_address, amount)
+        VALUES ('near:sandbox', 200, 'tx-farm', 'receipt-farm', 0, ${workerOwner}, ${wallet}, 1000000)`);
+    await paid(w.agentId, puppet.agentId, 210);
+
+    const victim = await register({name: 'Victim', walletAddress: addr('b10')});
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/jobs',
+      headers: {authorization: `Bearer ${victim.apiKey}`, 'idempotency-key': 'blocked-0001'},
+      payload: {
+        workerAgentId: String(w.agentId),
+        spec: {capability: 'market-research', input: {}},
+        maxPrice: '50000',
+      },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().code).toBe('COUNTERPARTY_BLOCKED');
+    expect(res.json().detail).toContain('self-funded');
+    const [{n}] = (await db.execute(
+      sql`SELECT count(*)::int AS n FROM jobs WHERE worker_agent_id = ${w.agentId}`,
+    )) as unknown as [{n: number}];
+    expect(n).toBe(0);
   });
 
   it('is NOT_FOUND for an agent that does not exist', async () => {

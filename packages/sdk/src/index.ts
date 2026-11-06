@@ -166,6 +166,8 @@ export interface TrustReport {
   agentId: string;
   chainId: string;
   verdict: 'trusted' | 'new' | 'concentrated' | 'self-funded' | 'failing';
+  /** The counterparty check: allow (trusted), warn (new, concentrated), block (self-funded, failing — the API refuses the hire). */
+  action: 'allow' | 'warn' | 'block';
   reasons: string[];
   metrics: {
     settled: number;

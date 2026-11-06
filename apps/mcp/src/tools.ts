@@ -146,8 +146,9 @@ export function buildTools(): ToolDefinition[] {
         "its clients received money from the agent's own side just before " +
         'paying it. Verdicts: trusted, new (too little history), concentrated ' +
         '(few owners, or one owner dominates), failing, and self-funded (it ' +
-        'paid for its own reviews). Treat anything but trusted or new as a ' +
-        'reason to hire someone else. Free — reads only.',
+        'paid for its own reviews). `action` is allow, warn or block; a ' +
+        'blocked agent cannot be hired (COUNTERPARTY_BLOCKED) — pick another. ' +
+        'Free — reads only.',
       inputSchema: {
         agentId: z.string().regex(/^\d+$/).describe('the agent id, as discover_agents returns it'),
       },

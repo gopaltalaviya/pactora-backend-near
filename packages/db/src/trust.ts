@@ -54,8 +54,22 @@ export interface TrustMetrics {
   trustScore: number;
 }
 
+/**
+ * The counterparty check, in the three words a policy engine acts on:
+ * allow (trusted), warn (new, or a record few owners wrote), block (a record
+ * the worker paid for itself, or one that mostly fails). The API refuses to
+ * hire a `block` — the decision is not left to the hiring agent's model.
+ */
+export type TrustAction = 'allow' | 'warn' | 'block';
+export function actionOf(verdict: Verdict): TrustAction {
+  if (verdict === 'trusted') return 'allow';
+  if (verdict === 'new' || verdict === 'concentrated') return 'warn';
+  return 'block';
+}
+
 export interface TrustReading {
   verdict: Verdict;
+  action: TrustAction;
   reasons: string[];
   metrics: TrustMetrics;
 }
@@ -178,5 +192,6 @@ export async function readTrust(
     selfFunded: Number(row?.self_funded ?? 0),
     trustScore: Number(row?.trust_score ?? 50),
   };
-  return {...verdictOf(metrics), metrics};
+  const v = verdictOf(metrics);
+  return {...v, action: actionOf(v.verdict), metrics};
 }
