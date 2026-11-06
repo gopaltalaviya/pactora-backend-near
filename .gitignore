@@ -14,3 +14,6 @@ coverage/
 
 # demo service logs (regenerate by running the demo)
 artifacts/
+
+# local NEAR sandbox home (docker compose --profile sandbox)
+.sandbox/

@@ -15,6 +15,15 @@ services:
       interval: 5s
       retries: 10
 
+  # A local NEAR node (chain id "sandbox", root test.near), for `pnpm demo:local`.
+  # A fresh chain on every (re)create; the root key is written to
+  # ./.sandbox/validator_key.json, which the deploy and the demo read.
+  near-sandbox:
+    profiles: ['sandbox']
+    build: deploy/near-sandbox
+    ports: ['127.0.0.1:3030:3030']
+    volumes: ['./.sandbox:/data']
+
 volumes:
   pactora-near-pg:
 
