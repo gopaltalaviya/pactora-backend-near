@@ -19,6 +19,43 @@
   without `FORK_RPC_10143`) + 443 browser runs across 5 browsers (+2 skipped)
   — not pushed
 
+## 🟢 NEAR port — current state (2026-11-06)
+
+NEAR Hackathon, deadline **2026-11-14 23:59 UTC**. Plan and status:
+`pactora-docs-near/docs/24` §1.5 and §5. Wire contract: `docs/NEAR-PORT.md`.
+Everything below `---` is the Monad/EVM history (baseline, tag `pre-hackathon`).
+
+**Cold start (local, no keys):**
+
+```bash
+# Docker Desktop running; contracts repo cloned beside this one
+pnpm install && pnpm demo:local      # → "Demo passed." (Postgres :5443, NEAR sandbox :3030)
+DEMO_HOLD=1 pnpm demo:local          # then the interface: NEXT_PUBLIC_API_URL=http://127.0.0.1:8098 pnpm dev
+pnpm check                           # 868 tests — NOT while a held demo uses the DB (tests TRUNCATE)
+```
+
+Contracts live checks (in `../pactora-contracts-near`, sandbox up):
+`SANDBOX_KEY_FILE=../pactora-backend-near/.sandbox/validator_key.json node scripts/verify-near.mjs --network sandbox`
+(17 checks; with `--dao` and `SPUTNIK_DAO_WASM` from `create-dao.mjs --fetch-wasm`, 19).
+
+**Branches:** backend work is on `master` (fast-forwarded from `near-port`);
+contracts, interface, docs on `master`. **Nothing pushed** since the baseline.
+
+**Next, in order:**
+1. Owner: funded testnet account in `pactora-contracts-near/.env`
+   (`DEPLOYER_ACCOUNT_ID`, `DEPLOYER_SECRET_KEY`).
+2. `node --env-file=.env scripts/create-dao.mjs --network testnet` → `deploy.mjs
+   --network testnet` → `verify-near.mjs --network testnet` → copy facts here
+   (`node scripts/sync-chain-facts.mjs`) → `DEMO_NETWORK=testnet pnpm demo`.
+3. NEAR AI Cloud judge (needs the owner's key). Optional: Intents dry quote.
+4. Tag `hackathon-submission` in all four repos, push (owner's go), video, X
+   post, form.
+
+**Traps found:** only the cargo-near wasm is valid (plain cargo build traps
+refusals as `unreachable`) — build in the pinned image, see the contracts
+README; near-api-js `retries` = attempts; the pinned image's wasm-opt
+segfaults on pactora (`--no-wasmopt`).
+
 ---
 
 ## 🏷 Rebrand: AGENTX → Pactora (decided 2026-10-30)
