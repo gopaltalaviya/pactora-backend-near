@@ -320,6 +320,23 @@ describe('gas (v3)', () => {
     await app.close();
   });
 
+  it('passes an unread balance through as null, not the string "null"', async () => {
+    await cursorAt(1_005);
+    const app = await build({
+      signer: async () => ({
+        ok: true,
+        wallets: {
+          checkedAt: '2026-10-25T10:00:00.000Z',
+          anyLow: true,
+          wallets: [{account: 'bot.gone.testnet', role: 'signing-key', balanceYocto: null, low: true}],
+        },
+      }),
+    });
+    const body = (await app.inject({url: '/v1/status'})).json();
+    expect(body.gas.wallets[0]).toMatchObject({address: 'bot.gone.testnet', balanceYocto: null});
+    await app.close();
+  });
+
   it('is unknown, not a fault, when the signer reports no wallets', async () => {
     await cursorAt(1_005);
     const app = await build();

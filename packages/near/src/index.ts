@@ -404,7 +404,9 @@ export interface NearClientOptions {
 export function nearClient(rpcUrl: string, opts: NearClientOptions = {}): NearClient {
   const provider = new JsonRpcProvider(
     {url: rpcUrl, ...(opts.timeoutMs ? {timeout: opts.timeoutMs} : {})},
-    opts.retries !== undefined ? {retries: opts.retries} : {},
+    // near-api-js's `retries` is the number of ATTEMPTS (0 sends nothing); ours
+    // is retries after a failure.
+    opts.retries !== undefined ? {retries: opts.retries + 1} : {},
   );
   const rpc = <T>(method: string, params: unknown): Promise<T> =>
     provider.sendJsonRpc<never, never, T>(method as never, params as never);

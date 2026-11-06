@@ -163,7 +163,7 @@ copies it here). Mainnet is refused by every script.
 
 ```bash
 docker compose up -d && pnpm db:migrate   # the tests use Postgres on :5443
-pnpm check                                # typecheck, lint, format, 865 tests
+pnpm check                                # typecheck, lint, format, 868 tests
 ```
 
 Two rules from the project: a mock that agrees with your assumptions proves

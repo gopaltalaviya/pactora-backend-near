@@ -90,7 +90,7 @@ export interface StatusReport {
 export interface GasStatus {
   state: 'ok' | 'low' | 'unknown';
   checkedAt: string | null;
-  wallets: {address: string; role: string; balanceYocto: string; low: boolean}[];
+  wallets: {address: string; role: string; balanceYocto: string | null; low: boolean}[];
 }
 
 /** The `wallets` block of the signer's /health, if it sent one. */
@@ -104,7 +104,8 @@ function gasOf(signerHealth: unknown): GasStatus {
     // The NEAR signer names the account; an older one said address.
     address: String(x['account'] ?? x['address']),
     role: String(x['role']),
-    balanceYocto: String(x['balanceYocto']),
+    // null when the signer could not read it (an account that does not exist yet).
+    balanceYocto: typeof x['balanceYocto'] === 'string' ? x['balanceYocto'] : null,
     low: x['low'] === true,
   }));
   return {state: wallets.some((x) => x.low) ? 'low' : 'ok', checkedAt: w.checkedAt, wallets};

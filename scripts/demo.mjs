@@ -198,7 +198,7 @@ try {
     });
     children.push(child);
   };
-  await sql`TRUNCATE agents, jobs, job_events, agent_stats, agent_capabilities, api_keys, payments, signer_txs, spend_policies, token_transfers RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE agents, jobs, job_events, agent_stats, agent_capabilities, api_keys, payments, signer_txs, signer_keys, signer_wallet_txs, spend_policies, token_transfers RESTART IDENTITY CASCADE`;
   await sql`DELETE FROM indexer_cursor`;
   start('signer', 'apps/signer/dist/main.js');
   start('api', 'apps/api/dist/main.js');
@@ -216,6 +216,11 @@ try {
   await waitFor(`http://127.0.0.1:${SIGNER_PORT}/health`, 'signer');
   await waitFor(`http://127.0.0.1:${API_PORT}/health`, 'api');
   const base = `http://127.0.0.1:${API_PORT}`;
+  // What the status page shows: the API must see the chain it serves.
+  const status = await (await fetch(`${base}/v1/status`)).json();
+  status.chains?.[0]?.rpc === 'up'
+    ? ok(`/v1/status sees the chain: head block ${status.chains[0].headBlock}`)
+    : fail(`/v1/status reports the RPC as ${status.chains?.[0]?.rpc}`);
 
   // ── 3. register every agent the way the website does ──────────────────
   const post = async (path, body) => {
