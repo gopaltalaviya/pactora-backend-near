@@ -143,7 +143,8 @@ export async function readTrust(
     ),
     pays AS (
       SELECT p.id, p.amount, p.block_number,
-             lower(c.owner_address) AS client_owner, lower(c.wallet_address) AS client_wallet
+             lower(c.owner_address) AS client_owner, lower(c.wallet_address) AS client_wallet,
+             c.chain_agent_id AS client_chain_agent_id
         FROM payments p JOIN agents c ON c.id = p.from_agent_id
        WHERE p.chain_id = ${chainId} AND p.to_agent_id = ${agentId}
     ),
@@ -151,7 +152,10 @@ export async function readTrust(
       SELECT DISTINCT pays.id FROM pays
         JOIN token_transfers t
           ON t.chain_id = ${chainId}
-         AND t.to_address IN (pays.client_wallet, pays.client_owner)
+         -- to_chain_agent_id: a deposit into the client's balance, also one
+         -- the indexer saw before the agent was linked (it had no wallet yet)
+         AND (t.to_address IN (pays.client_wallet, pays.client_owner)
+              OR t.to_chain_agent_id = pays.client_chain_agent_id)
          AND t.from_address IN (SELECT address FROM worker_side)
          AND t.block_number <= pays.block_number
          AND t.block_number >= pays.block_number - ${window}

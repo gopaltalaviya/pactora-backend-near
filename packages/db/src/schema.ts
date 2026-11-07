@@ -255,12 +255,15 @@ export const tokenTransfers = pgTable(
     logIndex: integer('log_index').notNull(),
     fromAddress: text('from_address').notNull(),
     toAddress: text('to_address').notNull(),
+    /** For a deposit into an agent's balance in the contract (`funded`): that agent's chain id. */
+    toChainAgentId: bigint('to_chain_agent_id', {mode: 'number'}),
     amount: baseUnits('amount').notNull(),
   },
   (t) => [
     uniqueIndex('token_transfers_uk').on(t.chainId, t.receiptId, t.logIndex),
     index('token_transfers_to_idx').on(t.chainId, t.toAddress, t.blockNumber),
     index('token_transfers_from_idx').on(t.chainId, t.fromAddress, t.blockNumber),
+    index('token_transfers_to_agent_idx').on(t.chainId, t.toChainAgentId, t.blockNumber),
   ],
 );
 

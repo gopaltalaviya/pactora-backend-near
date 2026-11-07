@@ -1,0 +1,2 @@
+ALTER TABLE "token_transfers" ADD COLUMN "to_chain_agent_id" bigint;--> statement-breakpoint
+CREATE INDEX "token_transfers_to_agent_idx" ON "token_transfers" USING btree ("chain_id","to_chain_agent_id","block_number");

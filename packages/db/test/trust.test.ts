@@ -122,6 +122,25 @@ describe('readTrust', () => {
     expect(r.reasons[0]).toMatch(/2 of 4 paid jobs/);
   });
 
+  /**
+   * A farmer funds its client agent's balance right after register_agent,
+   * before the agent is linked through the API. The indexer cannot name the
+   * wallet yet, so it records a transfer into the Pactora contract for that
+   * agent's chain id; the check must still see it.
+   */
+  it('catches funding that reached the client before its agent was linked', async () => {
+    const workerOwner = addr(1);
+    const worker = await agent(workerOwner);
+    const c = await agent(addr(10));
+    await db.execute(sql`UPDATE agents SET chain_agent_id = 77 WHERE id = ${c.id}`);
+    await db.execute(sql`INSERT INTO token_transfers (chain_id, block_number, tx_hash, receipt_id, log_index, from_address, to_address, to_chain_agent_id, amount)
+        VALUES (${CHAIN}, 5000, 'txf', 'receiptf', 0, ${workerOwner}, 'pactora.testnet', 77, 1000000)`);
+    await pay(c.id, worker.id, 5005);
+    const r = await trust(worker.id);
+    expect(r.metrics.selfFunded).toBe(1);
+    expect(r.verdict).toBe('self-funded');
+  });
+
   it("counts funding from the owner's OTHER identities as the worker's side", async () => {
     const workerOwner = addr(1);
     const worker = await agent(workerOwner);

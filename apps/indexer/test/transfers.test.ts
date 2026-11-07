@@ -178,7 +178,8 @@ describe('funding transfers', () => {
           log.funded({agentId: CLIENT.chainAgentId, from: WORKER.owner, amount: 500_000, kind: 'balance'}),
           // Stake is not spendable money: it backs bonds, it does not pay anyone.
           log.funded({agentId: CLIENT.chainAgentId, from: WORKER.owner, amount: 9, kind: 'stake'}),
-          // An agent this indexer does not know: nothing to attribute it to.
+          // An agent not linked yet (funded straight after register_agent):
+          // kept against its chain id, so funding before the link still counts.
           log.funded({agentId: 999, from: WORKER.owner, amount: 7, kind: 'balance'}),
         ],
       }),
@@ -194,6 +195,20 @@ describe('funding transfers', () => {
         receipt_id: 'RF1',
         log_index: 0,
       },
+      {
+        from_address: WORKER.owner,
+        to_address: chain.contracts.Pactora,
+        amount: '7',
+        block_number: b,
+        tx_hash: 'TF1',
+        receipt_id: 'RF1',
+        log_index: 2 * 256,
+      },
     ]);
+    // Each deposit keeps the agent it was for, linked or not.
+    const agents = (await db.execute(
+      sql`SELECT to_chain_agent_id::int AS a FROM token_transfers ORDER BY id`,
+    )) as unknown as {a: number}[];
+    expect(agents.map((r) => r.a)).toEqual([CLIENT.chainAgentId, 999]);
   });
 });

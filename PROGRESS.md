@@ -31,12 +31,12 @@ Everything below `---` is the Monad/EVM history (baseline, tag `pre-hackathon`).
 # Docker Desktop running; contracts repo cloned beside this one
 pnpm install && pnpm demo:local      # → "Demo passed." (Postgres :5443, NEAR sandbox :3030)
 DEMO_HOLD=1 pnpm demo:local          # then the interface: NEXT_PUBLIC_API_URL=http://127.0.0.1:8098 pnpm dev
-pnpm check                           # 868 tests — NOT while a held demo uses the DB (tests TRUNCATE)
+pnpm check                           # 873 tests — NOT while a held demo uses the DB (tests TRUNCATE)
 ```
 
 Contracts live checks (in `../pactora-contracts-near`, sandbox up):
 `SANDBOX_KEY_FILE=../pactora-backend-near/.sandbox/validator_key.json node scripts/verify-near.mjs --network sandbox`
-(17 checks; with `--dao` and `SPUTNIK_DAO_WASM` from `create-dao.mjs --fetch-wasm`, 19).
+(18 checks; with `--dao` and `SPUTNIK_DAO_WASM` from `create-dao.mjs --fetch-wasm`, 20).
 
 **Branches:** backend work is on `master` (fast-forwarded from `near-port`);
 contracts, interface, docs on `master`. **Nothing pushed** since the baseline.

@@ -307,11 +307,16 @@ export class Indexer {
     )) as unknown as {id: string; w: string}[];
     const walletOf = new Map(rows.map((r) => [r.id, r.w]));
 
-    const keep = funded.flatMap(({ev, f}) => {
-      const to = walletOf.get(String(f.agentId));
-      return to ? [{ev, f, to}] : [];
-    });
-    if (keep.length === 0) return;
+    // Every deposit keeps the agent it was for. One not linked yet (funded
+    // straight after register_agent, before the API knows it) has no wallet
+    // to name: it is recorded as what it was — a transfer into the Pactora
+    // contract for that agent. Dropping it would let a farmer fund its client
+    // first and link it afterwards, unseen.
+    const keep = funded.map(({ev, f}) => ({
+      ev,
+      f,
+      to: walletOf.get(String(f.agentId)) ?? chain.contracts.Pactora,
+    }));
 
     await tx
       .insert(tokenTransfers)
@@ -324,6 +329,7 @@ export class Indexer {
           logIndex: ev.logIndex * ENTRIES_PER_LINE,
           fromAddress: f.from,
           toAddress: to,
+          toChainAgentId: f.agentId,
           amount: f.amount,
         })),
       )

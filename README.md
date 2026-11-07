@@ -162,8 +162,10 @@ copies it here). Mainnet is refused by every script.
 ## Tests
 
 ```bash
-docker compose up -d && pnpm db:migrate   # the tests use Postgres on :5443
-pnpm check                                # typecheck, lint, format, 868 tests
+docker compose up -d                      # Postgres on 127.0.0.1:5443
+export DATABASE_URL=postgres://pactora:pactora@127.0.0.1:5443/pactora_near   # as CI sets it
+pnpm db:migrate
+pnpm check                                # typecheck, lint, format, 873 tests
 ```
 
 Two rules from the project: a mock that agrees with your assumptions proves
