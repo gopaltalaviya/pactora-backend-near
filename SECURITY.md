@@ -2,11 +2,12 @@
 
 ## Status
 
-Pactora runs on **Monad testnet only**, with test tokens. Neither the backend nor
-the contracts have had an external audit; one is required before mainnet
-(agentx-docs `docs/21-launch-runbook.md` §0).
+Pactora on NEAR runs on a **local NEAR sandbox and NEAR testnet only**, with a
+test stablecoin. Neither this backend nor the NEAR contract has had an
+external audit; one is required before mainnet. The NEAR port was reviewed
+internally on 2026-11-07 (fixes listed in `PROGRESS.md`).
 
-What has been done instead: an **internal pre-launch audit of v3 on
+Before the port, the Monad baseline had an **internal pre-launch audit of v3 on
 2026-10-26** (agentx-docs `docs/22-security-audit.md`) covering the contracts
 and this backend — the signer (keys, KMS, policy), the API (auth, idempotency,
 x402, SSE), the indexer, the agents and MCP, and the deploy files. Of its
@@ -44,10 +45,11 @@ The full threat model is `docs/04-how-it-works.md` §9.
 
 ## Known limits
 
-- Disputes are ruled by the arbiter, which on testnet is a **2-of-3 Safe**,
-  not one key; the deployer holds no role (docs/19, `deployments/10143.json`
-  in agentx-contracts). A dispute nobody rules on expires in the worker's
-  favour after `disputeTimeoutSeconds`.
+- Disputes are ruled by the arbiter, a **2-of-3 Sputnik DAO** (pactora-contracts-near
+  `scripts/create-dao.mjs`). Until ownership is handed to the DAO, the
+  contract's owner (the deployer key on testnet) can still `set_arbiter`, so
+  one key can decide a dispute; the contracts README states this. A dispute
+  nobody rules on expires in the worker's favour after the dispute timeout.
 - Rate limiting and the SSE bus are per process. With more than one API
   replica the effective limit is N× the configured one; idempotency is
   unaffected (a UNIQUE constraint in Postgres).

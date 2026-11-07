@@ -11,7 +11,7 @@ pnpm -r build
 ```
 
 The contracts repository must be checked out next to this one
-(`../agentx-contracts`): chain facts, parameters, addresses and ABIs are read
+(`../pactora-contracts-near`): chain facts, parameters, addresses and ABIs are read
 from it, never copied here.
 
 ## Before you push

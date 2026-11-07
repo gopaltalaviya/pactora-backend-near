@@ -1,7 +1,8 @@
 # Pactora (formerly AGENTX) — project instructions
 
-Applies to all four repos below this folder: `agentx-contracts`,
-`agentx-backend`, `agentx-interface`, `agentx-docs`.
+Applies to the Pactora-on-NEAR repos: `pactora-contracts-near`,
+`pactora-backend-near`, `pactora-interface-near`, `pactora-docs-near`
+(history before the port: the Monad `agentx-*` repos).
 
 ## Deliverables are LOCAL FILES. Never Artifacts.
 

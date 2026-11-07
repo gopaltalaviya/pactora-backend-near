@@ -2,19 +2,19 @@
 #
 # One image recipe for every Pactora service:
 #
-#   docker build --build-arg SERVICE=@pactora/api -t agentx-api .
+#   docker build --build-arg SERVICE=@pactora/api -t pactora-api .
 #
 # SERVICE is the workspace package: @pactora/api, @pactora/signer,
 # @pactora/indexer, or an agent (@pactora/research-bot, …). The chain facts the
 # config loader reads — networks, parameters, deployed addresses, ABIs — come
-# from `chain/`, a committed copy of agentx-contracts kept exact by
+# from `chain/`, a committed copy of pactora-contracts-near kept exact by
 # `scripts/sync-chain-facts.mjs` (CI fails on drift). That is what lets a
 # hosted build that clones one repo (Railway) build at all, and an image
 # always carries the exact deployment it was built against.
 #
-# To build against a live agentx-contracts checkout instead, replace the
+# To build against a live pactora-contracts-near checkout instead, replace the
 # `contracts` stage with a named context:
-#   --build-context contracts=../agentx-contracts
+#   --build-context contracts=../pactora-contracts-near
 #
 # The runtime stage holds only the service and its production dependencies,
 # runs as the unprivileged `node` user, and has no build tools, no source

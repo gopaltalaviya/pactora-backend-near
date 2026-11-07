@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-        with: {path: agentx-backend}
+        with: {path: pactora-backend-near}
 
       # Cross-repo checkout. `github.token` is enough once both repos are
       # public; until then it needs a PAT in CONTRACTS_TOKEN.
@@ -74,40 +74,40 @@ jobs:
       # which is worse than red: it says "tested" about code nobody tested.
       - uses: actions/checkout@v7
         with:
-          repository: gopaltalaviya/agentx-contracts
-          path: agentx-contracts
+          repository: gopaltalaviya/pactora-contracts-near
+          path: pactora-contracts-near
           token: ${{ secrets.CONTRACTS_TOKEN || github.token }}
       # docs/15-api.md lives there; a test checks it against the served routes.
       - uses: actions/checkout@v7
         with:
-          repository: gopaltalaviya/agentx-docs
-          path: agentx-docs
+          repository: gopaltalaviya/pactora-docs-near
+          path: pactora-docs-near
 
       - uses: pnpm/action-setup@v6
         with: {version: 9.12.0}
       - uses: actions/setup-node@v7
         with:
-          node-version-file: agentx-backend/.nvmrc
+          node-version-file: pactora-backend-near/.nvmrc
           cache: pnpm
-          cache-dependency-path: agentx-backend/pnpm-lock.yaml
+          cache-dependency-path: pactora-backend-near/pnpm-lock.yaml
 
-      - working-directory: agentx-backend
+      - working-directory: pactora-backend-near
         run: pnpm install --frozen-lockfile
-      # chain/ is what every image ships; it must equal agentx-contracts.
-      - working-directory: agentx-backend
-        env: {PACTORA_CONTRACTS_ROOT: ../agentx-contracts}
+      # chain/ is what every image ships; it must equal pactora-contracts-near.
+      - working-directory: pactora-backend-near
+        env: {PACTORA_CONTRACTS_ROOT: ../pactora-contracts-near}
         run: node scripts/sync-chain-facts.mjs --check
-      - working-directory: agentx-backend
+      - working-directory: pactora-backend-near
         run: pnpm -r build
-      - working-directory: agentx-backend
+      - working-directory: pactora-backend-near
         env: {DATABASE_URL: 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near'}
         run: pnpm --filter @pactora/db migrate
-      - working-directory: agentx-backend
+      - working-directory: pactora-backend-near
         env:
           # 127.0.0.1, never localhost: Node resolves localhost to ::1 while
           # the service container binds IPv4.
           DATABASE_URL: postgres://pactora:pactora@127.0.0.1:5443/pactora_near
-          PACTORA_CONTRACTS_ROOT: ../agentx-contracts
+          PACTORA_CONTRACTS_ROOT: ../pactora-contracts-near
         # Coverage floors are enforced by vitest.config.ts.
         run: pnpm test:coverage
 
@@ -120,12 +120,12 @@ jobs:
         service: ['@pactora/api', '@pactora/signer', '@pactora/indexer']
     steps:
       - uses: actions/checkout@v7
-        with: {path: agentx-backend}
+        with: {path: pactora-backend-near}
       - uses: docker/setup-buildx-action@v4
       # From this repo alone, exactly as a hosted build (Railway) does it: the
       # chain facts come from chain/, which the tests job checks for drift.
       - name: build ${{ matrix.service }}
-        working-directory: agentx-backend
+        working-directory: pactora-backend-near
         run: >
           docker buildx build --load
           --build-arg SERVICE=${{ matrix.service }}

@@ -1,8 +1,14 @@
-# One server: the live deployment
+# One server: the hosting recipe (from the Monad baseline)
 
-The backend as it runs today: one Ubuntu VPS (2 vCPU / 4 GB), the production
-images from `docker-compose.full.yml`, and Caddy in front for HTTPS. The site
-is on Vercel. Full steps: agentx-docs, `docs/13-deploy.md` §5.
+> **Status:** this is how the Monad (AGENTX) baseline was hosted, kept as the
+> recipe for hosting Pactora on NEAR. That VPS was retired on 2026-11-06 and
+> no Pactora-on-NEAR backend is hosted today. Paths below that name
+> `agentx-contracts` refer to the Monad build; for NEAR read
+> `pactora-contracts-near` and its `.env`.
+
+One Ubuntu VPS (2 vCPU / 4 GB), the production images from
+`docker-compose.full.yml`, and Caddy in front for HTTPS. Full steps:
+agentx-docs, `docs/13-deploy.md` §5.
 
 | File | What it does |
 |---|---|
