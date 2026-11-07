@@ -1,7 +1,10 @@
-# AGENTX — Progress
+# Pactora — Progress
 
 > **START HERE every session.** This file is the memory that survives a closed
 > terminal. Read it top to bottom before doing anything else.
+>
+> **NEAR Hackathon (current work): jump to "🟢 NEAR port" below.** The
+> bullets directly under this note describe the Monad/AGENTX baseline (history).
 
 - Last updated: **2026-11-01** (Session 39 — code-level rename to Pactora; afterwards every suite and every live testnet check re-run green on the renamed code, see "Counts on `v3`" below). Before that: 2026-10-26 (Session 37, internal security audit, agentx-docs `docs/22`)
 - Deadline: **2026-10-13, 11:59 PM ET** (verified)
@@ -39,7 +42,8 @@ Contracts live checks (in `../pactora-contracts-near`, sandbox up):
 (18 checks; with `--dao` and `SPUTNIK_DAO_WASM` from `create-dao.mjs --fetch-wasm`, 20).
 
 **Branches:** backend work is on `master` (fast-forwarded from `near-port`);
-contracts, interface, docs on `master`. **Nothing pushed** since the baseline.
+contracts, interface, docs on `master`. All four repos are pushed to GitHub
+(private until submission, 2026-11-07).
 
 **Next, in order:**
 1. Owner: funded testnet account in `pactora-contracts-near/.env`

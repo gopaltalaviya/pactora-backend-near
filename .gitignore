@@ -20,3 +20,7 @@ artifacts/
 
 # saved keys of throwaway testnet accounts (scripts/lib/throwaway.mjs)
 .keys/
+# key files never committed, even outside .sandbox/
+*keypair*.json
+validator_key.json
+node_key.json
