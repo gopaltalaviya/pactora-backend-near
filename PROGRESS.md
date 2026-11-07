@@ -60,6 +60,31 @@ refusals as `unreachable`) — build in the pinned image, see the contracts
 README; near-api-js `retries` = attempts; the pinned image's wasm-opt
 segfaults on pactora (`--no-wasmopt`).
 
+**Re-verified 2026-11-07 on a fresh checkout (Windows 11 + Docker + WSL Ubuntu):**
+
+| Check | Result |
+|---|---|
+| `pactora.wasm` rebuilt from `git archive HEAD` in the pinned image (`--no-wasmopt`) | sha256 `ce9ec299…` = `wasm/SHA256SUMS` |
+| `mock_usdc.wasm` rebuilt the same way (its command keeps wasm-opt) | sha256 `89ab8dbf…` = `wasm/SHA256SUMS` |
+| Contract unit + property tests (WSL, `--test-threads=1`) | 55/55 |
+| Contract sandbox tests (`PACTORA_WASM`/`MOCK_USDC_WASM` = the committed wasm) | 6/6 |
+| `verify-near --network sandbox` | 18 checks passed; with `--dao`: 20 |
+| Backend `pnpm check` (Postgres up, `pnpm db:migrate` first) | 873 passed, 10 skipped |
+| `pnpm demo:local` | `Demo passed.` |
+| Interface `pnpm check` | 151/151, lint and format clean |
+| Interface browser tests, 5 browsers, `--workers=2` | 443 passed, 2 skipped |
+| Interface production build against the held demo API | all 21 static pages 200, 28 pages crawled, no broken internal link; `/v1/status` all components up |
+| Docs `pnpm check:env` | was broken (named the Monad repos); fixed, and docs/08 gained the 10 NEAR variables it was missing |
+
+Environment traps seen: on a fresh database the API tests fail with
+`relation "agents" does not exist` until `pnpm db:migrate`; browser tests on
+a laptop time out at 4 workers in Firefox/WebKit, pass at `--workers=2` (as CI);
+a first `demo:local` that ran while other heavy jobs ran failed at agent
+registration with `fetch failed` and passed alone. Contract tests cannot build
+on Windows (`near-workspaces`) nor in the cargo-near image (no OpenSSL
+headers): run them in WSL. An empty `.env` (gitignored) is in place in
+`pactora-contracts-near` for step 1.
+
 ---
 
 ## 🏷 Rebrand: AGENTX → Pactora (decided 2026-10-30)
