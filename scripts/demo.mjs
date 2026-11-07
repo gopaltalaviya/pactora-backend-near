@@ -25,6 +25,8 @@ import {spawn} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import {createWriteStream, mkdirSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:net';
+import {dirname, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {Account, KeyPairSigner, actions} from 'near-api-js';
 import postgres from 'postgres';
 import {z} from 'zod';
@@ -48,8 +50,13 @@ import {
   rootAccount,
   view,
 } from './lib/near.mjs';
+import {saveKey, sweep} from './lib/throwaway.mjs';
 
 const SLUG = process.env.DEMO_NETWORK ?? 'sandbox';
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+// Testnet: every full-access test account's key is saved under .keys/testnet/
+// before the account exists, and swept back into the deployer at cleanup.
+const keep = (id, keyPair) => saveKey(ROOT, SLUG, id, keyPair, {fullAccess: true});
 const CHAIN_ID = `near:${SLUG}`;
 const DB_URL = process.env.DATABASE_URL ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const API_PORT = Number(process.env.DEMO_API_PORT ?? 8098);
@@ -122,6 +129,9 @@ async function cleanup() {
   for (const c of children) c.kill('SIGTERM');
   await sql.end().catch(() => {});
   await closeDb(db).catch(() => {});
+  await sweep(ROOT, SLUG, root.provider, root.id).catch((e) =>
+    warn(`sweep: ${e.message}; run node --env-file=.env scripts/sweep-testnet.mjs`),
+  );
 }
 
 async function portFree(port, name) {
@@ -147,9 +157,11 @@ try {
 
   // ── 1. people and money ───────────────────────────────────────────────
   const run = `d${Date.now().toString(36)}`;
+  // Testnet: what an earlier, interrupted run left on its saved test accounts.
+  await sweep(ROOT, SLUG, root.provider, root.id);
   const people = [];
   for (const name of ['orchestrator', ...WORKERS.map((w) => w.capability)]) {
-    people.push(await createPerson(root, `${run}-${name}`));
+    people.push(await createPerson(root, `${run}-${name}`, '3', {save: keep}));
   }
   for (const p of people) await mintTo(root, TOKEN, p, 50_000_000);
   ok(`${people.length} owners created with full-access keys, 50 mUSDC each (run ${run})`);
@@ -158,7 +170,11 @@ try {
   // signer for a nonce; a function-call key, because exits need no deposit.
   const keeperKey = KeyPair.fromRandom('ed25519');
   const keeperId = `${run}-keeper.${root.id}`;
-  await createScopedAccount(root, keeperId, keeperKey.getPublicKey(), PACTORA, {near: '2', allowance: '1'});
+  saveKey(ROOT, SLUG, keeperId, keeperKey, {fullAccess: false});
+  await createScopedAccount(root, keeperId, keeperKey.getPublicKey(), PACTORA, {
+    near: '0.5',
+    allowance: '0.5',
+  });
 
   // ── 2. services ───────────────────────────────────────────────────────
   const env = {
@@ -444,9 +460,9 @@ try {
     // The attacker's agents. A farm: its owner pays a puppet client, which
     // pays the farm once — a bought review. And a fresh agent, too new to
     // have a record, that charges far more than any task is worth.
-    const farmOwner = await createPerson(root, `${run}-farm`);
-    const puppetOwner = await createPerson(root, `${run}-puppet`);
-    const priceyOwner = await createPerson(root, `${run}-pricey`);
+    const farmOwner = await createPerson(root, `${run}-farm`, '3', {save: keep});
+    const puppetOwner = await createPerson(root, `${run}-puppet`, '3', {save: keep});
+    const priceyOwner = await createPerson(root, `${run}-pricey`, '3', {save: keep});
     for (const p of [farmOwner, priceyOwner]) await mintTo(root, TOKEN, p, 50_000_000);
     const farm = await registerAgent(farmOwner, {
       name: 'Cheap Research',
@@ -543,10 +559,11 @@ try {
     // API and the signer straight to the chain. The key is the same kind
     // every agent wallet holds — function-call only, scoped to Pactora.
     console.log(`\n  worse: an agent's wallet key is stolen, and the attacker calls the chain directly.\n`);
-    const leakyOwner = await createPerson(root, `${run}-leaky`);
+    const leakyOwner = await createPerson(root, `${run}-leaky`, '3', {save: keep});
     await mintTo(root, TOKEN, leakyOwner, 5_000_000);
     const stolen = KeyPair.fromRandom('ed25519');
     const leakyWallet = `bot.${leakyOwner.id}`;
+    saveKey(ROOT, SLUG, leakyWallet, stolen, {fullAccess: false});
     const leakyId = await registerOnChain(leakyOwner, {
       wallet: leakyWallet,
       walletPublicKey: stolen.getPublicKey().toString(),

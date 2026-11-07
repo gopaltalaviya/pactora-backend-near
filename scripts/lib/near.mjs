@@ -65,10 +65,15 @@ export const call = (account, contractId, method, args, {deposit = 0n, gas = 100
 export const view = (provider, contractId, method, args = {}) =>
   provider.callFunction({contractId, method, args, blockQuery: {finality: 'final'}});
 
-/** A sub-account of `parent` with a fresh full-access key: a person, in the demo. */
-export async function createPerson(root, name, near = '3') {
+/**
+ * A sub-account of `parent` with a fresh full-access key: a person, in the demo.
+ * `save(id, keyPair)` runs BEFORE the account is created, so a testnet run can
+ * keep the key and sweep the account back (scripts/lib/throwaway.mjs).
+ */
+export async function createPerson(root, name, near = '3', {save} = {}) {
   const keyPair = KeyPair.fromRandom('ed25519');
   const id = `${name}.${root.id}`;
+  save?.(id, keyPair);
   await send(root.account, id, [
     actions.createAccount(),
     actions.transfer(nearToYocto(near)),
@@ -91,7 +96,10 @@ export async function createScopedAccount(
   id,
   publicKey,
   contractId,
-  {near = '0.5', allowance = '0.25'} = {},
+  // 0.2 NEAR: no key can ever take back what a function-call-only account
+  // holds. A call reserves its 100 Tgas at the pessimistic gas price up front
+  // (about 0.101 NEAR); a whole demo burns under 0.003 per wallet.
+  {near = '0.2', allowance = '0.25'} = {},
 ) {
   return send(parent.account, id, [
     actions.createAccount(),

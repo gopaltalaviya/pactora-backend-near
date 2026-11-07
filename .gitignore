@@ -17,3 +17,6 @@ artifacts/
 
 # local NEAR sandbox home (docker compose --profile sandbox)
 .sandbox/
+
+# saved keys of throwaway testnet accounts (scripts/lib/throwaway.mjs)
+.keys/

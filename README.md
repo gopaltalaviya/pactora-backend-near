@@ -159,6 +159,14 @@ calling a provider.
 `scripts/deploy.mjs --network testnet` writes it; `node scripts/sync-chain-facts.mjs`
 copies it here). Mainnet is refused by every script.
 
+The deployer in `.env` is your own account, and it pays for the run. Each
+person the demo creates on testnet has its key saved to `.keys/testnet/`
+(gitignored) before the account exists. At the end of the run, and at the
+start of the next one, those accounts are deleted back into the deployer,
+which returns their NEAR. The keeper and the agent wallets hold only
+function-call keys, so no key can withdraw what they hold; that is by
+design. The keeper's key is saved too.
+
 ## Tests
 
 ```bash
