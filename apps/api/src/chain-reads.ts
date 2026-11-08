@@ -299,3 +299,15 @@ function parseLine(line: string): {event: string; data: unknown[]} | null {
     return null;
   }
 }
+
+/** A read-only contract view on a chain (the admin console reads roles and DAO proposals live). */
+export type ChainViewer = (
+  chainId: string,
+  contract: string,
+  method: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+export function makeChainViewer(config: PactoraConfig, clientFor = clients(config)): ChainViewer {
+  return (chainId, contract, method, args = {}) => clientFor(chainId).view(contract, method, args);
+}

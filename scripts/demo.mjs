@@ -23,11 +23,11 @@
  */
 import {spawn} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
-import {createWriteStream, mkdirSync, writeFileSync} from 'node:fs';
+import {createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {createServer as createHttpServer} from 'node:http';
 import {createServer} from 'node:net';
 import {dirname, join} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {crc32, deflateSync} from 'node:zlib';
 import {Account, KeyPairSigner, actions} from 'near-api-js';
 import postgres from 'postgres';
@@ -914,6 +914,153 @@ try {
     owner !== faucet.id
       ? ok(`the faucet's account is not the token's owner (${owner}): it can only give what its float holds`)
       : fail('the faucet is the token owner');
+  }
+
+  // ── 8g. the DAO dispute desk (docs/26 F15) ───────────────────────────
+  // A real Sputnik DAO becomes Pactora's arbiter on the sandbox. A job is
+  // disputed; a council member's proposal and votes are the calls the
+  // admin API builds, signed with the members' own keys as their wallets
+  // would. One vote must not rule; two must. Needs the DAO code
+  // (../pactora-contracts-near/dao.wasm, or SPUTNIK_DAO_WASM).
+  const contractsRoot = process.env.PACTORA_CONTRACTS_ROOT ?? join(ROOT, '..', 'pactora-contracts-near');
+  const daoWasm = process.env.SPUTNIK_DAO_WASM ?? join(contractsRoot, 'dao.wasm');
+  if (SLUG !== 'sandbox' || !existsSync(daoWasm)) {
+    warn(
+      `the DAO desk section is skipped: no Sputnik DAO code at ${daoWasm} (create-dao.mjs --fetch-wasm writes it)`,
+    );
+  } else {
+    const {deployDaoSandbox} = await import(
+      pathToFileURL(join(contractsRoot, 'scripts', 'lib', 'dao.mjs')).href
+    );
+    const members = [];
+    for (let i = 1; i <= 3; i++)
+      members.push(await createPerson(root, `${run}-council${i}`, '3', {save: keep}));
+    const daoId = `${run}-dao.${root.id}`;
+    await deployDaoSandbox(
+      root.account,
+      daoId,
+      readFileSync(daoWasm),
+      members.map((m) => m.id),
+    );
+    await call(root.account, PACTORA, 'set_arbiter', {arbiter: daoId}, {deposit: 1n});
+    try {
+      // A disputed escrow job.
+      const wOwner = await createPerson(root, `${run}-disputed`, '3', {save: keep});
+      await mintTo(root, TOKEN, wOwner, 20_000_000);
+      const w = await registerAgent(wOwner, {
+        name: 'Disputed Worker',
+        capability: 'risk-review',
+        price: '40000',
+      });
+      await deposit(wOwner, TOKEN, PACTORA, BigInt(params.min_stake) + 1_000_000n, {
+        Stake: {agent_id: Number(w.chainAgentId)},
+      });
+      const wsdk = new PactoraClient({baseUrl: base, apiKey: w.apiKey, chainId: CHAIN_ID});
+      const hired = await client.hire({
+        workerAgentId: Number(w.agentId),
+        spec: {capability: 'risk-review', input: {q: 'review this'}},
+        maxPrice: '40000',
+        path: 'escrow',
+      });
+      const jobId = hired.jobId;
+      const stateOf = async () => (await client.getJob(jobId)).state;
+      for (let i = 0; i < 60 && !(await client.getJob(jobId)).chainJobId; i++) await sleep(500);
+      await wsdk.accept(jobId);
+      for (let i = 0; i < 60 && (await stateOf()) !== 'accepted'; i++) await sleep(500);
+      await wsdk.submitResult(jobId, {output: {verdict: 'fine'}});
+      for (let i = 0; i < 60 && (await stateOf()) !== 'submitted'; i++) await sleep(500);
+      await client.dispute(jobId, 'The review ignores the contract it was asked about.');
+      for (let i = 0; i < 60 && (await stateOf()) !== 'disputed'; i++) await sleep(500);
+      const chainJobId = Number((await client.getJob(jobId)).chainJobId);
+
+      // Council members sign in; the API reads the council from the DAO.
+      const signIn = async (who) => {
+        const ch = await post('/v1/session/challenge', {accountId: who.id});
+        const s = await signNep413({
+          accountId: who.id,
+          keyPair: who.keyPair,
+          message: ch.message,
+          recipient: ch.recipient,
+          nonce: new Uint8Array(Buffer.from(ch.nonce, 'hex')),
+        });
+        return (
+          await post('/v1/session', {
+            accountId: who.id,
+            nonce: ch.nonce,
+            publicKey: s.publicKey,
+            signature: s.signature,
+          })
+        ).token;
+      };
+      const adminGet = async (token, path) =>
+        (await fetch(`${base}${path}`, {headers: {authorization: `Bearer ${token}`}})).json();
+      const adminPost = async (token, path, body) => {
+        const res = await fetch(`${base}${path}`, {
+          method: 'POST',
+          headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        return {status: res.status, body: await res.json()};
+      };
+      const tokens = [await signIn(members[0]), await signIn(members[1])];
+      const me = await adminGet(tokens[0], '/v1/admin/me');
+      me.roles?.includes('council') && me.arbiterDao === daoId
+        ? ok(`the admin console reads the council from the arbiter DAO ${daoId} on chain`)
+        : fail(`admin roles: ${JSON.stringify(me)}`);
+      const outsider = await signIn(wOwner);
+      (await fetch(`${base}/v1/admin/disputes`, {headers: {authorization: `Bearer ${outsider}`}})).status ===
+      403
+        ? ok('an account not on the council is refused the dispute desk')
+        : fail('an outsider reached the dispute desk');
+
+      const desk = await adminGet(tokens[0], `/v1/admin/disputes/${jobId}`);
+      const stale = await adminPost(tokens[0], `/v1/admin/disputes/${jobId}/proposal`, {
+        forWorker: false,
+        evidenceHash: '0'.repeat(64),
+      });
+      stale.status === 409
+        ? ok('a ruling bound to stale evidence is refused')
+        : fail(`stale proposal: ${stale.status}`);
+      const built = await adminPost(tokens[0], `/v1/admin/disputes/${jobId}/proposal`, {
+        forWorker: false,
+        evidenceHash: desk.evidenceHash,
+      });
+      const sendCall = (who, fc) =>
+        who.account.signAndSendTransaction({
+          receiverId: fc.receiverId,
+          actions: [actions.functionCall(fc.methodName, fc.args, BigInt(fc.gas), BigInt(fc.deposit))],
+          waitUntil: 'FINAL',
+        });
+      await sendCall(members[0], built.body.functionCall);
+      const listed = await adminGet(tokens[0], `/v1/admin/disputes/${jobId}/proposals`);
+      const proposal = listed.proposals?.find((p) => p.status === 'InProgress');
+      proposal && proposal.forWorker === false
+        ? ok(`the proposal the desk built is on the DAO (id ${proposal.id}), read back for this job only`)
+        : fail(`proposals: ${JSON.stringify(listed)}`);
+      const vote = async (i) =>
+        sendCall(
+          members[i],
+          (
+            await adminPost(tokens[i], `/v1/admin/disputes/${jobId}/proposals/${proposal.id}/vote`, {
+              action: 'VoteApprove',
+            })
+          ).body.functionCall,
+        );
+      await vote(0);
+      const afterOne = await view(root.provider, PACTORA, 'get_job', {job_id: chainJobId});
+      afterOne.state === 'Disputed'
+        ? ok('one council vote of three does not rule')
+        : fail(`after one vote: ${afterOne.state}`);
+      await vote(1);
+      const afterTwo = await view(root.provider, PACTORA, 'get_job', {job_id: chainJobId});
+      afterTwo.state === 'Refunded' && afterTwo.outcome === 'DisputeLost'
+        ? ok(
+            `two of three votes, cast with the calls the desk built, ruled job ${chainJobId}: refunded, worker DisputeLost`,
+          )
+        : fail(`after two votes: ${JSON.stringify(afterTwo)}`);
+    } finally {
+      await call(root.account, PACTORA, 'set_arbiter', {arbiter: chain.contracts.Arbiter}, {deposit: 1n});
+    }
   }
 
   // ── 9. the attack (DEMO_ATTACK=0 skips it) ────────────────────────────

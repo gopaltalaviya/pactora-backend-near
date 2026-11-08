@@ -28,6 +28,8 @@ import {registerWebhookRoutes} from './routes/webhooks.js';
 import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
 import {registerProfileRoutes} from './routes/profiles.js';
 import {kycSweep, registerKycRoutes} from './routes/kyc.js';
+import {registerAdminRoutes} from './routes/admin.js';
+import type {ChainViewer} from './chain-reads.js';
 import type {IdentityProvider, SanctionsIndex} from './compliance.js';
 import type {FaucetSend} from './submit.js';
 import type {TargetPolicy} from '@pactora/service';
@@ -142,6 +144,10 @@ export interface AppDeps {
   screening?: boolean;
   /** NEAR accounts that may decide compliance cases. */
   complianceReviewers?: string[];
+  /** Live contract views: the admin console reads the arbiter DAO and its proposals (docs/26 F15). */
+  viewChain?: ChainViewer;
+  /** How long the admin console reuses a read of the DAO council; default 30 s. */
+  adminCouncilCacheMs?: number;
   /** Called for every route as it is registered — the docs test lists them. */
   onRoute?: (route: {method: string | string[]; url: string}) => void;
 }
@@ -387,6 +393,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.sanctions ? {sanctions: deps.sanctions} : {}),
     screening: deps.screening ?? true,
     reviewers: () => deps.complianceReviewers ?? [],
+  });
+  await registerAdminRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    ...(deps.viewChain ? {view: deps.viewChain} : {}),
+    reviewers: () => deps.complianceReviewers ?? [],
+    ...(deps.objectStore ? {objectStore: deps.objectStore} : {}),
+    ...(deps.adminCouncilCacheMs !== undefined ? {councilCacheMs: deps.adminCouncilCacheMs} : {}),
   });
   await registerFaucetRoutes(app, {
     db: deps.db,

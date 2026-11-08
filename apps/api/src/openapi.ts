@@ -15,6 +15,7 @@ import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.j
 import {WebhookBody} from './routes/webhooks.js';
 import {DirectoryQuery, PartyReviewBody, ProfileBody, ReviewsQuery} from './routes/profiles.js';
 import {CasesQuery, DecisionBody, SimulatedBody, StartBody} from './routes/kyc.js';
+import {HideBody, ProposalBody, VoteBody} from './routes/admin.js';
 import {
   ApplicationBody,
   ApplicationsQuery,
@@ -443,6 +444,65 @@ export const ROUTES: Route[] = [
       'Parties: review the other party of a job settled on chain: 1-5 and 10-2000 characters, once, within 14 days',
     body: PartyReviewBody,
     status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/admin/me',
+    auth: 'session',
+    summary: 'Admin: your roles, read live (council of the arbiter DAO, reviewer)',
+  },
+  {
+    method: 'get',
+    path: '/v1/admin/disputes',
+    auth: 'session',
+    summary: 'Council: the disputed jobs on this chain',
+  },
+  {
+    method: 'get',
+    path: '/v1/admin/disputes/:id',
+    auth: 'session',
+    summary:
+      'Council: a dispute with its snapshots, photos, chat, timeline, and the evidence hash a ruling binds to',
+  },
+  {
+    method: 'get',
+    path: '/v1/admin/files/:fileId',
+    auth: 'session',
+    summary: 'Council: an evidence file of a disputed job (audited)',
+  },
+  {
+    method: 'post',
+    path: '/v1/admin/disputes/:id/proposal',
+    auth: 'session',
+    summary:
+      'Council: the add_proposal call (0.1 NEAR bond) for a ruling, bound to the evidence hash; stale → 409',
+    body: ProposalBody,
+  },
+  {
+    method: 'get',
+    path: '/v1/admin/disputes/:id/proposals',
+    auth: 'session',
+    summary: "Council: the DAO's ruling proposals for this job, read from the chain",
+  },
+  {
+    method: 'post',
+    path: '/v1/admin/disputes/:id/proposals/:pid/vote',
+    auth: 'session',
+    summary: 'Council: the act_proposal call for a vote, on the proposal kind the chain holds',
+    body: VoteBody,
+  },
+  {
+    method: 'get',
+    path: '/v1/admin/reviews',
+    auth: 'session',
+    summary: 'Moderation: the latest reviews, hidden ones included',
+  },
+  {
+    method: 'post',
+    path: '/v1/admin/reviews/:id/hide',
+    auth: 'session',
+    summary: 'Moderation: hide a review with a reason (kept, audited)',
+    body: HideBody,
   },
   {
     method: 'get',

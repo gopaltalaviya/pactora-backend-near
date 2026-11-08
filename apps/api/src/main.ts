@@ -17,6 +17,7 @@ import {makeSignerFaucet, makeSignerSubmit, makeSignerWalletKeys} from './submit
 import {SanctionsIndex, SimulatedIdentityProvider} from './compliance.js';
 import {
   makeBudgetReader,
+  makeChainViewer,
   makeDisputeBondReader,
   makeIdentityReader,
   makePaymentReader,
@@ -253,6 +254,7 @@ const app = await buildApp({
   sanctions: new SanctionsIndex(db),
   screening: cfg.SANCTIONS_SCREENING === 'on',
   complianceReviewers: cfg.COMPLIANCE_REVIEWERS,
+  viewChain: makeChainViewer(config),
   ...(cfg.WEBHOOK_SECRET_KEY ? {webhookSecretKey: parseSecretKey(cfg.WEBHOOK_SECRET_KEY)} : {}),
   ...(cfg.WEBHOOK_ALLOW_PRIVATE ? {webhookTargetPolicy: {allowHttp: true, allowPrivate: true}} : {}),
   // Only where every enabled chain is a test chain; the route refuses others anyway.
