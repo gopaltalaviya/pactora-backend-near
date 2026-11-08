@@ -33,24 +33,35 @@ export async function personAgentOf(db: Db, account: string, chainId: string): P
 
 /** Authenticate either credential; a person without a person agent is refused, saying how to get one. */
 export async function actorOf(db: Db, request: FastifyRequest): Promise<Actor> {
-  const caller = await authenticateCaller(db, request);
+  const actor = await actorFor(db, await authenticateCaller(db, request));
+  if ('account' in actor) {
+    throw new PactoraError(
+      ErrorCode.FORBIDDEN,
+      `${actor.account} has no person agent on ${actor.chainId} — register on chain, then POST /v1/people`,
+    );
+  }
+  return actor;
+}
+
+/** The actor behind an authenticated caller, or the person's caller itself when it has no person agent. */
+async function actorFor(db: Db, caller: AgentCaller | PersonCaller): Promise<Actor | PersonCaller> {
   if (caller.kind === 'agent') {
     const agent = await db.query.agents.findFirst({where: eq(agents.id, caller.agentId)});
     if (!agent) throw new PactoraError(ErrorCode.UNAUTHORIZED, 'the key belongs to a deleted agent');
     return {via: 'agent', agent, chainId: caller.chainId, caller};
   }
   const agent = await personAgentOf(db, caller.account, caller.chainId);
-  if (!agent) {
-    throw new PactoraError(
-      ErrorCode.FORBIDDEN,
-      `${caller.account} has no person agent on ${caller.chainId} — register on chain, then POST /v1/people`,
-    );
-  }
-  return {via: 'person', agent, chainId: caller.chainId, caller};
+  return agent ? {via: 'person', agent, chainId: caller.chainId, caller} : caller;
 }
 
-/** The bearer, if any was sent, for routes that are public but say more to a known caller. */
+/**
+ * The bearer, if any was sent, for routes that are public but say more to a
+ * known caller. A bad credential is still refused (401); a signed-in person
+ * who has no person agent yet is a party to nothing, and sees what anyone
+ * sees — refusing them (403) hid every listing from a new user.
+ */
 export async function optionalActorOf(db: Db, request: FastifyRequest): Promise<Actor | null> {
   if (!request.headers.authorization) return null;
-  return actorOf(db, request);
+  const actor = await actorFor(db, await authenticateCaller(db, request));
+  return 'account' in actor ? null : actor;
 }

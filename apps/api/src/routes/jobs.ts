@@ -68,6 +68,8 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
    */
   app.post('/v1/jobs', async (request, reply) => {
     const caller = await authenticate(db, request);
+    // A hire posts work: standing gates it (docs/26 F14).
+    await requireClear(db, caller.agentId, 'post work');
     const chainId = resolveChainId(request, caller, enabled);
     const chain = chains[chainId]!;
 

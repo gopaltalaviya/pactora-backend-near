@@ -1,7 +1,14 @@
 import type {FastifyInstance, FastifyRequest} from 'fastify';
 import {and, desc, eq, inArray, lt} from 'drizzle-orm';
 import {z} from 'zod';
-import {complianceCases, complianceDecisions, identityVerifications, standingOf, type Db} from '@pactora/db';
+import {
+  complianceCases,
+  complianceDecisions,
+  identityVerifications,
+  sessions,
+  standingOf,
+  type Db,
+} from '@pactora/db';
 import type {ChainConfig} from '@pactora/config';
 import {ErrorCode, PactoraError} from '@pactora/shared';
 import {actorOf} from '../actor.js';
@@ -15,6 +22,7 @@ import {
   type SanctionsIndex,
 } from '../compliance.js';
 import {isPublicId} from './jobs.js';
+import {ADMIN_SESSION_MAX_MS} from './admin.js';
 
 /**
  * Identity checks for people, and the compliance reviewers' queue
@@ -134,11 +142,26 @@ export async function kycSweep(db: Db, provider: IdentityProvider | undefined, n
     );
 }
 
+const PEOPLE_ONLY =
+  'identity checks are for people: an agent API key cannot call this route; sign in as a person (POST /v1/session)';
+
 export async function registerKycRoutes(app: FastifyInstance, deps: KycRouteDeps): Promise<void> {
   const {db} = deps;
 
+  /**
+   * A compliance reviewer is an admin role (GET /v1/admin/me), and a
+   * decision can block an account: the same fresh sign-in as the admin
+   * routes, not a 7-day session left open somewhere.
+   */
   const reviewer = async (request: FastifyRequest) => {
     const person = await authenticatePerson(db, request);
+    const s = await db.query.sessions.findFirst({where: eq(sessions.id, person.sessionId)});
+    if (!s || Date.now() - s.createdAt.getTime() > ADMIN_SESSION_MAX_MS) {
+      throw new PactoraError(
+        ErrorCode.UNAUTHORIZED,
+        'admin needs a sign-in less than an hour old: sign in again',
+      );
+    }
     if (!deps.reviewers().includes(person.account)) {
       throw new PactoraError(ErrorCode.FORBIDDEN, 'only compliance reviewers may see or decide cases');
     }
@@ -147,7 +170,7 @@ export async function registerKycRoutes(app: FastifyInstance, deps: KycRouteDeps
 
   app.get('/v1/kyc', async (request) => {
     const actor = await actorOf(db, request);
-    if (actor.via !== 'person') throw new PactoraError(ErrorCode.FORBIDDEN, 'identity checks are for people');
+    if (actor.via !== 'person') throw new PactoraError(ErrorCode.WRONG_CREDENTIAL, PEOPLE_ONLY);
     const [latest] = await db
       .select()
       .from(identityVerifications)
@@ -167,7 +190,7 @@ export async function registerKycRoutes(app: FastifyInstance, deps: KycRouteDeps
 
   app.post('/v1/kyc/start', async (request, reply) => {
     const actor = await actorOf(db, request);
-    if (actor.via !== 'person') throw new PactoraError(ErrorCode.FORBIDDEN, 'identity checks are for people');
+    if (actor.via !== 'person') throw new PactoraError(ErrorCode.WRONG_CREDENTIAL, PEOPLE_ONLY);
     const provider = deps.provider;
     if (!provider)
       throw new PactoraError(ErrorCode.UPSTREAM_UNAVAILABLE, 'no identity provider is configured');

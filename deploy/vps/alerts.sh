@@ -67,7 +67,13 @@ down = [k + "=" + v for k, v in (s.get("components") or {}).items() if v != "up"
 print(s.get("status", "unknown"), (s.get("gas") or {}).get("state", "unknown"), ",".join(down) or "-")
 ' 2>/dev/null)"
 read -r overall gas down <<< "${summary:-unreadable unknown -}"
-if [ "$overall" = operational ]; then ok "status operational"; else bad "status is ${overall} (components not up: ${down})"; fi
+if [ "$overall" = operational ]; then
+  ok "status operational"
+elif [ "$down" = - ]; then
+  bad "status is ${overall} (every component up: a low signer wallet or the model is the cause)"
+else
+  bad "status is ${overall} (components not up: ${down})"
+fi
 if [ "$gas" = low ]; then bad "a signer wallet is below its gas floor"; elif [ "$gas" = ok ]; then ok "signer gas ok"; else echo "  ?     signer gas ${gas} (no signer reading)"; fi
 
 # 4. Indexer lag: the cursor advances with every indexed block.
@@ -111,8 +117,9 @@ else
   if [ "$bh" -ge 26 ]; then bad "newest backup is ${bh}h old"; else ok "newest backup ${bh}h old"; fi
 fi
 
-# Post when the set of problems changed.
-now_set="$(printf '%s\n' "${problems[@]+"${problems[@]}"}" | sort)"
+# Post when the set of problems changed. Compared without its numbers: "moved
+# 900s ago" then "moved 1200s ago" is the same fault, not a new one each run.
+now_set="$(printf '%s\n' "${problems[@]+"${problems[@]}"}" | sed 's/[0-9][0-9]*/N/g' | sort)"
 last_set="$(cat "$STATE" 2>/dev/null || true)"
 if [ ${#problems[@]} -eq 0 ]; then
   message="Pactora: all checks pass again."
@@ -124,17 +131,22 @@ if [ "$DRY" = 1 ]; then
   echo "dry run: would post (if changed):"
   echo "$message"
 elif [ "$now_set" != "$last_set" ]; then
+  posted=1
   if [ ${#problems[@]} -eq 0 ] && [ -z "$last_set" ]; then
     : # first run and healthy: nothing to say
   elif [ -n "${ALERT_WEBHOOK_URL:-}" ]; then
     body="$(printf '%s' "$message" | "$PYTHON" -c 'import json,sys; m=sys.stdin.read(); print(json.dumps({"text": m, "content": m}))')"
-    curl -s --max-time 10 -H 'content-type: application/json' -d "$body" "$ALERT_WEBHOOK_URL" > /dev/null \
-      || echo "posting to ALERT_WEBHOOK_URL failed" >&2
+    # Not delivered (unreachable, or an HTTP error): keep the old state, so
+    # the next run tries again instead of the alert being lost.
+    curl -fsS --max-time 10 -H 'content-type: application/json' -d "$body" "$ALERT_WEBHOOK_URL" > /dev/null \
+      || { echo "posting to ALERT_WEBHOOK_URL failed; will retry next run" >&2; posted=0; }
   else
     echo "ALERT_WEBHOOK_URL is unset: not posted" >&2
   fi
-  mkdir -p "$(dirname "$STATE")"
-  printf '%s' "$now_set" > "$STATE"
+  if [ "$posted" = 1 ]; then
+    mkdir -p "$(dirname "$STATE")"
+    printf '%s' "$now_set" > "$STATE"
+  fi
 fi
 
 [ ${#problems[@]} -eq 0 ]

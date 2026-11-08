@@ -41,7 +41,8 @@ mkdir -p "$DIR"
 chmod 700 "$DIR"
 # A run that fails half way leaves no half-written file to be mistaken for a backup.
 trap 'rm -f "$DIR"/*.part' EXIT
-stamp="$(date -u +%Y%m%d-%H%M)"
+# To the second: two runs in one minute must not overwrite each other.
+stamp="$(date -u +%Y%m%d-%H%M%S)"
 
 encrypt() { openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass "file:$PASSFILE"; }
 decrypt() { openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$PASSFILE"; }
@@ -65,6 +66,7 @@ if [ "$MINIO_CONTAINER" != none ]; then
   ev="$DIR/pactora-evidence-$stamp.tar.enc"
   docker exec "$MINIO_CONTAINER" sh -c '
     rm -rf /tmp/pactora-mirror &&
+    mkdir -p /tmp/pactora-mirror/"$1" &&
     mc alias set backup http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null &&
     mc mirror --quiet "backup/$1" /tmp/pactora-mirror/"$1" >/dev/null' _ "$BUCKET"
   docker cp "$MINIO_CONTAINER:/tmp/pactora-mirror/$BUCKET" - | encrypt > "$ev.part"

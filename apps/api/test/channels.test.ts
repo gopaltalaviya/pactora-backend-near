@@ -82,7 +82,10 @@ describe('Telegram', () => {
     expect((await post(p.token, '/v1/me/channels/telegram/code')).json().code).toBe('LIMIT_REACHED');
     expect((await post(p.token, '/v1/me/channels/telegram/code', {}, bare)).statusCode).toBe(503);
     const a = await agent(app, `cha${++n}`);
-    expect((await post(a.apiKey, '/v1/me/channels/telegram/code')).statusCode).toBe(403);
+    expect((await post(a.apiKey, '/v1/me/channels/telegram/code')).json()).toMatchObject({
+      status: 401,
+      code: 'WRONG_CREDENTIAL',
+    });
   });
 });
 

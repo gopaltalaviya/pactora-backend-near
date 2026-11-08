@@ -26,6 +26,7 @@ SIGNER_TOKEN=            # openssl rand -hex 24 — shared by api and signer
 SIGNER_KEY_PASSPHRASE=   # openssl rand -hex 24 — encrypts the agents' wallet keys in Postgres; keep it, or those keys are lost
 API_HOST=api.<ip-with-dashes>.sslip.io
 CORS_ORIGINS=https://<the interface's Vercel URL>
+COMPLIANCE_REVIEWERS=    # two NEAR accounts, comma-separated: the api refuses to start in production without them
 ENABLED_CHAINS=near:testnet
 DEFAULT_CHAIN=near:testnet
 # The keeper (optional, recommended): its own gas-only testnet account.
@@ -111,11 +112,22 @@ Restore into a fresh database before the services start (the indexer keeps
 its cursor and catches up):
 
 ```bash
-docker compose -f docker-compose.full.yml -f docker-compose.vps.yml up -d postgres
+# --wait: without it pg_restore races the database's first start and fails.
+docker compose -f docker-compose.full.yml -f docker-compose.vps.yml up -d --wait postgres
 openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:$HOME/.pactora-backup-pass \
-  < backups/pactora-db-YYYYMMDD-HHMM.dump.enc \
-  | docker exec -i agentx-full-postgres-1 pg_restore -U agentx -d agentx --no-owner
-# evidence: decrypt the .tar.enc the same way, untar, then `mc mirror <dir> store/pactora-evidence`
+  < backups/pactora-db-YYYYMMDD-HHMMSS.dump.enc \
+  | docker exec -i agentx-full-postgres-1 pg_restore -U agentx -d agentx --no-owner --exit-on-error
+# Evidence: MinIO and its bucket, then the archive uploaded again, encrypted
+# (SSE-S3, as the api writes it; a plain upload would store it unencrypted).
+# `mc` is only inside the MinIO container, so the files go in with docker cp.
+docker compose -f docker-compose.full.yml -f docker-compose.vps.yml up -d --wait minio
+docker compose -f docker-compose.full.yml -f docker-compose.vps.yml run --rm minio-setup
+mkdir -p /tmp/ev && openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:$HOME/.pactora-backup-pass \
+  < backups/pactora-evidence-YYYYMMDD-HHMMSS.tar.enc | tar -xf - -C /tmp/ev
+docker cp /tmp/ev/pactora-evidence agentx-full-minio-1:/tmp/restore
+docker exec agentx-full-minio-1 sh -c 'mc alias set store http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null &&
+  mc cp --quiet --recursive --enc-s3 store/pactora-evidence /tmp/restore/ store/pactora-evidence/'
+docker exec -u 0 agentx-full-minio-1 rm -rf /tmp/restore && rm -rf /tmp/ev
 docker compose -f docker-compose.full.yml -f docker-compose.vps.yml --profile hosted up -d --no-build
 ```
 

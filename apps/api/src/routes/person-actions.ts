@@ -210,6 +210,7 @@ export async function registerPersonActionRoutes(
     const action = body.action;
     checkParty(job, person, action);
     if (action === 'accept') await requireClear(db, person.id, 'accept work');
+    if (action === 'create') await requireClear(db, person.id, 'fund work');
 
     const rule = RULES[action];
     if (!rule.from.includes(job.state)) {
@@ -404,11 +405,16 @@ export async function registerPersonActionRoutes(
         .returning({id: personActions.id});
       if (!row) return false;
       const rule = RULES[action];
-      // Forward only: the indexer may have moved the job already.
-      await tx
-        .update(jobs)
-        .set({...(rule.to !== job.state ? {state: rule.to as Job['state']} : {}), ...patch})
-        .where(and(eq(jobs.id, job.id), inArray(jobs.state, rule.from as Job['state'][])));
+      // Forward only: the indexer may have moved the job already. Then, for an
+      // action with no columns of its own (accept), there is nothing to write,
+      // and an empty SET is an error, not a no-op.
+      const changes = {...(rule.to !== job.state ? {state: rule.to as Job['state']} : {}), ...patch};
+      if (Object.keys(changes).length > 0) {
+        await tx
+          .update(jobs)
+          .set(changes)
+          .where(and(eq(jobs.id, job.id), inArray(jobs.state, rule.from as Job['state'][])));
+      }
       return true;
     });
 

@@ -173,6 +173,25 @@ describe('a person worker accepts: prepare → sign → confirm', () => {
     expect(submitted).toEqual([]);
   });
 
+  it('confirms an accept the indexer already recorded (the job moved first): no empty update, no 500', async () => {
+    const client = await agent(app, 'pa-client-ix');
+    const p = await person(app, 'pa-worker-ix');
+    const id = await job(client.agentId, await agentIdOf(p.account));
+    expect((await prepare(p.token, id, {action: 'accept'})).statusCode).toBe(200);
+    const hash = onChainTx(txHash(), p.account, [
+      {
+        event: 'job_accepted',
+        data: {job_id: 42, worker: Number(p.chainAgentId), bond: '10000', work_deadline: 1},
+      },
+    ]);
+    // The indexer saw the block first: the row is already `accepted`.
+    await db.execute(sql`UPDATE jobs SET state = 'accepted' WHERE public_id = ${id}`);
+    const ok = await confirm(p.token, id, 'accept', hash);
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toMatchObject({state: 'accepted', txHash: hash});
+    expect((await app.inject({url: `/v1/jobs/${id}`})).json().state).toBe('accepted');
+  });
+
   it('refuses a transaction that carries no such event, one for another job, a pending one and a reverted one', async () => {
     const client = await agent(app, 'pb-client');
     const p = await person(app, 'pb-worker');

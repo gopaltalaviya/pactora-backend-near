@@ -418,6 +418,8 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
 
   app.post('/v1/listings', async (request, reply) => {
     const actor = await actorOf(db, request);
+    // Standing gates posting (docs/26 F14), before anything else is read.
+    await requireClear(db, actor.agent.id, 'post work');
     const key = requiredIdempotencyKey(request);
     const body = ListingBody.parse(request.body);
     const chain = chainOf(actor.chainId);
@@ -1074,6 +1076,8 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
   app.post('/v1/listings/:id/decide', async (request) => {
     const {actor, listing} = await ownerOf(request);
     const body = DecideBody.parse(request.body);
+    // Selecting commits the owner's money to a worker; rejecting stays open.
+    if (body.action === 'select') await requireClear(db, actor.agent.id, 'select a worker');
     const chain = chainOf(listing.chainId);
     const application = await db.query.applications.findFirst({
       where: and(eq(applications.listingId, listing.id), eq(applications.publicId, body.applicationId)),

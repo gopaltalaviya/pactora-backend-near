@@ -1,5 +1,5 @@
 import type {FastifyInstance, FastifyRequest} from 'fastify';
-import {and, asc, desc, eq, inArray} from 'drizzle-orm';
+import {and, asc, desc, eq, inArray, or} from 'drizzle-orm';
 import {z} from 'zod';
 import {sha256Hex} from '@pactora/near';
 import {
@@ -165,10 +165,43 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
     return {person, roles, council: c, chain: deps.chains[person.chainId]!};
   }
 
+  /**
+   * A job that is, or was, disputed. The desk shows a job's chat, drafts and
+   * photos, which are otherwise the two parties' alone: a job nobody
+   * disputed is not the council's to read, so it is hidden (404). A ruled
+   * dispute stays readable — its job has left `disputed` but keeps the event.
+   */
+  /**
+   * A member who is a party recuses: the desk builds no proposal or vote for
+   * someone ruling on their own job. Reading stays open — a party has the
+   * evidence anyway. The DAO itself cannot know who is a party, so this is the
+   * desk's rule, not the chain's.
+   */
+  async function recuse(account: string, job: {clientAgentId: number; workerAgentId: number}) {
+    const party = await db.query.agents.findFirst({
+      where: and(
+        inArray(agents.id, [job.clientAgentId, job.workerAgentId]),
+        or(eq(agents.ownerAddress, account), eq(agents.walletAddress, account)),
+      ),
+    });
+    if (party) {
+      throw new PactoraError(
+        ErrorCode.FORBIDDEN,
+        'you are a party to this dispute (your account owns the client or the worker): another council member must rule',
+      );
+    }
+  }
+
   async function disputedJob(id: string, chainId: string) {
     if (!isPublicId(id)) throw new PactoraError(ErrorCode.NOT_FOUND, `no job ${id}`);
     const job = await db.query.jobs.findFirst({where: and(eq(jobs.publicId, id), eq(jobs.chainId, chainId))});
-    if (!job) throw new PactoraError(ErrorCode.NOT_FOUND, `no job ${id}`);
+    const disputed =
+      job &&
+      (job.state === 'disputed' ||
+        (await db.query.jobEvents.findFirst({
+          where: and(eq(jobEvents.jobId, job.id), eq(jobEvents.kind, 'job.disputed')),
+        })));
+    if (!job || !disputed) throw new PactoraError(ErrorCode.NOT_FOUND, `no disputed job ${id}`);
     return job;
   }
 
@@ -294,6 +327,7 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
     if (!a.council.dao)
       throw new PactoraError(ErrorCode.INVALID_STATE, 'the arbiter is not a DAO on this chain');
     const job = await disputedJob((request.params as {id: string}).id, a.person.chainId);
+    await recuse(a.person.account, job);
     if (job.state !== 'disputed' || !job.chainJobId)
       throw new PactoraError(ErrorCode.INVALID_STATE, `job is "${job.state}"`);
     const ev = await evidenceOf(job);
@@ -372,6 +406,7 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
     const {id, pid} = request.params as {id: string; pid: string};
     const body = VoteBody.parse(request.body ?? {});
     const job = await disputedJob(id, a.person.chainId);
+    await recuse(a.person.account, job);
     if (!a.council.dao || !job.chainJobId)
       throw new PactoraError(ErrorCode.INVALID_STATE, 'nothing to vote on');
     const p = (

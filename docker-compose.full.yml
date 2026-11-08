@@ -115,6 +115,8 @@ services:
       SIGNER_KEY_PASSPHRASE: ${SIGNER_KEY_PASSPHRASE:?set SIGNER_KEY_PASSPHRASE (32+ characters)}
       # Testnet only (near-cli credential JSON); the signer refuses it elsewhere.
       SIGNER_DEV_CREDENTIALS: ${SIGNER_DEV_CREDENTIALS:-}
+      WALLET_LOW_BALANCE_YOCTO: ${WALLET_LOW_BALANCE_YOCTO:-} # the gas floor /v1/status and alerts.sh report against
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       # The keeper: its own gas-only account, never a wallet the signer signs
       # for. No KEEPER_ACCOUNT_ID → no keeper runs.
       KEEPER_ACCOUNT_ID: ${KEEPER_ACCOUNT_ID:-}
@@ -146,6 +148,7 @@ services:
       <<: *chain
       INDEXER_HEALTH_PORT: 9090
       INDEXER_START_AT_HEAD: ${INDEXER_START_AT_HEAD:-0}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       # Optional: a neardata.xyz key, for its higher rate limit on testnet.
       NEARDATA_API_KEY: ${NEARDATA_API_KEY:-}
     depends_on:
@@ -166,6 +169,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?set WEBHOOK_SECRET_KEY (openssl rand -hex 32), shared with the api}
       NOTIFIER_HEALTH_PORT: 9091
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
     depends_on:
       migrate: {condition: service_completed_successfully}
     healthcheck:
@@ -182,6 +186,7 @@ services:
       DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       CHANNELS_SITE_URL: ${CHANNELS_SITE_URL:-https://pactoragents.com}
       CHANNELS_HEALTH_PORT: 9092
     depends_on:
@@ -205,6 +210,20 @@ services:
       FAUCET_PER_IP_PER_DAY: ${FAUCET_PER_IP_PER_DAY:-5}
       FAUCET_DAILY_CAP: ${FAUCET_DAILY_CAP:-500000000}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # Production screening refuses to start without two reviewers (NEAR
+      # accounts, comma-separated) who clear a strong sanctions match.
+      COMPLIANCE_REVIEWERS: ${COMPLIANCE_REVIEWERS:-}
+      # Settings below are passed so the server's .env can set them; an empty
+      # value is unset, so each service's own default applies (docs/08).
+      SANCTIONS_SCREENING: ${SANCTIONS_SCREENING:-}
+      IDENTITY_PROVIDER: ${IDENTITY_PROVIDER:-}
+      KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET:-}
+      KYC_PAGE_BASE: ${KYC_PAGE_BASE:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      EMAIL_CHANNEL: ${EMAIL_CHANNEL:-}
+      OBJECT_STORE_SSE: ${OBJECT_STORE_SSE:-}
+      RATE_LIMIT_STORE: ${RATE_LIMIT_STORE:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       TRUST_PROXY: ${TRUST_PROXY:-0}
       # Live runs: a model key (your quota) and a per-orchestrator daily cap.
       AGENT_MODE: ${AGENT_MODE:-cached}

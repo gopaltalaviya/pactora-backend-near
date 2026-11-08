@@ -19,7 +19,9 @@ services:
     environment:
       API_HOST: ${API_HOST:?set API_HOST, e.g. api.1-2-3-4.sslip.io}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Relative to the first -f file's folder: right in the flat server layout
+      # (README); run from the repo, set CADDYFILE=./deploy/vps/Caddyfile.
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:

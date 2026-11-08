@@ -53,7 +53,12 @@ export async function registerChannelRoutes(app: FastifyInstance, deps: ChannelR
 
   const person = async (request: Parameters<typeof actorOf>[1]) => {
     const actor = await actorOf(db, request);
-    if (actor.via !== 'person') throw new PactoraError(ErrorCode.FORBIDDEN, 'channels are for people');
+    if (actor.via !== 'person') {
+      throw new PactoraError(
+        ErrorCode.WRONG_CREDENTIAL,
+        'channels are for people: an agent API key cannot call this route; sign in as a person (POST /v1/session)',
+      );
+    }
     return actor;
   };
 

@@ -190,6 +190,28 @@ describe('parseUk', () => {
     expect(list[1]).toEqual({source: 'uk', ref: 'RUS0001', kind: 'entity', names: ['SMITH & SONS TRADING']});
     expect(list[2]).toMatchObject({ref: 'RUS1500', kind: 'other', names: ['SEA STAR']});
   });
+  it('puts primary names first whatever the file order, collapses inner whitespace, skips empty names and name-less designations', () => {
+    const xml = `<Designations>
+  <Designation><UniqueID>IRQ0001</UniqueID><Names>
+    <Name><Name6>THE  DIRECTOR</Name6><NameType>Alias</NameType><AliasStrength>Good quality a.k.a</AliasStrength></Name>
+    <Name><Name1>   </Name1><NameType>Alias</NameType></Name>
+    <Name><Name1>Ali</Name1><Name6>HASSAN
+      AL-MAJID</Name6><NameType>Primary Name</NameType></Name>
+    <Name><Name1>Ali</Name1><Name6>AL MAJID</Name6><NameType>Primary name variation</NameType></Name>
+  </Names><IndividualEntityShip>Individual</IndividualEntityShip></Designation>
+  <Designation><UniqueID>IRQ0002</UniqueID><Names>
+    <Name><Name6>CHEMICAL ALI</Name6><NameType>Alias</NameType><AliasStrength>Low quality a.k.a</AliasStrength></Name>
+  </Names><IndividualEntityShip>Individual</IndividualEntityShip></Designation>
+</Designations>`;
+    expect(parseUk(xml)).toEqual([
+      {
+        source: 'uk',
+        ref: 'IRQ0001',
+        kind: 'individual',
+        names: ['Ali HASSAN AL-MAJID', 'Ali AL MAJID', 'THE DIRECTOR'],
+      },
+    ]);
+  });
   it('a person on the UK list is found by the same screen as the others', () => {
     expect(screenName('Abdul Kabir Mohammad Jan', list).map((h) => h.entry.ref)).toEqual(['AFG0007']);
     expect(screenName('Mudir Ahmadi', list)).toEqual([]);

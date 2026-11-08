@@ -52,7 +52,8 @@ counts="$(psql_in "$SCRATCH" -F' ' -c "
     SELECT 'jobs', count(*) FROM jobs UNION ALL
     SELECT 'runs', count(*) FROM runs UNION ALL
     SELECT 'job_files', count(*) FROM job_files UNION ALL
-    SELECT 'public_profiles', count(*) FROM public_profiles
+    SELECT 'public_profiles', count(*) FROM public_profiles UNION ALL
+    SELECT 'signer_keys', count(*) FROM signer_keys
   ) c")"
 
 ev="$(ls -1t "$DIR"/pactora-evidence-*.tar.enc 2>/dev/null | head -1 || true)"
