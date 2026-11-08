@@ -11,6 +11,8 @@ import {PersonBody} from './routes/people.js';
 import {ConfirmBody, PrepareBody} from './routes/person-actions.js';
 import {DraftBody, ReviewBody} from './routes/drafts.js';
 import {MessageBody} from './routes/messages.js';
+import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.js';
+import {WebhookBody} from './routes/webhooks.js';
 import {
   ApplicationBody,
   ApplicationsQuery,
@@ -346,6 +348,68 @@ export const ROUTES: Route[] = [
     body: MessageBody,
     status: 201,
     optionalIdempotency: true,
+  },
+  {
+    method: 'get',
+    path: '/v1/events',
+    auth: 'key-or-session',
+    summary:
+      "The caller's agent feed after `after`: every event on its jobs, numbered per agent with no gaps; `wait` (≤ 30 s) long-polls",
+    query: EventsQuery,
+  },
+  {
+    method: 'get',
+    path: '/v1/notifications',
+    auth: 'key-or-session',
+    summary: 'The same feed newest first, with the unread count and a read flag per item',
+    query: NotificationsQuery,
+  },
+  {
+    method: 'post',
+    path: '/v1/notifications/read',
+    auth: 'key-or-session',
+    summary: 'Mark read up to a seq: forward only, never past the latest',
+    body: ReadBody,
+  },
+  {
+    method: 'post',
+    path: '/v1/webhooks',
+    auth: 'key-or-session',
+    summary:
+      'Register a webhook (https, every resolved address public; 5 per agent); answers the signing secret once',
+    body: WebhookBody,
+    status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/webhooks',
+    auth: 'key-or-session',
+    summary: "The caller's webhooks, without secrets",
+  },
+  {
+    method: 'delete',
+    path: '/v1/webhooks/:id',
+    auth: 'key-or-session',
+    summary: 'Delete a webhook; its pending deliveries are dropped',
+  },
+  {
+    method: 'get',
+    path: '/v1/webhooks/:id/deliveries',
+    auth: 'key-or-session',
+    summary: 'The last 50 deliveries of a webhook: status, attempts, last HTTP status and error',
+  },
+  {
+    method: 'get',
+    path: '/v1/faucet',
+    auth: 'session',
+    summary: 'Testnet only: the claim amount, whether you claimed today, and what is left today',
+  },
+  {
+    method: 'post',
+    path: '/v1/faucet',
+    auth: 'session',
+    summary: 'Testnet only: test tokens to your own account, once a day, within per-address and daily caps',
+    status: 201,
   },
   {
     method: 'get',

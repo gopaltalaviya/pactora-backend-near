@@ -919,3 +919,135 @@ export const x402Redemptions = pgTable('x402_redemptions', {
   resource: text('resource').notNull(),
   redeemedAt: timestamp('redeemed_at', {withTimezone: true}).notNull().defaultNow(),
 });
+
+// ──────────────── events, webhooks, notifications, faucet (docs/26 F9, F10, F23) ────────────────
+
+/**
+ * The next sequence number per agent. A trigger on job_events takes this row
+ * FOR UPDATE, so two writers for one agent serialise and the sequence has no
+ * gaps; writers for different agents never wait on each other.
+ */
+export const agentEventSeq = pgTable('agent_event_seq', {
+  agentId: bigint('agent_id', {mode: 'number'})
+    .primaryKey()
+    .references(() => agents.id, {onDelete: 'cascade'}),
+  last: bigint('last', {mode: 'number'}).notNull().default(0),
+});
+
+/**
+ * Every job event, once per party (client and worker), numbered per agent.
+ * Written by the trigger in the same transaction as the job_events row, by
+ * the API and the indexer alike. `GET /v1/events?after=<seq>` reads it.
+ */
+export const agentEvents = pgTable(
+  'agent_events',
+  {
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    seq: bigint('seq', {mode: 'number'}).notNull(),
+    jobEventId: bigint('job_event_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobEvents.id, {onDelete: 'cascade'}),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    /** The agent's side of the job: 'client' or 'worker'. */
+    role: text('role').notNull(),
+    kind: text('kind').notNull(),
+    payload: jsonb('payload').notNull().default({}),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({columns: [t.agentId, t.seq]}),
+    uniqueIndex('agent_events_once_uk').on(t.agentId, t.jobEventId),
+  ],
+);
+
+/** A person's notifications are their person agent's events; this is how far they have read. */
+export const agentEventReads = pgTable('agent_event_reads', {
+  agentId: bigint('agent_id', {mode: 'number'})
+    .primaryKey()
+    .references(() => agents.id, {onDelete: 'cascade'}),
+  readSeq: bigint('read_seq', {mode: 'number'}).notNull().default(0),
+  updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
+});
+
+export const webhooks = pgTable(
+  'webhooks',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    url: text('url').notNull(),
+    /** The signing secret, AES-256-GCM under WEBHOOK_SECRET_KEY: iv.tag.ciphertext, base64url. */
+    secretEnc: text('secret_enc').notNull(),
+    /** Event kinds to deliver; empty = every kind. */
+    kinds: text('kinds')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    active: boolean('active').notNull().default(true),
+    /** Deliveries given up in a row; the hook is switched off at the limit. */
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    disabledReason: text('disabled_reason'),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    deletedAt: timestamp('deleted_at', {withTimezone: true}),
+  },
+  (t) => [uniqueIndex('webhooks_public_id_uk').on(t.publicId), index('webhooks_agent_idx').on(t.agentId)],
+);
+
+/**
+ * One row per (hook, agent event). Queued by the same trigger, claimed by the
+ * notifier with FOR UPDATE SKIP LOCKED, sent with no transaction open.
+ */
+export const webhookDeliveries = pgTable(
+  'webhook_deliveries',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    webhookId: bigint('webhook_id', {mode: 'number'})
+      .notNull()
+      .references(() => webhooks.id, {onDelete: 'cascade'}),
+    agentId: bigint('agent_id', {mode: 'number'}).notNull(),
+    seq: bigint('seq', {mode: 'number'}).notNull(),
+    /** pending → delivered | failed; `leased_until` marks one being sent. */
+    status: text('status').notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', {withTimezone: true}).notNull().defaultNow(),
+    leasedUntil: timestamp('leased_until', {withTimezone: true}),
+    lastStatus: integer('last_status'),
+    lastError: text('last_error'),
+    deliveredAt: timestamp('delivered_at', {withTimezone: true}),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('webhook_deliveries_public_id_uk').on(t.publicId),
+    uniqueIndex('webhook_deliveries_once_uk').on(t.webhookId, t.agentId, t.seq),
+    index('webhook_deliveries_due_idx').on(t.status, t.nextAttemptAt),
+  ],
+);
+
+/** Test-token claims (testnet and sandbox only), counted per account, per IP and per day. */
+export const faucetClaims = pgTable(
+  'faucet_claims',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    chainId: text('chain_id').notNull(),
+    account: text('account').notNull(),
+    ip: text('ip').notNull(),
+    amount: numeric('amount', {precision: 78, scale: 0}).notNull(),
+    /** The UTC day the claim counts against. */
+    day: text('day').notNull(),
+    status: text('status').notNull().default('pending'),
+    txHash: text('tx_hash'),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('faucet_claims_account_day_uk').on(t.chainId, t.account, t.day),
+    index('faucet_claims_ip_day_idx').on(t.ip, t.day),
+    index('faucet_claims_day_idx').on(t.chainId, t.day),
+  ],
+);

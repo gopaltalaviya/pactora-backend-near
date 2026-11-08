@@ -24,6 +24,7 @@
 import {spawn} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import {createWriteStream, mkdirSync, writeFileSync} from 'node:fs';
+import {createServer as createHttpServer} from 'node:http';
 import {createServer} from 'node:net';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -33,7 +34,7 @@ import postgres from 'postgres';
 import {z} from 'zod';
 import {loadConfig} from '@pactora/config';
 import {createDb, closeDb} from '@pactora/db';
-import {PactoraClient} from '@pactora/sdk';
+import {PactoraClient, verifyWebhook} from '@pactora/sdk';
 import {signNep413} from '@pactora/near';
 import {Orchestrator, Worker, buildBrain, describeBrain, confidence} from '@pactora/agent-core';
 import {Indexer} from '../apps/indexer/dist/indexer.js';
@@ -217,6 +218,14 @@ try {
     allowance: '0.5',
   });
 
+  // The test-token faucet (docs/26 F23): its own account with a limited
+  // float — never the token's owner. A full-access key, because ft_transfer
+  // and storage_deposit attach a deposit, which a function-call key cannot.
+  const faucet = await createPerson(root, `${run}-faucet`, '2', {save: keep});
+  await mintTo(root, TOKEN, faucet, 100_000_000);
+  const FAUCET_AMOUNT = 5_000_000n;
+  const webhookKey = randomBytes(32).toString('hex');
+
   // ── 2. services ───────────────────────────────────────────────────────
   const env = {
     ...process.env,
@@ -240,6 +249,15 @@ try {
     // credentials, as in docker-compose.yml); elsewhere only a bucket the
     // operator configured in the environment.
     ...(evidenceStore ? evidenceStore : {}),
+    // Webhooks (docs/26 F9): the api seals hook secrets, the notifier signs
+    // with them. Private targets are allowed because the demo's receiver is
+    // on 127.0.0.1 — local only; production refuses the flag.
+    WEBHOOK_SECRET_KEY: webhookKey,
+    WEBHOOK_ALLOW_PRIVATE: '1',
+    NOTIFIER_IDLE_MS: '200',
+    FAUCET_ACCOUNT_ID: faucet.id,
+    FAUCET_SECRET_KEY: faucet.keyPair.toString(),
+    FAUCET_AMOUNT: String(FAUCET_AMOUNT),
   };
   const logDir = 'artifacts/demo-logs';
   mkdirSync(logDir, {recursive: true});
@@ -259,10 +277,11 @@ try {
     });
     children.push(child);
   };
-  await sql`TRUNCATE agents, jobs, job_events, agent_stats, agent_capabilities, api_keys, payments, signer_txs, signer_keys, signer_wallet_txs, spend_policies, token_transfers, listings, applications, listing_slots, person_actions RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE agents, jobs, job_events, agent_stats, agent_capabilities, api_keys, payments, signer_txs, signer_keys, signer_wallet_txs, spend_policies, token_transfers, listings, applications, listing_slots, person_actions, faucet_claims RESTART IDENTITY CASCADE`;
   await sql`DELETE FROM indexer_cursor`;
   start('signer', 'apps/signer/dist/main.js');
   start('api', 'apps/api/dist/main.js');
+  start('notifier', 'apps/notifier/dist/main.js');
   const waitFor = async (url, label) => {
     for (let i = 0; i < 120; i++) {
       try {
@@ -491,6 +510,27 @@ try {
   // different prices; selecting both creates two ordinary escrow jobs, each
   // at ITS bid price, funded by the signer. Then both settle, and I1 holds.
   {
+    // ── 8a. a webhook for the orchestrator (docs/26 F9) ─────────────────
+    // A real HTTP receiver on 127.0.0.1; the notifier delivers to it, and
+    // every delivery must verify with the documented recipe.
+    const received = [];
+    const receiver = createHttpServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        received.push({
+          raw,
+          signature: String(req.headers['pactora-signature'] ?? ''),
+          deliveryId: String(req.headers['pactora-delivery'] ?? ''),
+        });
+        res.writeHead(204).end();
+      });
+    });
+    await new Promise((r) => receiver.listen(0, '127.0.0.1', r));
+    const hook = await client.createWebhook({url: `http://127.0.0.1:${receiver.address().port}/pactora`});
+    const hookFrom = (await client.getUpdates({after: 0, limit: 1})).latest;
+    ok(`webhook registered for the orchestrator; its secret was shown once (${hook.secret.slice(0, 10)}…)`);
+
     const bidders = [];
     for (const [i, price] of ['30000', '35000'].entries()) {
       const owner = await createPerson(root, `${run}-bidder${i + 1}`, '3', {save: keep});
@@ -738,6 +778,91 @@ try {
           `I1 holds after the listing: the contract holds exactly what it owes (${chain.formatToken(BigInt(held2))})`,
         )
       : fail(`I1 after the listing: owes ${t2.sum}, holds ${held2}`);
+
+    // ── 8c. the feed and the webhook agree (docs/26 F9) ─────────────────
+    const feed = [];
+    for (let after = 0; ;) {
+      const page = await client.getUpdates({after, limit: 200});
+      feed.push(...page.events);
+      if (!page.more) break;
+      after = page.next;
+    }
+    feed.every((e, i) => e.seq === i + 1)
+      ? ok(`the orchestrator's feed: ${feed.length} events, numbered 1…${feed.length} with no gap`)
+      : fail(`feed seqs: ${feed.map((e) => e.seq).join(',')}`);
+    const fromChain = feed.filter((e) => !e.kind.startsWith('job.'));
+    fromChain.length > 0
+      ? ok(
+          `the indexer's chain events are in the same feed (${[...new Set(fromChain.map((e) => e.kind))].join(', ')})`,
+        )
+      : fail('no chain events in the feed');
+    const due = feed.filter((e) => e.seq > hookFrom);
+    for (let i = 0; i < 60 && received.length < due.length; i++) await sleep(250);
+    const bodies = received.map((r) => JSON.parse(r.raw));
+    const allSigned = received.every((r) => verifyWebhook(hook.secret, r.signature, r.deliveryId, r.raw));
+    const sameSeqs =
+      JSON.stringify([...new Set(bodies.map((b) => b.seq))].sort((a, b) => a - b)) ===
+      JSON.stringify(due.map((e) => e.seq));
+    allSigned && sameSeqs && received.length >= due.length
+      ? ok(
+          `the webhook received all ${due.length} events after it was made, each signature verified with the documented recipe`,
+        )
+      : fail(
+          `webhook: ${received.length} received for ${due.length} due, signed=${allSigned}, same=${sameSeqs}`,
+        );
+    !verifyWebhook('whsec_wrong', received[0].signature, received[0].deliveryId, received[0].raw) &&
+    !verifyWebhook(hook.secret, received[0].signature, received[0].deliveryId, `${received[0].raw} `)
+      ? ok('a delivery with another secret, or a changed body, does not verify')
+      : fail('a forged delivery verified');
+    receiver.close();
+  }
+
+  // ── 8d. the test-token faucet, on chain (docs/26 F23) ─────────────────
+  // A brand-new person, unknown to the token: the faucet registers them
+  // (storage_deposit) and sends exactly the claim, from its own float.
+  {
+    const claimer = await createPerson(root, `${run}-claimer`, '1', {save: keep});
+    const ch = await post('/v1/session/challenge', {accountId: claimer.id});
+    const signed = await signNep413({
+      accountId: claimer.id,
+      keyPair: claimer.keyPair,
+      message: ch.message,
+      recipient: ch.recipient,
+      nonce: new Uint8Array(Buffer.from(ch.nonce, 'hex')),
+    });
+    const {token: session} = await post('/v1/session', {
+      accountId: claimer.id,
+      nonce: ch.nonce,
+      publicKey: signed.publicKey,
+      signature: signed.signature,
+    });
+    const claimFaucet = () =>
+      fetch(`${base}/v1/faucet`, {method: 'POST', headers: {authorization: `Bearer ${session}`}});
+    const floatBefore = BigInt(await view(root.provider, TOKEN, 'ft_balance_of', {account_id: faucet.id}));
+    const first = await claimFaucet();
+    const firstBody = await first.json();
+    const got = BigInt(await view(root.provider, TOKEN, 'ft_balance_of', {account_id: claimer.id}));
+    const floatAfter = BigInt(await view(root.provider, TOKEN, 'ft_balance_of', {account_id: faucet.id}));
+    first.status === 201 &&
+    got === FAUCET_AMOUNT &&
+    floatBefore - floatAfter === FAUCET_AMOUNT &&
+    firstBody.registered
+      ? ok(
+          `faucet: a new account was registered with the token and received exactly ${chain.formatToken(got)} from ${firstBody.from} (${txLink(firstBody.explorerUrl)})`,
+        )
+      : fail(
+          `faucet: ${first.status} ${JSON.stringify(firstBody)}; got ${got}, float moved ${floatBefore - floatAfter}`,
+        );
+    const second = await claimFaucet();
+    const secondBody = await second.json();
+    const gotAfter = BigInt(await view(root.provider, TOKEN, 'ft_balance_of', {account_id: claimer.id}));
+    second.status === 409 && gotAfter === got
+      ? ok(`a second claim the same day is refused (${secondBody.code}) and nothing more is sent`)
+      : fail(`second faucet claim: ${second.status} ${JSON.stringify(secondBody)}`);
+    const owner = await view(root.provider, TOKEN, 'owner');
+    owner !== faucet.id
+      ? ok(`the faucet's account is not the token's owner (${owner}): it can only give what its float holds`)
+      : fail('the faucet is the token owner');
   }
 
   // ── 9. the attack (DEMO_ATTACK=0 skips it) ────────────────────────────

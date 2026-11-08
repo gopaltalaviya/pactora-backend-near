@@ -3,9 +3,17 @@ import {nearClient} from '@pactora/near';
 import {z} from 'zod';
 import {loadConfig} from '@pactora/config';
 import {closeDb, createDb} from '@pactora/db';
-import {buildInfo, createMetrics, env, installShutdown, loadEnv, serviceLogger} from '@pactora/service';
+import {
+  buildInfo,
+  createMetrics,
+  env,
+  installShutdown,
+  loadEnv,
+  parseSecretKey,
+  serviceLogger,
+} from '@pactora/service';
 import {buildApp} from './app.js';
-import {makeSignerSubmit, makeSignerWalletKeys} from './submit.js';
+import {makeSignerFaucet, makeSignerSubmit, makeSignerWalletKeys} from './submit.js';
 import {
   makeBudgetReader,
   makeDisputeBondReader,
@@ -61,6 +69,24 @@ const Env = z
     OBJECT_STORE_FORCE_PATH_STYLE: env.flag(),
     /** Server-side encryption on every object; `none` only for a store that cannot (documented). */
     OBJECT_STORE_SSE: z.enum(['AES256', 'aws:kms', 'none']).default('AES256'),
+    /** Webhooks (docs/26 F9): 32 random bytes, 64 hex or 44 base64, that seal each hook's secret. Unset: no webhooks. */
+    WEBHOOK_SECRET_KEY: z
+      .string()
+      .refine((v) => {
+        try {
+          parseSecretKey(v);
+          return true;
+        } catch {
+          return false;
+        }
+      }, 'WEBHOOK_SECRET_KEY must be 32 random bytes: 64 hex characters or 44 base64 characters')
+      .optional(),
+    /** Local development only: let webhooks target http and private addresses. Refused in production. */
+    WEBHOOK_ALLOW_PRIVATE: env.flag(),
+    /** The test-token faucet (testnet and sandbox only), in the token's base units. */
+    FAUCET_AMOUNT: z.coerce.bigint().positive().default(5_000_000n),
+    FAUCET_PER_IP_PER_DAY: env.positiveInt(5),
+    FAUCET_DAILY_CAP: z.coerce.bigint().positive().default(500_000_000n),
   })
   // In production the browser origins must be named: `*` is fine for a local
   // demo and wrong for a deployment with a real front end.
@@ -73,6 +99,14 @@ const Env = z
   .refine((e) => e.NODE_ENV !== 'production' || e.EVIDENCE_UPLOADS === 'off' || e.OBJECT_STORE_BUCKET, {
     message: 'OBJECT_STORE_BUCKET is required when NODE_ENV=production and EVIDENCE_UPLOADS=on',
     path: ['OBJECT_STORE_BUCKET'],
+  })
+  .refine((e) => e.NODE_ENV !== 'production' || !e.WEBHOOK_ALLOW_PRIVATE, {
+    message: 'WEBHOOK_ALLOW_PRIVATE is for local development and is refused when NODE_ENV=production',
+    path: ['WEBHOOK_ALLOW_PRIVATE'],
+  })
+  .refine((e) => e.FAUCET_AMOUNT <= e.FAUCET_DAILY_CAP, {
+    message: 'FAUCET_AMOUNT must not exceed FAUCET_DAILY_CAP',
+    path: ['FAUCET_AMOUNT'],
   })
   .refine((e) => Boolean(e.OBJECT_STORE_ACCESS_KEY_ID) === Boolean(e.OBJECT_STORE_SECRET_ACCESS_KEY), {
     message: 'set OBJECT_STORE_ACCESS_KEY_ID and OBJECT_STORE_SECRET_ACCESS_KEY together, or neither',
@@ -160,8 +194,19 @@ if (objectStore) {
   );
 }
 
+const signerDeps = {
+  signerUrl: cfg.SIGNER_URL,
+  ...(cfg.SIGNER_TOKEN ? {signerToken: cfg.SIGNER_TOKEN} : {}),
+  timeoutMs: cfg.SIGNER_TIMEOUT_MS,
+  config,
+};
 const app = await buildApp({
   ...(objectStore ? {objectStore} : {}),
+  ...(cfg.WEBHOOK_SECRET_KEY ? {webhookSecretKey: parseSecretKey(cfg.WEBHOOK_SECRET_KEY)} : {}),
+  ...(cfg.WEBHOOK_ALLOW_PRIVATE ? {webhookTargetPolicy: {allowHttp: true, allowPrivate: true}} : {}),
+  // Only where every enabled chain is a test chain; the route refuses others anyway.
+  ...(Object.values(config.chains).every((c) => c.testnet) ? {faucetSend: makeSignerFaucet(signerDeps)} : {}),
+  faucet: {amount: cfg.FAUCET_AMOUNT, perIpPerDay: cfg.FAUCET_PER_IP_PER_DAY, dailyCap: cfg.FAUCET_DAILY_CAP},
   db,
   chains: config.chains,
   defaultChainId: config.defaultChainId,

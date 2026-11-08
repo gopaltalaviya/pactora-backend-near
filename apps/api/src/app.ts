@@ -23,6 +23,11 @@ import {registerSessionRoutes} from './routes/session.js';
 import {registerFileRoutes} from './routes/files.js';
 import {registerDraftRoutes} from './routes/drafts.js';
 import {registerMessageRoutes} from './routes/messages.js';
+import {registerAgentEventRoutes} from './routes/agent-events.js';
+import {registerWebhookRoutes} from './routes/webhooks.js';
+import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
+import type {FaucetSend} from './submit.js';
+import type {TargetPolicy} from '@pactora/service';
 import {jobsReadyToSettle, settleAcceptedDraft} from './evidence.js';
 import type {ObjectStore} from '@pactora/storage';
 import {sweepExpiredSessions} from './auth.js';
@@ -117,6 +122,15 @@ export interface AppDeps {
    * default 15 s, 0 = never.
    */
   draftSettleSweepMs?: number;
+  /** How often a waiting GET /v1/events looks again; default 500 ms. */
+  eventsPollMs?: number;
+  /** WEBHOOK_SECRET_KEY's 32 bytes; omitted, POST /v1/webhooks answers 503. */
+  webhookSecretKey?: Buffer;
+  /** Local development only: allow http and private webhook targets. */
+  webhookTargetPolicy?: TargetPolicy;
+  /** The signer's faucet (testnet and sandbox only); omitted, POST /v1/faucet answers 503. */
+  faucetSend?: FaucetSend;
+  faucet?: FaucetConfig;
   /** Called for every route as it is registered — the docs test lists them. */
   onRoute?: (route: {method: string | string[]; url: string}) => void;
 }
@@ -345,6 +359,21 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
   await registerDraftRoutes(app, {db: deps.db, chains: deps.chains, bus});
   await registerMessageRoutes(app, {db: deps.db, chains: deps.chains, bus});
+  await registerAgentEventRoutes(app, {
+    db: deps.db,
+    ...(deps.eventsPollMs ? {pollMs: deps.eventsPollMs} : {}),
+  });
+  await registerWebhookRoutes(app, {
+    db: deps.db,
+    ...(deps.webhookSecretKey ? {secretKey: deps.webhookSecretKey} : {}),
+    ...(deps.webhookTargetPolicy ? {targetPolicy: deps.webhookTargetPolicy} : {}),
+  });
+  await registerFaucetRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    ...(deps.faucetSend ? {send: deps.faucetSend} : {}),
+    config: deps.faucet ?? {amount: 5_000_000n, perIpPerDay: 5, dailyCap: 500_000_000n},
+  });
   await registerListingRoutes(app, {
     db: deps.db,
     chains: deps.chains,

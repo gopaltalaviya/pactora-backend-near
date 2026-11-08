@@ -9,6 +9,7 @@ import {
   type Metrics,
 } from '@pactora/service';
 import {authorised} from './auth.js';
+import type {Faucet} from './faucet.js';
 import type {KeyStore} from './keystore.js';
 import type {SignerService, SignRequest} from './signer.js';
 
@@ -58,7 +59,15 @@ export interface SignerAppDeps {
   metricsToken?: string;
   trustProxy?: boolean | number;
   logger?: {warn: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void};
+  /** Test tokens from a separate faucet account (testnet and sandbox only); none → 503. */
+  faucet?: Faucet;
 }
+
+/** POST /faucet — the API has already applied the claim limits. */
+export const FaucetBody = z.object({
+  receiverId: z.string().regex(ACCOUNT_ID_RE, 'a NEAR account id'),
+  amount: z.string().regex(/^[1-9]\d{0,38}$/, 'a positive base-unit integer'),
+});
 
 export function buildSignerApp(deps: SignerAppDeps): FastifyInstance {
   const app = Fastify({
@@ -170,6 +179,19 @@ export function buildSignerApp(deps: SignerAppDeps): FastifyInstance {
     const body = AcceptBody.parse(request.body ?? {});
     const result = await deps.service.acceptWallet(body);
     return reply.send(result);
+  });
+
+  app.post('/faucet', async (request, reply) => {
+    guard(request.headers.authorization);
+    const body = FaucetBody.parse(request.body ?? {});
+    if (!deps.faucet) {
+      throw new PactoraError(
+        ErrorCode.UPSTREAM_UNAVAILABLE,
+        'no faucet account is configured on this signer',
+      );
+    }
+    const result = await deps.faucet.send(body.receiverId, BigInt(body.amount));
+    return reply.send({...result, from: deps.faucet.accountId});
   });
 
   return app;

@@ -91,3 +91,31 @@ export async function keeperAccount(
   }
   return {accountId, key: keyPairKey(keyPair)};
 }
+
+/**
+ * `FAUCET_ACCOUNT_ID` with `FAUCET_SECRET_KEY` = `ed25519:...`: the test-token
+ * faucet (docs/26 F23). Testnet and sandbox only, so a raw key is all it
+ * takes; on any other chain a configured faucet refuses to start. No account
+ * → no faucet. It must not be the token's owner (the API's startup check
+ * reads the token's owner and refuses that).
+ */
+export function faucetAccount(env: NodeJS.ProcessEnv, testnet: boolean): ServiceAccount | undefined {
+  const accountId = env['FAUCET_ACCOUNT_ID'];
+  const raw = env['FAUCET_SECRET_KEY'];
+  if (!accountId) {
+    if (raw) throw new Error('FAUCET_SECRET_KEY is set but FAUCET_ACCOUNT_ID is not');
+    return undefined;
+  }
+  if (!testnet)
+    throw new Error('FAUCET_ACCOUNT_ID is set on a chain that is not a testnet — the faucet is test-only');
+  if (!isAccountId(accountId)) throw new Error(`FAUCET_ACCOUNT_ID "${accountId}" is not a NEAR account id`);
+  if (!raw) throw new Error('FAUCET_ACCOUNT_ID is set but FAUCET_SECRET_KEY is not');
+  if (!raw.startsWith('ed25519:')) throw new Error('FAUCET_SECRET_KEY must be an ed25519:<base58> key');
+  let keyPair: KeyPair;
+  try {
+    keyPair = KeyPair.fromString(raw as `ed25519:${string}`);
+  } catch {
+    throw new Error('FAUCET_SECRET_KEY is not a valid ed25519 key');
+  }
+  return {accountId, key: keyPairKey(keyPair)};
+}

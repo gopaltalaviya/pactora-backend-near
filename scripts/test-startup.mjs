@@ -45,10 +45,76 @@ const ENTRY = {
   api: 'apps/api/dist/main.js',
   signer: 'apps/signer/dist/main.js',
   indexer: 'apps/indexer/dist/main.js',
+  notifier: 'apps/notifier/dist/main.js',
 };
+
+/** 32 random-looking bytes, hex: a WEBHOOK_SECRET_KEY the check accepts. */
+const GOOD_WEBHOOK_KEY = '7e'.repeat(32);
 
 /** [service, what is wrong, env on top of BASE, what the refusal must say] */
 const CASES = [
+  // docs/26 F9, F23 (branch human-work)
+  [
+    'api',
+    'WEBHOOK_SECRET_KEY too weak',
+    {DATABASE_URL: CLOSED_DB, WEBHOOK_SECRET_KEY: 'a passphrase'},
+    /WEBHOOK_SECRET_KEY must be 32/,
+  ],
+  [
+    'api',
+    'production allowing private webhook targets',
+    {
+      NODE_ENV: 'production',
+      DATABASE_URL: CLOSED_DB,
+      CORS_ORIGINS: 'https://p.example',
+      EVIDENCE_UPLOADS: 'off',
+      WEBHOOK_ALLOW_PRIVATE: '1',
+    },
+    /WEBHOOK_ALLOW_PRIVATE is for local development/,
+  ],
+  [
+    'api',
+    'a faucet claim above the daily cap',
+    {DATABASE_URL: CLOSED_DB, FAUCET_AMOUNT: '10', FAUCET_DAILY_CAP: '5'},
+    /FAUCET_AMOUNT must not exceed FAUCET_DAILY_CAP/,
+  ],
+  ['notifier', 'no DATABASE_URL', {WEBHOOK_SECRET_KEY: GOOD_WEBHOOK_KEY}, /DATABASE_URL/],
+  ['notifier', 'no WEBHOOK_SECRET_KEY', {DATABASE_URL: CLOSED_DB}, /WEBHOOK_SECRET_KEY/],
+  [
+    'notifier',
+    'WEBHOOK_SECRET_KEY too weak',
+    {DATABASE_URL: CLOSED_DB, WEBHOOK_SECRET_KEY: 'ab'.repeat(31)},
+    /WEBHOOK_SECRET_KEY must be 32/,
+  ],
+  [
+    'notifier',
+    'production allowing private webhook targets',
+    {
+      NODE_ENV: 'production',
+      DATABASE_URL: CLOSED_DB,
+      WEBHOOK_SECRET_KEY: GOOD_WEBHOOK_KEY,
+      WEBHOOK_ALLOW_PRIVATE: '1',
+    },
+    /WEBHOOK_ALLOW_PRIVATE is for local development/,
+  ],
+  [
+    'notifier',
+    'a database that does not answer',
+    {DATABASE_URL: CLOSED_DB, WEBHOOK_SECRET_KEY: GOOD_WEBHOOK_KEY},
+    /ECONNREFUSED|connect|database/i,
+  ],
+  [
+    'signer',
+    'FAUCET_SECRET_KEY malformed',
+    {DATABASE_URL: CLOSED_DB, FAUCET_SECRET_KEY: 'not-a-key'},
+    /FAUCET_SECRET_KEY/,
+  ],
+  [
+    'signer',
+    'FAUCET_MAX_PER_SEND not a number',
+    {DATABASE_URL: CLOSED_DB, FAUCET_MAX_PER_SEND: 'lots'},
+    /FAUCET_MAX_PER_SEND/,
+  ],
   ['api', 'no DATABASE_URL', {}, /DATABASE_URL/],
   ['api', 'DATABASE_URL is not postgres', {DATABASE_URL: 'mysql://x@127.0.0.1/db'}, /DATABASE_URL.*postgres/],
   [

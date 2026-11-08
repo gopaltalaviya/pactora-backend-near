@@ -6,7 +6,8 @@ import {nearClient} from '@pactora/near';
 import {buildInfo, createMetrics, env, installShutdown, loadEnv, serviceLogger} from '@pactora/service';
 import {buildSignerApp} from './app.js';
 import {awsKms, type KmsClient} from './kms.js';
-import {keeperAccount, signerKeys} from './keysource.js';
+import {faucetAccount, keeperAccount, signerKeys} from './keysource.js';
+import {makeFaucet} from './faucet.js';
 import {SignerService} from './signer.js';
 import {chainKeeper} from './keeper.js';
 import {WalletWatch, type WatchedWallet} from './wallets.js';
@@ -41,6 +42,14 @@ const Env = z.object({
   KEEPER_SECRET_KEY: env.nearSecretKey().optional(),
   KEEPER_KMS_KEY_ID: z.string().min(1).optional(),
   KEEPER_INTERVAL_MS: env.positiveInt(15_000),
+  /** The test-token faucet (testnet and sandbox only): a separate account with a limited float. */
+  FAUCET_ACCOUNT_ID: z.string().optional(),
+  FAUCET_SECRET_KEY: env.nearSecretKey().optional(),
+  /** The most one send may carry, in the token's base units; the API's per-claim amount must fit. */
+  FAUCET_MAX_PER_SEND: z
+    .string()
+    .regex(/^[1-9]\d{0,38}$/, 'FAUCET_MAX_PER_SEND must be a positive whole number of base units')
+    .default('10000000'),
   /** Below this many yoctoNEAR an account is "low" on /health. Default 0.1 NEAR (ten 100 Tgas calls). */
   WALLET_LOW_BALANCE_YOCTO: z
     .string()
@@ -88,6 +97,19 @@ if (keys.kind.includes('dev-credentials')) {
   logger.info({kind: keys.kind, chainId: chain.chainId}, 'keys loaded');
 }
 const keeper = await keeperAccount(process.env, chain.testnet, kms);
+const faucetKey = faucetAccount(process.env, chain.testnet);
+if (faucetKey) {
+  // Never the token's owner: that key could mint without limit.
+  const owner = await near.view<string>(chain.contracts.PaymentToken, 'owner', {}).catch(() => null);
+  if (owner === faucetKey.accountId) {
+    throw new Error(
+      `FAUCET_ACCOUNT_ID ${faucetKey.accountId} is the payment token's owner — use a separate account holding a limited float`,
+    );
+  }
+}
+const faucet = faucetKey
+  ? makeFaucet({near, chain, account: faucetKey, maxPerSend: BigInt(cfg.FAUCET_MAX_PER_SEND)})
+  : undefined;
 
 const service = new SignerService({db, locks, chain, keys, near, logger});
 const metrics = createMetrics('signer');
@@ -99,6 +121,7 @@ const walletWatch = new WalletWatch({
   wallets: async (): Promise<WatchedWallet[]> => [
     ...(await keys.accounts()).map((account) => ({account, role: 'signing-key'})),
     ...(keeper ? [{account: keeper.accountId, role: 'keeper'}] : []),
+    ...(faucet ? [{account: faucet.accountId, role: 'faucet'}] : []),
   ],
   lowYocto: BigInt(cfg.WALLET_LOW_BALANCE_YOCTO),
   gauge: metrics.gauge('signer_wallet_balance', 'NEAR balance of an account the signer sends from', [
@@ -120,6 +143,7 @@ const app = buildSignerApp({
   metrics,
   logger,
   wallets: () => walletWatch.snapshot(),
+  ...(faucet ? {faucet} : {}),
   checks: {
     database: () => db.execute(sql`SELECT 1`),
     rpc: () => near.finalBlock(),

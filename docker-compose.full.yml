@@ -120,6 +120,11 @@ services:
       KEEPER_ACCOUNT_ID: ${KEEPER_ACCOUNT_ID:-}
       KEEPER_SECRET_KEY: ${KEEPER_SECRET_KEY:-}
       KEEPER_INTERVAL_MS: ${KEEPER_INTERVAL_MS:-15000}
+      # The test-token faucet (testnet only; docs/26 F23): a separate account
+      # holding a limited float, never the token's owner. None → no faucet.
+      FAUCET_ACCOUNT_ID: ${FAUCET_ACCOUNT_ID:-}
+      FAUCET_SECRET_KEY: ${FAUCET_SECRET_KEY:-}
+      FAUCET_MAX_PER_SEND: ${FAUCET_MAX_PER_SEND:-10000000}
       # Off testnet: AWS KMS instead of the raw keys above — docs/21.
       SIGNER_KMS_KEYS: ${SIGNER_KMS_KEYS:-}
       KEEPER_KMS_KEY_ID: ${KEEPER_KMS_KEY_ID:-}
@@ -151,6 +156,24 @@ services:
       retries: 12
     restart: unless-stopped
 
+  # Webhook delivery (docs/26 F9). Talks to the database and to the
+  # internet only; it has no port of its own beyond its health check.
+  notifier:
+    logging: *logging
+    build: {<<: *build, args: {SERVICE: '@pactora/notifier'}}
+    environment:
+      DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?set WEBHOOK_SECRET_KEY (openssl rand -hex 32), shared with the api}
+      NOTIFIER_HEALTH_PORT: 9091
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:9091/health']
+      interval: 5s
+      retries: 12
+    restart: unless-stopped
+
   api:
     logging: *logging
     build: {<<: *build, args: {SERVICE: '@pactora/api'}}
@@ -158,6 +181,11 @@ services:
       <<: *chain
       SIGNER_URL: http://signer:7070
       SIGNER_TOKEN: ${SIGNER_TOKEN:?set SIGNER_TOKEN (32+ characters), shared with the signer}
+      # Seals webhook secrets; the notifier needs the same value (docs/26 F9).
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?set WEBHOOK_SECRET_KEY (openssl rand -hex 32), shared with the notifier}
+      FAUCET_AMOUNT: ${FAUCET_AMOUNT:-5000000}
+      FAUCET_PER_IP_PER_DAY: ${FAUCET_PER_IP_PER_DAY:-5}
+      FAUCET_DAILY_CAP: ${FAUCET_DAILY_CAP:-500000000}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       TRUST_PROXY: ${TRUST_PROXY:-0}
       # Live runs: a model key (your quota) and a per-orchestrator daily cap.

@@ -31,6 +31,13 @@ DEFAULT_CHAIN=near:testnet
 # The keeper (optional, recommended): its own gas-only testnet account.
 KEEPER_ACCOUNT_ID=
 KEEPER_SECRET_KEY=       # ed25519:… — testnet only
+# Branch human-work only (docs/26). Both required by docker-compose.full.yml there:
+OBJECT_STORE_SECRET_ACCESS_KEY=  # openssl rand -hex 24 — the evidence MinIO's password
+WEBHOOK_SECRET_KEY=      # openssl rand -hex 32 — seals webhook secrets; shared by api and notifier; keep it, or every hook must be re-created
+# Optional, testnet: the test-token faucet — a SEPARATE account with a limited
+# mUSDC float and a little NEAR, never the token's owner (docs/08).
+FAUCET_ACCOUNT_ID=
+FAUCET_SECRET_KEY=       # ed25519:…
 # Optional: RPC_URL_TESTNET, NEARDATA_API_KEY; model keys for live runs (§3b).
 ```
 
@@ -83,7 +90,9 @@ in this order — rehearsed end to end on a laptop on 2026-10-26 (PROGRESS.md):
 1. **On your machine**, `agentx-backend` on `v3`:
    ```bash
    node scripts/sync-chain-facts.mjs --check          # chain/ is v3's
-   SIGNER_TOKEN=placeholder-placeholder-placeholder-00      docker compose -f docker-compose.full.yml --profile hosted build
+   SIGNER_TOKEN=placeholder-placeholder-placeholder-00 \
+     OBJECT_STORE_SECRET_ACCESS_KEY=placeholder WEBHOOK_SECRET_KEY=placeholder \
+     docker compose -f docker-compose.full.yml --profile hosted build   # human-work needs the two placeholders too
    docker save $(docker images --format '{{.Repository}}' | grep agentx-full)      postgres:16-alpine caddy:2-alpine alpine | gzip > agentx-v3-images.tar.gz
    scp agentx-v3-images.tar.gz docker-compose.full.yml deploy/vps/* root@<server>:agentx/
    ```

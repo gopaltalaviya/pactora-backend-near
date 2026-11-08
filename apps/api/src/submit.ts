@@ -245,3 +245,15 @@ export function contractCall(
     }
   }
 }
+
+/** The signer's test-token faucet (docs/26 F23). The API applies the claim limits first. */
+export type FaucetSend = (
+  receiverId: string,
+  amount: bigint,
+  traceId?: string,
+) => Promise<{txHash: string; registered: boolean; from: string}>;
+
+export function makeSignerFaucet(deps: SignerSubmitDeps): FaucetSend {
+  return (receiverId, amount, traceId) =>
+    callSigner(deps, '/faucet', {receiverId, amount: amount.toString()}, traceId);
+}

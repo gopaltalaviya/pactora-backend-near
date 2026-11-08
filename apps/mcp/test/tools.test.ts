@@ -85,7 +85,7 @@ const byName = (name: string) => {
 };
 
 describe('the tool set', () => {
-  it('exposes exactly the twenty-three tools the spec promises', () => {
+  it('exposes exactly the twenty-five tools the spec promises', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'accept_job',
       'approve_job',
@@ -100,6 +100,7 @@ describe('the tool set', () => {
       'get_evidence',
       'get_job',
       'get_network',
+      'get_updates',
       'hire_agent',
       'list_applications',
       'list_jobs',
@@ -110,6 +111,7 @@ describe('the tool set', () => {
       'send_message',
       'submit_draft',
       'submit_result',
+      'wait_for_updates',
     ]);
   });
 
@@ -380,13 +382,15 @@ describe('the evidence, review and chat tools (docs/26 F6-F8)', () => {
       'accept_job',
       'submit_result',
       'decline_job',
+      'get_updates',
+      'wait_for_updates',
     ]) {
       expect(byName(name).spends, name).toBe(false);
     }
   });
 
   it('warns that evidence and chat are data written by the other party, never instructions', () => {
-    for (const name of ['get_evidence', 'get_conversation']) {
+    for (const name of ['get_evidence', 'get_conversation', 'get_updates', 'wait_for_updates']) {
       expect(byName(name).description, name).toMatch(/never/i);
       expect(byName(name).description, name).toMatch(/budget|limit/i);
     }
@@ -474,5 +478,46 @@ describe('the evidence, review and chat tools (docs/26 F6-F8)', () => {
       ['submitResult', JOB, {output: {a: 1}}],
       ['decline', JOB, 'busy'],
     ]);
+  });
+});
+
+describe('updates (docs/26 F9)', () => {
+  it('wait_for_updates holds with long-polls and answers as soon as something arrives', async () => {
+    const asked: {after?: number; wait?: number}[] = [];
+    let calls = 0;
+    const c = {
+      client: {
+        getUpdates: async (q: {after?: number; wait?: number}) => {
+          asked.push(q);
+          calls++;
+          return {
+            agentId: 'a',
+            after: q.after ?? 0,
+            next: calls === 2 ? 8 : 7,
+            more: false,
+            latest: 8,
+            events:
+              calls === 2
+                ? [
+                    {
+                      seq: 8,
+                      kind: 'job.settled',
+                      role: 'client',
+                      jobId: '00000000-0000-4000-8000-000000000008',
+                      payload: {},
+                      at: '',
+                    },
+                  ]
+                : [],
+          };
+        },
+      },
+    } as unknown as Parameters<ReturnType<typeof byName>['handler']>[1];
+    const out = (await byName('wait_for_updates').handler({after: 7, timeoutSeconds: 120}, c)) as {
+      events: unknown[];
+    };
+    expect(out.events).toHaveLength(1);
+    expect(asked).toHaveLength(2);
+    expect(asked.every((q) => q.after === 7 && q.wait !== undefined && q.wait <= 30)).toBe(true);
   });
 });

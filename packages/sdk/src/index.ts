@@ -1,3 +1,4 @@
+import {createHmac, timingSafeEqual} from 'node:crypto';
 import {
   PactoraError,
   ErrorCode,
@@ -670,6 +671,43 @@ export class PactoraClient {
     return this.request('GET', `/v1/jobs/${jobId}/messages`, {});
   }
 
+  // ── events and webhooks (docs/26 F9) ─────────────────────────────────
+
+  /**
+   * Everything that happened on this agent's jobs after `after` (a `seq` you
+   * already handled; 0 for the start), oldest first, numbered with no gaps.
+   * With `wait` (≤ 30 s) the call holds until something new arrives. Keep
+   * the last `seq` you handled and pass it next time: nothing is missed or
+   * repeated, across restarts.
+   */
+  getUpdates(q: {after?: number; limit?: number; wait?: number} = {}): Promise<UpdatesPage> {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined) params.set(k, String(v));
+    const qs = params.toString();
+    return this.request('GET', `/v1/events${qs ? `?${qs}` : ''}`, {});
+  }
+
+  /**
+   * Register a webhook. The answer carries the signing `secret` ONCE: keep it
+   * and check every delivery with `verifyWebhook`.
+   */
+  createWebhook(hook: {url: string; kinds?: string[]}): Promise<Webhook & {secret: string}> {
+    return this.request('POST', '/v1/webhooks', {body: hook});
+  }
+
+  listWebhooks(): Promise<{webhooks: Webhook[]}> {
+    return this.request('GET', '/v1/webhooks', {});
+  }
+
+  deleteWebhook(webhookId: string): Promise<{webhookId: string; deleted: true}> {
+    return this.request('DELETE', `/v1/webhooks/${webhookId}`, {});
+  }
+
+  /** The last 50 deliveries of one webhook, newest first: what was sent, and why a try failed. */
+  webhookDeliveries(webhookId: string): Promise<{webhookId: string; deliveries: WebhookDelivery[]}> {
+    return this.request('GET', `/v1/webhooks/${webhookId}/deliveries`, {});
+  }
+
   // ── listings (docs/26 F4) ──────────────────────────────────────────────
 
   /**
@@ -1111,3 +1149,74 @@ async function deriveKey(identity: string, workerAgentId: number, spec: JobSpec)
 }
 
 export {PactoraError, ErrorCode};
+
+// ── events and webhooks (docs/26 F9) ───────────────────────────────────────
+
+export interface AgentUpdate {
+  seq: number;
+  kind: string;
+  role: 'client' | 'worker';
+  jobId: string;
+  payload: Record<string, unknown>;
+  at: string;
+}
+
+export interface UpdatesPage {
+  agentId: string;
+  after: number;
+  /** Pass as `after` next time. */
+  next: number;
+  more: boolean;
+  latest: number;
+  events: AgentUpdate[];
+}
+
+export interface Webhook {
+  webhookId: string;
+  url: string;
+  kinds: string[];
+  active: boolean;
+  consecutiveFailures: number;
+  disabledReason: string | null;
+  createdAt: string;
+}
+
+export interface WebhookDelivery {
+  deliveryId: string;
+  seq: number;
+  status: 'pending' | 'delivered' | 'failed';
+  attempts: number;
+  lastStatus: number | null;
+  lastError: string | null;
+  nextAttemptAt: string | null;
+  deliveredAt: string | null;
+}
+
+/**
+ * Check a webhook delivery before trusting it: `signature` is the
+ * `Pactora-Signature` header, `deliveryId` the `Pactora-Delivery` header,
+ * `rawBody` the request body exactly as received (not re-serialised).
+ * True only for a matching HMAC-SHA256 no more than `toleranceS` (300) from
+ * now. A delivery may arrive twice: keep the ids you have handled.
+ */
+export function verifyWebhook(
+  secret: string,
+  signature: string,
+  deliveryId: string,
+  rawBody: string,
+  opts: {nowS?: number; toleranceS?: number} = {},
+): boolean {
+  const parts = Object.fromEntries(
+    signature.split(',').map((p) => {
+      const i = p.indexOf('=');
+      return [p.slice(0, i).trim(), p.slice(i + 1).trim()];
+    }),
+  );
+  const t = Number(parts['t']);
+  const given = parts['v1'];
+  if (!Number.isInteger(t) || typeof given !== 'string' || !/^[0-9a-f]{64}$/.test(given)) return false;
+  const now = opts.nowS ?? Math.floor(Date.now() / 1000);
+  if (Math.abs(now - t) > (opts.toleranceS ?? 300)) return false;
+  const expected = createHmac('sha256', secret).update(`${t}.${deliveryId}.${rawBody}`).digest();
+  return timingSafeEqual(expected, Buffer.from(given, 'hex'));
+}
