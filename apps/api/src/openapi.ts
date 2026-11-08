@@ -16,6 +16,7 @@ import {WebhookBody} from './routes/webhooks.js';
 import {DirectoryQuery, PartyReviewBody, ProfileBody, ReviewsQuery} from './routes/profiles.js';
 import {CasesQuery, DecisionBody, SimulatedBody, StartBody} from './routes/kyc.js';
 import {HideBody, ProposalBody, VoteBody} from './routes/admin.js';
+import {EmailBody, VerifyBody as EmailVerifyBody} from './routes/channels.js';
 import {
   ApplicationBody,
   ApplicationsQuery,
@@ -444,6 +445,40 @@ export const ROUTES: Route[] = [
       'Parties: review the other party of a job settled on chain: 1-5 and 10-2000 characters, once, within 14 days',
     body: PartyReviewBody,
     status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/me/channels',
+    auth: 'session',
+    summary: 'People: your linked Telegram and email',
+  },
+  {
+    method: 'post',
+    path: '/v1/me/channels/telegram/code',
+    auth: 'session',
+    summary: 'People: a code and a 4-digit number to link a Telegram chat (10 minutes, 5 an hour)',
+    status: 201,
+  },
+  {
+    method: 'post',
+    path: '/v1/me/channels/email',
+    auth: 'session',
+    summary: 'People: send a 6-digit code to an email address',
+    body: EmailBody,
+    status: 202,
+  },
+  {
+    method: 'post',
+    path: '/v1/me/channels/email/verify',
+    auth: 'session',
+    summary: 'People: link the email with its code (3 tries)',
+    body: EmailVerifyBody,
+  },
+  {
+    method: 'delete',
+    path: '/v1/me/channels/:channel',
+    auth: 'session',
+    summary: 'People: unlink telegram or email',
   },
   {
     method: 'get',

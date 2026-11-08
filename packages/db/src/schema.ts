@@ -1244,3 +1244,99 @@ export const complianceAudit = pgTable(
   },
   (t) => [index('compliance_audit_agent_idx').on(t.agentId, t.at)],
 );
+
+// ──────────────── channels: Telegram and email (docs/26 F11, F12) ────────────────
+
+/** A person's verified address on a channel: a Telegram chat id, or an email. */
+export const channelLinks = pgTable(
+  'channel_links',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    channel: text('channel').notNull(),
+    address: text('address').notNull(),
+    /** The last agent_events seq already pushed to this link. */
+    cursorSeq: bigint('cursor_seq', {mode: 'number'}).notNull().default(0),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('channel_links_address_uk').on(t.channel, t.address),
+    uniqueIndex('channel_links_agent_uk').on(t.agentId, t.channel),
+  ],
+);
+
+/**
+ * A linking code: shown in the browser with a 4-digit number, typed into
+ * the channel. 10 minutes; 3 wrong numbers cancel it.
+ */
+export const linkCodes = pgTable(
+  'link_codes',
+  {
+    code: text('code').primaryKey(),
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    channel: text('channel').notNull(),
+    /** The number the person must type in the channel (Telegram) or the code sent (email). */
+    secret: text('secret').notNull(),
+    /** Telegram: the chat that presented the code and must now type the number. */
+    pendingAddress: text('pending_address'),
+    /** Email: the address being verified. */
+    address: text('address'),
+    tries: integer('tries').notNull().default(0),
+    expiresAt: timestamp('expires_at', {withTimezone: true}).notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [index('link_codes_agent_idx').on(t.agentId, t.createdAt)],
+);
+
+/** Bad linking codes per channel address; 5 lock it for 15 minutes, across restarts. */
+export const channelFailures = pgTable(
+  'channel_failures',
+  {
+    channel: text('channel').notNull(),
+    address: text('address').notNull(),
+    failures: integer('failures').notNull().default(0),
+    lockedUntil: timestamp('locked_until', {withTimezone: true}),
+    updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({columns: [t.channel, t.address]})],
+);
+
+/** Inbound updates, once each (the provider's id), handled in order. */
+export const channelInbox = pgTable(
+  'channel_inbox',
+  {
+    channel: text('channel').notNull(),
+    updateId: bigint('update_id', {mode: 'number'}).notNull(),
+    address: text('address').notNull(),
+    text: text('text').notNull().default(''),
+    handled: boolean('handled').notNull().default(false),
+    receivedAt: timestamp('received_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({columns: [t.channel, t.updateId]}),
+    index('channel_inbox_address_idx').on(t.channel, t.address, t.receivedAt),
+  ],
+);
+
+/** Outbound messages: sent once, dropped after 24 h, text scrubbed once sent. */
+export const channelOutbox = pgTable(
+  'channel_outbox',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    channel: text('channel').notNull(),
+    address: text('address').notNull(),
+    body: text('body').notNull(),
+    status: text('status').notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', {withTimezone: true}).notNull().defaultNow(),
+    leasedUntil: timestamp('leased_until', {withTimezone: true}),
+    errorClass: text('error_class'),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    sentAt: timestamp('sent_at', {withTimezone: true}),
+  },
+  (t) => [index('channel_outbox_due_idx').on(t.status, t.nextAttemptAt)],
+);

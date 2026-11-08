@@ -35,6 +35,9 @@
       "path": "apps/notifier"
     },
     {
+      "path": "apps/channels"
+    },
+    {
       "path": "apps/signer"
     },
     {

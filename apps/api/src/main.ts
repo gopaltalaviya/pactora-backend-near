@@ -98,6 +98,13 @@ const Env = z
     /** Where the simulated provider's page lives (the interface). */
     KYC_PAGE_BASE: env.httpUrl().default('http://localhost:3000'),
     /** NEAR accounts that decide compliance cases, comma-separated. Production with screening needs two. */
+    /** The bot's @username when apps/channels runs with TELEGRAM_BOT_TOKEN; unset: no Telegram linking. */
+    TELEGRAM_BOT_USERNAME: z
+      .string()
+      .regex(/^[A-Za-z][A-Za-z0-9_]{4,31}bot$/i, 'TELEGRAM_BOT_USERNAME is a bot username, ending in bot')
+      .optional(),
+    /** Email links can be made: apps/channels has an email provider. */
+    EMAIL_CHANNEL: env.flag(),
     COMPLIANCE_REVIEWERS: z
       .string()
       .default('')
@@ -255,6 +262,8 @@ const app = await buildApp({
   screening: cfg.SANCTIONS_SCREENING === 'on',
   complianceReviewers: cfg.COMPLIANCE_REVIEWERS,
   viewChain: makeChainViewer(config),
+  ...(cfg.TELEGRAM_BOT_USERNAME ? {telegramBot: cfg.TELEGRAM_BOT_USERNAME} : {}),
+  emailChannel: cfg.EMAIL_CHANNEL,
   ...(cfg.WEBHOOK_SECRET_KEY ? {webhookSecretKey: parseSecretKey(cfg.WEBHOOK_SECRET_KEY)} : {}),
   ...(cfg.WEBHOOK_ALLOW_PRIVATE ? {webhookTargetPolicy: {allowHttp: true, allowPrivate: true}} : {}),
   // Only where every enabled chain is a test chain; the route refuses others anyway.

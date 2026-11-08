@@ -185,6 +185,24 @@ importers:
         specifier: ^4.6.6
         version: 4.6.7
 
+  apps/channels:
+    dependencies:
+      '@pactora/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@pactora/service':
+        specifier: workspace:*
+        version: link:../../packages/service
+      drizzle-orm:
+        specifier: ^0.45.3
+        version: 0.45.3(@opentelemetry/api@1.9.1)(postgres@3.4.9)
+      fastify:
+        specifier: ^5.12.6
+        version: 5.12.8
+      zod:
+        specifier: ^4.6.6
+        version: 4.6.7
+
   apps/indexer:
     dependencies:
       '@pactora/config':

@@ -46,6 +46,7 @@ const ENTRY = {
   signer: 'apps/signer/dist/main.js',
   indexer: 'apps/indexer/dist/main.js',
   notifier: 'apps/notifier/dist/main.js',
+  channels: 'apps/channels/dist/main.js',
 };
 
 /** 32 random-looking bytes, hex: a WEBHOOK_SECRET_KEY the check accepts. */
@@ -53,6 +54,26 @@ const GOOD_WEBHOOK_KEY = '7e'.repeat(32);
 
 /** [service, what is wrong, env on top of BASE, what the refusal must say] */
 const CASES = [
+  // docs/26 F11, F12 (branch human-work)
+  ['channels', 'no DATABASE_URL', {}, /DATABASE_URL/],
+  [
+    'channels',
+    'a malformed Telegram token',
+    {DATABASE_URL: CLOSED_DB, TELEGRAM_BOT_TOKEN: 'not-a-token'},
+    /TELEGRAM_BOT_TOKEN is not a bot token/,
+  ],
+  [
+    'channels',
+    'production with the fake email provider',
+    {NODE_ENV: 'production', DATABASE_URL: CLOSED_DB, EMAIL_PROVIDER: 'fake'},
+    /EMAIL_PROVIDER=fake/,
+  ],
+  [
+    'api',
+    'a bot username that is not one',
+    {DATABASE_URL: CLOSED_DB, TELEGRAM_BOT_USERNAME: 'hello'},
+    /TELEGRAM_BOT_USERNAME/,
+  ],
   // docs/26 F13, F14 (branch human-work)
   [
     'api',

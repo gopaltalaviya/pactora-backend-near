@@ -148,6 +148,13 @@
       "when": 1794132258515,
       "tag": "0020_identity_sanctions_standing",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1794138098477,
+      "tag": "0021_channels",
+      "breakpoints": true
     }
   ]
 }

@@ -29,6 +29,7 @@ import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
 import {registerProfileRoutes} from './routes/profiles.js';
 import {kycSweep, registerKycRoutes} from './routes/kyc.js';
 import {registerAdminRoutes} from './routes/admin.js';
+import {registerChannelRoutes} from './routes/channels.js';
 import type {ChainViewer} from './chain-reads.js';
 import type {IdentityProvider, SanctionsIndex} from './compliance.js';
 import type {FaucetSend} from './submit.js';
@@ -148,6 +149,10 @@ export interface AppDeps {
   viewChain?: ChainViewer;
   /** How long the admin console reuses a read of the DAO council; default 30 s. */
   adminCouncilCacheMs?: number;
+  /** The Telegram bot's @username, when apps/channels runs with a token (docs/26 F11). */
+  telegramBot?: string;
+  /** Email links can be made (apps/channels has an email provider). */
+  emailChannel?: boolean;
   /** Called for every route as it is registered — the docs test lists them. */
   onRoute?: (route: {method: string | string[]; url: string}) => void;
 }
@@ -393,6 +398,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.sanctions ? {sanctions: deps.sanctions} : {}),
     screening: deps.screening ?? true,
     reviewers: () => deps.complianceReviewers ?? [],
+  });
+  await registerChannelRoutes(app, {
+    db: deps.db,
+    ...(deps.telegramBot ? {telegramBot: deps.telegramBot} : {}),
+    ...(deps.emailChannel ? {email: true} : {}),
   });
   await registerAdminRoutes(app, {
     db: deps.db,
