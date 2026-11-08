@@ -20,6 +20,7 @@ import {authenticate, authenticateCaller, resolveChainId, type Caller} from '../
 import {personAgentOf} from '../actor.js';
 import {Cursor, page} from '../cursor.js';
 import {lastEventIdOf, streamEventOf, streamEvents, type EventBus} from '../events.js';
+import {acceptedDraftOf, draftDeliveryOf, settleAcceptedDraft, type DraftDelivery} from '../evidence.js';
 
 /** Query for `GET /v1/jobs`. Coerced, because query strings are strings. */
 export const JobListQuery = z.object({
@@ -211,6 +212,8 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       specHash: job.specHash,
       result: job.result,
       resultHash: job.resultHash,
+      /** For a job delivered from an accepted draft, the internal reference to its snapshot. */
+      resultUri: job.resultUri,
       /** The chain committed a different result hash than the delivery stored: approve is refused. */
       resultMismatch: job.resultMismatch,
       clientAgentId: String(job.clientAgentId),
@@ -229,12 +232,16 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
   });
 
   /** Worker accepts. Only the assigned worker, only from `created`. */
-  app.post('/v1/jobs/:id/accept', async (request) =>
-    transition(request, 'accept', 'created', 'accepted', (job, caller) => {
-      if (job.workerAgentId !== caller.agentId) {
-        throw new PactoraError(ErrorCode.FORBIDDEN, 'only the assigned worker may accept');
-      }
-    }),
+  app.post(
+    '/v1/jobs/:id/accept',
+    async (request) =>
+      (
+        await transition(request, 'accept', 'created', 'accepted', (job, caller) => {
+          if (job.workerAgentId !== caller.agentId) {
+            throw new PactoraError(ErrorCode.FORBIDDEN, 'only the assigned worker may accept');
+          }
+        })
+      ).receipt,
   );
 
   /**
@@ -252,55 +259,94 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
    * transaction is not sent, because this runs before the transition submits
    * anything (docs/04 §7.3).
    */
-  app.post('/v1/jobs/:id/result', async (request) =>
-    transition(request, 'submitResult', ['accepted', 'settled'], 'submitted', (job, caller, body) => {
-      if (job.workerAgentId !== caller.agentId) {
-        throw new PactoraError(ErrorCode.FORBIDDEN, 'only the assigned worker may submit a result');
-      }
-      // `settled` is open only to the fast path, where it means "paid up
-      // front, still owed the work". On an escrow job it means the client
-      // has already approved and released — accepting a result then would
-      // let a worker replace the thing that was paid for after the fact.
-      if (job.state === 'settled' && job.path !== 'direct') {
-        throw new PactoraError(
-          ErrorCode.INVALID_STATE,
-          'this job is settled — a result cannot be changed after the payment was released',
-        );
-      }
-      const parsed = JobResult.safeParse(body);
-      if (!parsed.success) {
-        throw new PactoraError(
-          ErrorCode.SCHEMA_MISMATCH,
-          parsed.error.issues.map((i) => i.message).join('; '),
-        );
-      }
+  app.post('/v1/jobs/:id/result', async (request) => {
+    const out = await transition(
+      request,
+      'submitResult',
+      ['accepted', 'settled'],
+      'submitted',
+      async (job, caller, body) => {
+        if (job.workerAgentId !== caller.agentId) {
+          throw new PactoraError(ErrorCode.FORBIDDEN, 'only the assigned worker may submit a result');
+        }
+        // A job with an accepted draft (every listing job needs one) delivers
+        // THAT snapshot: its hash is what the chain commits to, and the body's
+        // output is not read (docs/26 F6, F7).
+        const delivery = job.path === 'escrow' ? await draftDeliveryOf(db, job) : null;
+        if (delivery) return {delivery};
+        // `settled` is open only to the fast path, where it means "paid up
+        // front, still owed the work". On an escrow job it means the client
+        // has already approved and released — accepting a result then would
+        // let a worker replace the thing that was paid for after the fact.
+        if (job.state === 'settled' && job.path !== 'direct') {
+          throw new PactoraError(
+            ErrorCode.INVALID_STATE,
+            'this job is settled — a result cannot be changed after the payment was released',
+          );
+        }
+        const parsed = JobResult.safeParse(body);
+        if (!parsed.success) {
+          throw new PactoraError(
+            ErrorCode.SCHEMA_MISMATCH,
+            parsed.error.issues.map((i) => i.message).join('; '),
+          );
+        }
 
-      const spec = job.spec as JobSpec;
-      const shape = validateShape(parsed.data.output, spec.outputSchema);
-      if (!shape.ok) {
-        throw new PactoraError(
-          ErrorCode.SCHEMA_MISMATCH,
-          `${shape.reason} — the job asked for ${JSON.stringify(spec.outputSchema?.['required'] ?? [])}`,
+        const spec = job.spec as JobSpec;
+        const shape = validateShape(parsed.data.output, spec.outputSchema);
+        if (!shape.ok) {
+          throw new PactoraError(
+            ErrorCode.SCHEMA_MISMATCH,
+            `${shape.reason} — the job asked for ${JSON.stringify(spec.outputSchema?.['required'] ?? [])}`,
+          );
+        }
+        return undefined;
+      },
+    );
+    if (!out.delivered) return out.receipt;
+    // The client's accept_draft is carried out now the chain has its hash:
+    // by the signer for an agent client, offered to sign for a person. A
+    // failure here leaves the job submitted; the sweep retries it.
+    const settlement = await settleAcceptedDraft({db, bus, submit}, out.jobRowId, request.id).catch(
+      (err: unknown) => {
+        request.log.warn(
+          {err, jobId: out.receipt.jobId},
+          'accepted draft not approved yet; the sweep retries',
         );
-      }
-    }),
+        return {status: 'not_ready' as const, reason: err instanceof Error ? err.message : String(err)};
+      },
+    );
+    return {...out.receipt, settlement};
+  });
+
+  app.post(
+    '/v1/jobs/:id/approve',
+    async (request) =>
+      (
+        await transition(request, 'approve', 'submitted', 'settled', async (job, caller) => {
+          if (job.clientAgentId !== caller.agentId) {
+            throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may approve');
+          }
+          refuseMismatched(job);
+          // An approval of an accepted draft carries its review's hash on chain.
+          const accepted = await acceptedDraftOf(db, job.id);
+          return accepted && accepted.draft.snapshotHash === job.resultHash
+            ? {reviewHash: accepted.review!.reviewHash}
+            : undefined;
+        })
+      ).receipt,
   );
 
-  app.post('/v1/jobs/:id/approve', async (request) =>
-    transition(request, 'approve', 'submitted', 'settled', (job, caller) => {
-      if (job.clientAgentId !== caller.agentId) {
-        throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may approve');
-      }
-      refuseMismatched(job);
-    }),
-  );
-
-  app.post('/v1/jobs/:id/dispute', async (request) =>
-    transition(request, 'dispute', 'submitted', 'disputed', (job, caller) => {
-      if (job.clientAgentId !== caller.agentId) {
-        throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may dispute');
-      }
-    }),
+  app.post(
+    '/v1/jobs/:id/dispute',
+    async (request) =>
+      (
+        await transition(request, 'dispute', 'submitted', 'disputed', (job, caller) => {
+          if (job.clientAgentId !== caller.agentId) {
+            throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may dispute');
+          }
+        })
+      ).receipt,
   );
 
   /**
@@ -341,12 +387,16 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     return {jobId: job.publicId, declined};
   });
 
-  app.post('/v1/jobs/:id/cancel', async (request) =>
-    transition(request, 'cancel', 'created', 'refunded', (job, caller) => {
-      if (job.clientAgentId !== caller.agentId) {
-        throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may cancel');
-      }
-    }),
+  app.post(
+    '/v1/jobs/:id/cancel',
+    async (request) =>
+      (
+        await transition(request, 'cancel', 'created', 'refunded', (job, caller) => {
+          if (job.clientAgentId !== caller.agentId) {
+            throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may cancel');
+          }
+        })
+      ).receipt,
   );
 
   /** Live job feed. Replays history first so a late subscriber sees it all. */
@@ -396,8 +446,12 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     kind: 'accept' | 'submitResult' | 'approve' | 'dispute' | 'cancel',
     from: string | string[],
     to: string,
-    check: (job: typeof jobs.$inferSelect, caller: Caller, body: unknown) => void,
-  ) {
+    check: (
+      job: typeof jobs.$inferSelect,
+      caller: Caller,
+      body: unknown,
+    ) => void | undefined | TransitionExtras | Promise<void | undefined | TransitionExtras>,
+  ): Promise<{receipt: TransitionReceipt; delivered: boolean; jobRowId: number}> {
     const caller = await authenticate(db, request);
     const {job, chain} = await loadJob(request.params as {id: string});
 
@@ -423,7 +477,8 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
         2,
       );
     }
-    check(job, caller, request.body);
+    const extras = (await check(job, caller, request.body)) ?? {};
+    const draft = extras.delivery;
 
     // Never the caller's raw header, and never the serial (audit H1). The
     // signer replays a key as "already sent", so a key another caller could
@@ -448,11 +503,16 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     // The hash covers the output alone for the same reason, and because
     // including `producedAt` would give the same content a different
     // commitment on every delivery.
-    const delivered =
-      kind === 'submitResult'
+    const delivered = draft
+      ? draft.result
+      : kind === 'submitResult'
         ? ((request.body as {output: Record<string, unknown>}).output ?? {})
         : undefined;
-    const resultHash = delivered ? await sha256Of(canonicalize(delivered)) : undefined;
+    const resultHash = draft
+      ? draft.resultHash
+      : delivered
+        ? await sha256Of(canonicalize(delivered))
+        : undefined;
 
     // A dispute commits to its REASON the same way: the chain gets the hash,
     // the job's record gets the words, and anyone can check one against the
@@ -503,6 +563,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
             // release" would not be true.
             ...(resultHash ? {resultHash} : {}),
             ...(reasonHash ? {reasonHash} : {}),
+            ...(extras.reviewHash ? {reviewHash: extras.reviewHash} : {}),
           },
         });
 
@@ -524,6 +585,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       patch['result'] = delivered;
       patch['resultHash'] = resultHash;
     }
+    if (draft) patch['resultUri'] = draft.resultUri;
     if (to === 'settled') patch['settledAt'] = new Date();
 
     if (Object.keys(patch).length > 0) {
@@ -539,13 +601,34 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     });
 
     return {
-      jobId: job.publicId,
-      chainId: job.chainId,
-      state: finalState,
-      txHash: result.txHash,
-      explorerUrl: result.txHash ? chain.explorerTx(result.txHash) : null,
+      receipt: {
+        jobId: job.publicId,
+        chainId: job.chainId,
+        state: finalState,
+        txHash: result.txHash,
+        explorerUrl: result.txHash ? chain.explorerTx(result.txHash) : null,
+        ...(draft ? {resultHash: draft.resultHash, resultUri: draft.resultUri} : {}),
+      },
+      delivered: Boolean(draft),
+      jobRowId: job.id,
     };
   }
+}
+
+/** What a check may add to a transition: a draft's delivery, an accepted review's hash. */
+interface TransitionExtras {
+  delivery?: DraftDelivery;
+  reviewHash?: string;
+}
+
+interface TransitionReceipt {
+  jobId: string;
+  chainId: string;
+  state: string;
+  txHash: string | null;
+  explorerUrl: string | null;
+  resultHash?: string;
+  resultUri?: string;
 }
 
 /**

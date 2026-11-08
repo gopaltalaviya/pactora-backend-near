@@ -10,7 +10,8 @@ import {personAgentOf, type AgentRow} from '../actor.js';
 import type {TxEventsReader, JobTxEvent, JobTxEventName} from '../chain-reads.js';
 import type {EventBus} from '../events.js';
 import {contractCall} from '../submit.js';
-import {DisputeBody, isPublicId, recordEvent, refuseMismatched} from './jobs.js';
+import {acceptedDraftOf, draftDeliveryOf, settleAcceptedDraft, type SettleOutcome} from '../evidence.js';
+import {DisputeBody, isPublicId, recordEvent, refuseMismatched, type JobRouteDeps} from './jobs.js';
 
 /**
  * People act on jobs by signing in their own wallet (docs/26 "prepare →
@@ -38,7 +39,9 @@ export type PersonAction = (typeof PERSON_ACTIONS)[number];
 export const PrepareBody = z.discriminatedUnion('action', [
   z.object({action: z.literal('create')}),
   z.object({action: z.literal('accept')}),
-  JobResult.extend({action: z.literal('submit')}),
+  // `output` is required unless the job has an accepted draft, whose
+  // snapshot is then the delivery (docs/26 F7).
+  JobResult.partial().extend({action: z.literal('submit')}),
   z.object({action: z.literal('approve')}),
   DisputeBody.extend({action: z.literal('dispute')}),
   z.object({action: z.literal('cancel')}),
@@ -101,6 +104,8 @@ export interface PersonActionDeps {
   bus: EventBus;
   /** Omitted, nothing a person signed can be confirmed (the indexer still records it). */
   readTxEvents?: TxEventsReader;
+  /** The signer: carries out an agent client's accepted draft once a person worker's submission is confirmed. */
+  submit?: JobRouteDeps['submit'];
 }
 
 type Job = typeof jobs.$inferSelect;
@@ -118,7 +123,7 @@ async function functionCall(
   chain: ChainConfig,
   job: Job,
   action: PersonAction,
-  hashes: {resultHash?: string; reasonHash?: string},
+  hashes: {resultHash?: string; reasonHash?: string; reviewHash?: string},
 ): Promise<FunctionCallPayload> {
   const payload: Record<string, unknown> = {...hashes};
   if (action === 'create') {
@@ -223,9 +228,28 @@ export async function registerPersonActionRoutes(
     }
     if (action === 'approve') refuseMismatched(job);
 
-    const hashes: {resultHash?: string; reasonHash?: string} = {};
+    const hashes: {resultHash?: string; reasonHash?: string; reviewHash?: string} = {};
     const words: Record<string, unknown> = {};
-    if (body.action === 'submit') {
+    if (action === 'approve') {
+      // An accepted draft's approval carries its review's hash on chain.
+      const accepted = await acceptedDraftOf(db, job.id);
+      if (accepted && accepted.draft.snapshotHash === job.resultHash) {
+        hashes.reviewHash = accepted.review!.reviewHash;
+      }
+    }
+    const delivery = body.action === 'submit' ? await draftDeliveryOf(db, job) : null;
+    if (delivery) {
+      // The accepted snapshot's hash, stored before the browser signs: the
+      // chain will commit to it, and the indexer compares the two.
+      hashes.resultHash = delivery.resultHash;
+      await db
+        .update(jobs)
+        .set({result: delivery.result, resultHash: delivery.resultHash, resultUri: delivery.resultUri})
+        .where(and(eq(jobs.id, job.id), eq(jobs.state, 'accepted')));
+    } else if (body.action === 'submit') {
+      if (!body.output) {
+        throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, 'output: a submission needs the delivered output');
+      }
       // The same two checks POST /v1/jobs/:id/result makes, and the same hash.
       const spec = job.spec as JobSpec;
       const shape = validateShape(body.output, spec.outputSchema);
@@ -395,7 +419,22 @@ export async function registerPersonActionRoutes(
       via: 'person',
       ...words,
     });
-    return answer(fresh.state, {chainJobId: fresh.chainJobId, resultMismatch: mismatch}, false);
+    // A submission of an accepted draft: carry out the client's acceptance
+    // (an agent client through the signer; a person client is told to sign).
+    let settlement: SettleOutcome | undefined;
+    if (action === 'submit' && !mismatch && deps.submit) {
+      settlement = await settleAcceptedDraft({db, bus, submit: deps.submit}, job.id, request.id).catch(
+        (err: unknown) => {
+          request.log.warn({err, jobId: job.publicId}, 'accepted draft not approved yet; the sweep retries');
+          return {status: 'not_ready' as const, reason: err instanceof Error ? err.message : String(err)};
+        },
+      );
+    }
+    const after = settlement?.status === 'approved' ? 'settled' : fresh.state;
+    return {
+      ...answer(after, {chainJobId: fresh.chainJobId, resultMismatch: mismatch}, false),
+      ...(settlement ? {settlement} : {}),
+    };
   });
 }
 

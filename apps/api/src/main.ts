@@ -16,6 +16,7 @@ import {
 import {DEFAULT_SIGN_RECIPIENT, makeOwnerVerifier} from './challenges.js';
 import {makeRunExecutor} from './run-executor.js';
 import {coalesce} from './coalesce.js';
+import {S3ObjectStore} from '@pactora/storage';
 
 const Env = z
   .object({
@@ -46,12 +47,36 @@ const Env = z
     STATUS_MAX_INDEXER_LAG_BLOCKS: env.positiveInt(150),
     /** NEP-413 `recipient` the owner's wallet signs for (docs/NEAR-PORT.md §5). */
     PACTORA_SIGN_RECIPIENT: z.string().min(1).default(DEFAULT_SIGN_RECIPIENT),
+    /** Evidence photo uploads (docs/26 F6): `on` needs the object store below; `off` refuses them. */
+    EVIDENCE_UPLOADS: z.enum(['on', 'off']).default('on'),
+    /** S3-compatible object storage for evidence. Unset bucket: no store (refused in production). */
+    OBJECT_STORE_BUCKET: z.string().min(3).optional(),
+    /** Omitted: AWS S3 itself. Locally: the compose MinIO, http://127.0.0.1:9110. */
+    OBJECT_STORE_ENDPOINT: env.httpUrl().optional(),
+    OBJECT_STORE_REGION: z.string().min(1).default('us-east-1'),
+    /** Both or neither; neither uses the AWS SDK's default chain (an instance role). */
+    OBJECT_STORE_ACCESS_KEY_ID: z.string().min(1).optional(),
+    OBJECT_STORE_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+    /** 1 for MinIO and most S3-compatible stores (bucket in the path). */
+    OBJECT_STORE_FORCE_PATH_STYLE: env.flag(),
+    /** Server-side encryption on every object; `none` only for a store that cannot (documented). */
+    OBJECT_STORE_SSE: z.enum(['AES256', 'aws:kms', 'none']).default('AES256'),
   })
   // In production the browser origins must be named: `*` is fine for a local
   // demo and wrong for a deployment with a real front end.
   .refine((e) => e.NODE_ENV !== 'production' || e.CORS_ORIGINS.length > 0, {
     message: 'CORS_ORIGINS is required when NODE_ENV=production',
     path: ['CORS_ORIGINS'],
+  })
+  // Evidence never falls back to something else in production: no store,
+  // no start (EVIDENCE_UPLOADS=off says so explicitly instead).
+  .refine((e) => e.NODE_ENV !== 'production' || e.EVIDENCE_UPLOADS === 'off' || e.OBJECT_STORE_BUCKET, {
+    message: 'OBJECT_STORE_BUCKET is required when NODE_ENV=production and EVIDENCE_UPLOADS=on',
+    path: ['OBJECT_STORE_BUCKET'],
+  })
+  .refine((e) => Boolean(e.OBJECT_STORE_ACCESS_KEY_ID) === Boolean(e.OBJECT_STORE_SECRET_ACCESS_KEY), {
+    message: 'set OBJECT_STORE_ACCESS_KEY_ID and OBJECT_STORE_SECRET_ACCESS_KEY together, or neither',
+    path: ['OBJECT_STORE_ACCESS_KEY_ID'],
   });
 
 const cfg = loadEnv(Env);
@@ -106,7 +131,37 @@ const runExecutor = await makeRunExecutor({
   return null;
 });
 
+// Evidence storage. In development a missing bucket on the local MinIO is
+// created; elsewhere it must already exist (with its own policy), and a
+// store that does not answer stops the boot rather than the first upload.
+const objectStore =
+  cfg.EVIDENCE_UPLOADS === 'on' && cfg.OBJECT_STORE_BUCKET
+    ? new S3ObjectStore({
+        bucket: cfg.OBJECT_STORE_BUCKET,
+        region: cfg.OBJECT_STORE_REGION,
+        ...(cfg.OBJECT_STORE_ENDPOINT ? {endpoint: cfg.OBJECT_STORE_ENDPOINT} : {}),
+        ...(cfg.OBJECT_STORE_ACCESS_KEY_ID && cfg.OBJECT_STORE_SECRET_ACCESS_KEY
+          ? {accessKeyId: cfg.OBJECT_STORE_ACCESS_KEY_ID, secretAccessKey: cfg.OBJECT_STORE_SECRET_ACCESS_KEY}
+          : {}),
+        forcePathStyle: cfg.OBJECT_STORE_FORCE_PATH_STYLE,
+        serverSideEncryption: cfg.OBJECT_STORE_SSE,
+      })
+    : undefined;
+if (objectStore) {
+  await objectStore.ensureBucket(cfg.NODE_ENV !== 'production').catch((err: unknown) => {
+    throw new Error(
+      `evidence storage: bucket ${cfg.OBJECT_STORE_BUCKET} at ${cfg.OBJECT_STORE_ENDPOINT ?? 'AWS S3'} is not reachable (${err instanceof Error ? err.message : String(err)}) — refusing to start`,
+    );
+  });
+} else {
+  logger.warn(
+    {evidenceUploads: cfg.EVIDENCE_UPLOADS},
+    'no evidence storage: photo uploads and downloads answer 503 (set OBJECT_STORE_BUCKET, docs/08)',
+  );
+}
+
 const app = await buildApp({
+  ...(objectStore ? {objectStore} : {}),
   db,
   chains: config.chains,
   defaultChainId: config.defaultChainId,

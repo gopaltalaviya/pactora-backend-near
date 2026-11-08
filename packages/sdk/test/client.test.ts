@@ -670,3 +670,63 @@ describe('listings (docs/26 F4)', () => {
     expect(JSON.parse(String(calls[6]!.init!.body))).toEqual({action: 'withdraw', applicationId: 'A1'});
   });
 });
+
+describe('evidence, drafts and chat (docs/26 F6-F8)', () => {
+  it('sends each call to its route, the upload as multipart and the message key as a header', async () => {
+    const {calls, impl} = fakeFetch(() => ({status: 200, body: {drafts: [], files: [], messages: []}}));
+    const c = client(impl as typeof fetch);
+    await c.uploadFile('J1', new Uint8Array([0x89, 0x50]), {filename: 'p.png', contentType: 'image/png'});
+    await c.listFiles('J1');
+    await c.withdrawFile('J1', 'F1');
+    await c.submitDraft('J1', {text: 'the draft text'});
+    await c.getDrafts('J1');
+    await c.reviewDraft('J1', 'D1', {
+      snapshotHash: 'a'.repeat(64),
+      decision: 'revise',
+      reason: 'retake it closer',
+      checks: [{criterion: 'sign', met: false}],
+    });
+    await c.sendMessage('J1', 'hello', {idempotencyKey: 'k'.repeat(16), inReplyTo: 'M0'});
+    await c.getConversation('J1');
+    await c.submitResult('J1');
+    const seen = calls.map((x) => `${x.init?.method ?? 'GET'} ${x.url.replace('http://api.test', '')}`);
+    expect(seen).toEqual([
+      'POST /v1/jobs/J1/files',
+      'GET /v1/jobs/J1/files',
+      'DELETE /v1/jobs/J1/files/F1',
+      'POST /v1/jobs/J1/drafts',
+      'GET /v1/jobs/J1/drafts',
+      'POST /v1/jobs/J1/drafts/D1/review',
+      'POST /v1/jobs/J1/messages',
+      'GET /v1/jobs/J1/messages',
+      'POST /v1/jobs/J1/result',
+    ]);
+    expect(calls[0]!.init!.body).toBeInstanceOf(FormData);
+    expect(((calls[0]!.init!.body as FormData).get('file') as File).name).toBe('p.png');
+    expect((calls[6]!.init!.headers as Record<string, string>)['idempotency-key']).toBe('k'.repeat(16));
+    expect(JSON.parse(String(calls[6]!.init!.body))).toEqual({body: 'hello', inReplyTo: 'M0'});
+    expect(JSON.parse(String(calls[8]!.init!.body))).toEqual({});
+  });
+
+  it('reads a file as bytes with its type and hash, and turns a refused upload into a PactoraError', async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const impl = (async (url: string | URL) =>
+      String(url).includes('/v1/files/')
+        ? new Response(bytes, {status: 200, headers: {'content-type': 'image/png', 'x-sha256': 'abc'}})
+        : new Response(JSON.stringify(problem(ErrorCode.SCHEMA_MISMATCH, 'not a PNG')), {
+            status: 422,
+          })) as typeof fetch;
+    const c = client(impl);
+    const f = await c.getFile('F1');
+    expect(Array.from(f.bytes)).toEqual([1, 2, 3]);
+    expect(f).toMatchObject({mime: 'image/png', sha256: 'abc'});
+    await expect(c.uploadFile('J1', new Uint8Array([0]))).rejects.toMatchObject({code: 'SCHEMA_MISMATCH'});
+    const refused = client(
+      (async () =>
+        new Response(JSON.stringify(problem(ErrorCode.FORBIDDEN, 'parties only')), {
+          status: 403,
+        })) as typeof fetch,
+    );
+    await expect(refused.getFile('F1')).rejects.toMatchObject({code: 'FORBIDDEN'});
+  });
+});

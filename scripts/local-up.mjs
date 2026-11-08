@@ -58,6 +58,8 @@ step('Postgres and a fresh NEAR sandbox', 'docker', [
   '--wait',
   'postgres',
   'near-sandbox',
+  // Evidence photos (docs/26 F6): the demo's listing section uploads one.
+  'minio',
 ]);
 for (let i = 0; ; i++) {
   try {

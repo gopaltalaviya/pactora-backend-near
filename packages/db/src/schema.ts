@@ -705,6 +705,127 @@ export const personActions = pgTable(
   ],
 );
 
+// ─────────────────────── evidence, review, chat (docs/26 F6-F8) ───────────────────────
+
+/**
+ * An evidence photo a job's worker uploaded. The bytes are in object
+ * storage under `object_key` (never in Postgres, never on the API's disk);
+ * this row is what a snapshot names. `sha256` is of the STORED bytes — the
+ * image after its metadata was removed. Withdrawing sets `withdrawn_at` and
+ * keeps the bytes, so a snapshot that named the file stays checkable.
+ */
+export const jobFiles = pgTable(
+  'job_files',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    uploaderAgentId: bigint('uploader_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    objectKey: text('object_key').notNull(),
+    sha256: text('sha256').notNull(),
+    /** Detected from the bytes, never the client's Content-Type. */
+    mime: text('mime').notNull(),
+    size: integer('size').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    withdrawnAt: timestamp('withdrawn_at', {withTimezone: true}),
+  },
+  (t) => [
+    uniqueIndex('job_files_public_id_uk').on(t.publicId),
+    uniqueIndex('job_files_object_key_uk').on(t.objectKey),
+    index('job_files_job_idx').on(t.jobId, t.id),
+  ],
+);
+
+/**
+ * One draft round: an immutable snapshot of what the worker delivers (the
+ * job's terms, their text and output, the active files' hashes, the chat)
+ * and its sha256. The hash of the accepted draft is the `result_hash` the
+ * worker submits on chain, so no contract change is needed for revisions.
+ */
+export const jobDrafts = pgTable(
+  'job_drafts',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    round: smallint('round').notNull(),
+    authorAgentId: bigint('author_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    snapshot: jsonb('snapshot').notNull(),
+    snapshotHash: text('snapshot_hash').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('job_drafts_public_id_uk').on(t.publicId),
+    uniqueIndex('job_drafts_snapshot_hash_uk').on(t.snapshotHash),
+    uniqueIndex('job_drafts_round_uk').on(t.jobId, t.round),
+  ],
+);
+
+export const reviewDecision = pgEnum('review_decision', ['revise', 'accept_draft', 'dispute_intent']);
+
+/** The client's decision on one draft, written once (the unique draft id), bound to its snapshot hash. */
+export const jobReviews = pgTable(
+  'job_reviews',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    draftId: bigint('draft_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobDrafts.id, {onDelete: 'cascade'}),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    decision: reviewDecision('decision').notNull(),
+    reason: text('reason').notNull(),
+    /** [{criterion, met, support}], 1-30. */
+    checks: jsonb('checks').notNull(),
+    /** sha256 of the canonical review payload; the `review_hash` an approval carries. */
+    reviewHash: text('review_hash').notNull(),
+    decidedBy: bigint('decided_by', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('job_reviews_public_id_uk').on(t.publicId),
+    uniqueIndex('job_reviews_draft_uk').on(t.draftId),
+    index('job_reviews_job_idx').on(t.jobId, t.id),
+  ],
+);
+
+/** A message between a job's two parties. Untrusted input to any model that reads it. */
+export const jobMessages = pgTable(
+  'job_messages',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    authorAgentId: bigint('author_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    body: text('body').notNull(),
+    inReplyTo: bigint('in_reply_to', {mode: 'number'}),
+    /** The author's optional key: the same key and body is the same message. */
+    idempotencyKey: text('idempotency_key'),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('job_messages_public_id_uk').on(t.publicId),
+    uniqueIndex('job_messages_idempotency_uk').on(t.jobId, t.authorAgentId, t.idempotencyKey),
+    index('job_messages_job_idx').on(t.jobId, t.id),
+  ],
+);
+
 // ─────────────────────────── indexer ───────────────────────────
 
 /**

@@ -9,6 +9,8 @@ import {SettleBody, VerifyBody} from './routes/x402.js';
 import {LoginBody, LoginChallengeBody} from './routes/session.js';
 import {PersonBody} from './routes/people.js';
 import {ConfirmBody, PrepareBody} from './routes/person-actions.js';
+import {DraftBody, ReviewBody} from './routes/drafts.js';
+import {MessageBody} from './routes/messages.js';
 import {
   ApplicationBody,
   ApplicationsQuery,
@@ -58,6 +60,12 @@ interface Route {
   status?: 201 | 202 | 204;
   /** Server-sent events rather than JSON. */
   stream?: true;
+  /** A multipart/form-data upload: one binary part named `file`. */
+  multipart?: true;
+  /** The success body is raw bytes of this media type range, not JSON. */
+  binary?: string;
+  /** An optional Idempotency-Key header (16-128) — a retry with it is the same request. */
+  optionalIdempotency?: true;
 }
 
 export const ROUTES: Route[] = [
@@ -272,6 +280,74 @@ export const ROUTES: Route[] = [
     body: ConfirmBody,
   },
   {
+    method: 'post',
+    path: '/v1/jobs/:id/files',
+    auth: 'key-or-session',
+    summary:
+      'Worker: upload one evidence photo (PNG/JPEG/WebP by magic bytes, <= 8 MiB, metadata removed; 10 active, 30 total)',
+    multipart: true,
+    status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/jobs/:id/files',
+    auth: 'key-or-session',
+    summary: "Parties: the job's evidence files, withdrawn ones included, with their sha256",
+  },
+  {
+    method: 'delete',
+    path: '/v1/jobs/:id/files/:fileId',
+    auth: 'key-or-session',
+    summary: 'Worker: withdraw a file from future drafts (its bytes are kept for earlier snapshots)',
+  },
+  {
+    method: 'get',
+    path: '/v1/files/:fileId',
+    auth: 'key-or-session',
+    summary: "Parties: a file's bytes, as the type detected at upload (nosniff, inline, no-store)",
+    binary: 'image/*',
+  },
+  {
+    method: 'get',
+    path: '/v1/jobs/:id/drafts',
+    auth: 'key-or-session',
+    summary:
+      "Parties: the job's draft rounds, each snapshot and its review, and whether it is ready to approve",
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/drafts',
+    auth: 'key-or-session',
+    summary:
+      'Worker: post the next draft round; answers the immutable snapshot and its sha256 (the result_hash to submit once accepted)',
+    body: DraftBody,
+    status: 201,
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/drafts/:draftId/review',
+    auth: 'key-or-session',
+    summary:
+      'Client: revise (max 3), accept_draft (every check met) or dispute_intent, bound to the snapshot hash; written once',
+    body: ReviewBody,
+  },
+  {
+    method: 'get',
+    path: '/v1/jobs/:id/messages',
+    auth: 'key-or-session',
+    summary: "Parties: the job's conversation (untrusted input), oldest first",
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/messages',
+    auth: 'key-or-session',
+    summary:
+      'Parties: send a message (1-4000 characters, 100 per job) while the work is accepted or submitted',
+    body: MessageBody,
+    status: 201,
+    optionalIdempotency: true,
+  },
+  {
     method: 'get',
     path: '/v1/me',
     auth: 'session',
@@ -450,7 +526,16 @@ export function openApiDocument(version: string): Record<string, unknown> {
     const headers =
       r.auth === 'key+idempotency' || r.auth === 'key-or-session+idempotency'
         ? [{name: 'Idempotency-Key', in: 'header', required: true, schema: {type: 'string', maxLength: 200}}]
-        : [];
+        : r.optionalIdempotency
+          ? [
+              {
+                name: 'Idempotency-Key',
+                in: 'header',
+                required: false,
+                schema: {type: 'string', minLength: 16, maxLength: 128},
+              },
+            ]
+          : [];
     const security =
       r.auth === 'key' || r.auth === 'key+idempotency'
         ? [{apiKey: []}]
@@ -469,25 +554,42 @@ export function openApiDocument(version: string): Record<string, unknown> {
       parameters: [...params, ...headers, ...(r.query ? queryParameters(r.query) : [])],
       ...(r.body
         ? {requestBody: {required: true, content: {'application/json': {schema: schemaOf(r.body)}}}}
-        : {}),
+        : r.multipart
+          ? {
+              requestBody: {
+                required: true,
+                content: {
+                  'multipart/form-data': {
+                    schema: {
+                      type: 'object',
+                      required: ['file'],
+                      properties: {file: {type: 'string', format: 'binary'}},
+                    },
+                  },
+                },
+              },
+            }
+          : {}),
       responses: {
         [ok]:
           r.status === 204
             ? {description: 'Done; no body'}
-            : r.stream
-              ? {
-                  description: 'A server-sent event stream',
-                  content: {'text/event-stream': {schema: {type: 'string'}}},
-                }
-              : r.response
+            : r.binary
+              ? {description: 'The file', content: {[r.binary]: {schema: {type: 'string', format: 'binary'}}}}
+              : r.stream
                 ? {
-                    description: 'Success',
-                    content: {'application/json': {schema: schemaOf(r.response, 'output')}},
+                    description: 'A server-sent event stream',
+                    content: {'text/event-stream': {schema: {type: 'string'}}},
                   }
-                : {
-                    description: 'Success — the shape is in docs/15',
-                    content: {'application/json': {schema: {type: 'object'}}},
-                  },
+                : r.response
+                  ? {
+                      description: 'Success',
+                      content: {'application/json': {schema: schemaOf(r.response, 'output')}},
+                    }
+                  : {
+                      description: 'Success — the shape is in docs/15',
+                      content: {'application/json': {schema: {type: 'object'}}},
+                    },
         default: {
           description: 'An error',
           content: {'application/problem+json': {schema: {$ref: '#/components/schemas/Problem'}}},

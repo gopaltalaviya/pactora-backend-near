@@ -20,6 +20,11 @@ import {registerListingRoutes} from './routes/listings.js';
 import {registerMeRoutes} from './routes/me.js';
 import {registerPersonActionRoutes} from './routes/person-actions.js';
 import {registerSessionRoutes} from './routes/session.js';
+import {registerFileRoutes} from './routes/files.js';
+import {registerDraftRoutes} from './routes/drafts.js';
+import {registerMessageRoutes} from './routes/messages.js';
+import {jobsReadyToSettle, settleAcceptedDraft} from './evidence.js';
+import type {ObjectStore} from '@pactora/storage';
 import {sweepExpiredSessions} from './auth.js';
 import {registerStatusRoutes, type StatusDeps} from './routes/status.js';
 import {registerX402Routes} from './routes/x402.js';
@@ -99,6 +104,19 @@ export interface AppDeps {
   status?: StatusDeps;
   /** How often expired sessions and sign-in challenges are deleted; default hourly. */
   sessionSweepMs?: number;
+  /**
+   * Evidence storage (docs/26 F6). Omitted, uploads and downloads answer
+   * 503 — main.ts refuses to start in production without one.
+   */
+  objectStore?: ObjectStore;
+  /** Evidence uploads in flight at once across this process; default 4. */
+  uploadConcurrency?: number;
+  /**
+   * How often accepted drafts that reached the chain are approved for their
+   * agent clients (the backstop for a submission the API did not see);
+   * default 15 s, 0 = never.
+   */
+  draftSettleSweepMs?: number;
   /** Called for every route as it is registered — the docs test lists them. */
   onRoute?: (route: {method: string | string[]; url: string}) => void;
 }
@@ -315,8 +333,18 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     db: deps.db,
     chains: deps.chains,
     bus,
+    submit: deps.submit,
     ...(deps.readTxEvents ? {readTxEvents: deps.readTxEvents} : {}),
   });
+  await registerFileRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    bus,
+    ...(deps.objectStore ? {objectStore: deps.objectStore} : {}),
+    ...(deps.uploadConcurrency ? {uploadConcurrency: deps.uploadConcurrency} : {}),
+  });
+  await registerDraftRoutes(app, {db: deps.db, chains: deps.chains, bus});
+  await registerMessageRoutes(app, {db: deps.db, chains: deps.chains, bus});
   await registerListingRoutes(app, {
     db: deps.db,
     chains: deps.chains,
@@ -345,6 +373,34 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   app.addHook('onClose', async () => {
     clearTimeout(sweepTimer);
     sweepTimer = undefined;
+  });
+
+  // Accepted drafts whose hash reached the chain without the API seeing the
+  // submission (the indexer recorded it): approve them for agent clients.
+  // Idempotent per review, so racing a request's own approval is harmless.
+  let settleTimer: NodeJS.Timeout | undefined;
+  const settleEvery = deps.draftSettleSweepMs ?? 15_000;
+  const settleSweep = () => {
+    settleTimer = setTimeout(() => {
+      jobsReadyToSettle(deps.db)
+        .then(async (ids) => {
+          for (const id of ids) {
+            await settleAcceptedDraft({db: deps.db, bus, submit: deps.submit}, id).catch((err: unknown) =>
+              app.log.warn({err, job: id}, 'accepted draft: approval failed; retried next sweep'),
+            );
+          }
+        })
+        .catch((err: unknown) => app.log.warn({err}, 'accepted-draft sweep failed'))
+        .finally(() => {
+          if (settleTimer) settleSweep();
+        });
+    }, settleEvery);
+    settleTimer.unref();
+  };
+  if (settleEvery > 0) settleSweep();
+  app.addHook('onClose', async () => {
+    clearTimeout(settleTimer);
+    settleTimer = undefined;
   });
 
   await registerRunRoutes(app, {

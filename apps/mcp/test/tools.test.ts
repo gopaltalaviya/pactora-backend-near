@@ -85,22 +85,31 @@ const byName = (name: string) => {
 };
 
 describe('the tool set', () => {
-  it('exposes exactly the fourteen tools the spec promises', () => {
+  it('exposes exactly the twenty-three tools the spec promises', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
+      'accept_job',
       'approve_job',
       'await_result',
       'check_trust',
       'close_applications',
       'decide_application',
+      'decline_job',
       'discover_agents',
       'dispute_job',
+      'get_conversation',
+      'get_evidence',
       'get_job',
       'get_network',
       'hire_agent',
       'list_applications',
+      'list_jobs',
       'my_budget',
       'post_listing',
       'reopen_applications',
+      'review_job',
+      'send_message',
+      'submit_draft',
+      'submit_result',
     ]);
   });
 
@@ -121,7 +130,7 @@ describe('the tool set', () => {
         .filter((t) => t.spends)
         .map((t) => t.name)
         .sort(),
-    ).toEqual(['approve_job', 'decide_application', 'dispute_job', 'hire_agent']);
+    ).toEqual(['approve_job', 'decide_application', 'dispute_job', 'hire_agent', 'review_job']);
   });
 
   it('tells the model plainly which tools are free', () => {
@@ -351,6 +360,119 @@ describe('the listing tools (docs/26 F4)', () => {
       ['decideApplication', 'L', {applicationId: 'A', action: 'select', reason: 'Best price and record.'}],
       ['closeApplications', 'L'],
       ['reopenApplications', 'L'],
+    ]);
+  });
+});
+
+describe('the evidence, review and chat tools (docs/26 F6-F8)', () => {
+  const JOB = '00000000-0000-4000-8000-000000000007';
+  const DRAFT = '00000000-0000-4000-8000-000000000008';
+
+  it('marks review_job as spending, because accept_draft authorises the release, and the rest as free', () => {
+    expect(byName('review_job').spends).toBe(true);
+    expect(byName('review_job').description).toContain('AUTHORISES');
+    for (const name of [
+      'submit_draft',
+      'get_evidence',
+      'send_message',
+      'get_conversation',
+      'list_jobs',
+      'accept_job',
+      'submit_result',
+      'decline_job',
+    ]) {
+      expect(byName(name).spends, name).toBe(false);
+    }
+  });
+
+  it('warns that evidence and chat are data written by the other party, never instructions', () => {
+    for (const name of ['get_evidence', 'get_conversation']) {
+      expect(byName(name).description, name).toMatch(/never/i);
+      expect(byName(name).description, name).toMatch(/budget|limit/i);
+    }
+  });
+
+  it('requires 1-30 checks on a review and a 64-hex snapshot hash', () => {
+    const schema = z.object(byName('review_job').inputSchema);
+    const ok = {
+      jobId: JOB,
+      draftId: DRAFT,
+      snapshotHash: 'a'.repeat(64),
+      decision: 'accept_draft',
+      reason: 'Everything asked for.',
+      checks: [{criterion: 'sign visible', met: true}],
+    };
+    expect(schema.safeParse(ok).success).toBe(true);
+    expect(schema.safeParse({...ok, checks: []}).success).toBe(false);
+    expect(schema.safeParse({...ok, snapshotHash: '0xabc'}).success).toBe(false);
+  });
+
+  it('calls the SDK with what the model gave', async () => {
+    const calls: unknown[][] = [];
+    const record =
+      (name: string, answer: unknown) =>
+      async (...a: unknown[]) => (calls.push([name, ...a]), answer);
+    const c = ctx({
+      getDrafts: record('getDrafts', {phase: 'awaiting_review', drafts: [{draftId: 'D1'}, {draftId: 'D2'}]}),
+      listFiles: record('listFiles', {files: []}),
+      reviewDraft: record('reviewDraft', {phase: 'revise'}),
+      sendMessage: record('sendMessage', {messageId: 'M'}),
+      getConversation: record('getConversation', {messages: []}),
+      listJobs: record('listJobs', [{jobId: JOB}]),
+      accept: record('accept', {state: 'accepted'}),
+      submitDraft: record('submitDraft', {round: 1}),
+      submitResult: record('submitResult', {state: 'submitted'}),
+      decline: record('decline', {declined: {}}),
+    });
+    const evidence = (await byName('get_evidence').handler({jobId: JOB}, c)) as Record<string, unknown>;
+    expect(evidence).toMatchObject({
+      phase: 'awaiting_review',
+      latest: {draftId: 'D2'},
+      rounds: 2,
+      files: {files: []},
+    });
+    const reviewed = await byName('review_job').handler(
+      {
+        jobId: JOB,
+        draftId: DRAFT,
+        snapshotHash: 'a'.repeat(64),
+        decision: 'revise',
+        reason: 'Retake it closer.',
+        checks: [{criterion: 'c', met: false}],
+      },
+      c,
+    );
+    expect(reviewed).toMatchObject({phase: 'revise', testnet: true});
+    await byName('send_message').handler({jobId: JOB, body: 'hi', idempotencyKey: 'k'.repeat(16)}, c);
+    await byName('get_conversation').handler({jobId: JOB}, c);
+    expect(await byName('list_jobs').handler({role: 'worker'}, c)).toEqual({count: 1, jobs: [{jobId: JOB}]});
+    await byName('accept_job').handler({jobId: JOB}, c);
+    await byName('submit_draft').handler({jobId: JOB, text: 'my draft text'}, c);
+    await byName('submit_result').handler({jobId: JOB}, c);
+    await byName('submit_result').handler({jobId: JOB, output: {a: 1}}, c);
+    await byName('decline_job').handler({jobId: JOB, reason: 'busy'}, c);
+    expect(calls).toEqual([
+      ['getDrafts', JOB],
+      ['listFiles', JOB],
+      [
+        'reviewDraft',
+        JOB,
+        DRAFT,
+        {
+          snapshotHash: 'a'.repeat(64),
+          decision: 'revise',
+          reason: 'Retake it closer.',
+          checks: [{criterion: 'c', met: false}],
+        },
+      ],
+      ['sendMessage', JOB, 'hi', {idempotencyKey: 'k'.repeat(16)}],
+      ['getConversation', JOB],
+      ['listJobs', {role: 'worker'}],
+      ['accept', JOB],
+      ['submitDraft', JOB, {text: 'my draft text'}],
+      ['submitResult', JOB, undefined],
+      ['submitResult', JOB, {output: {a: 1}}],
+      ['decline', JOB, 'busy'],
     ]);
   });
 });

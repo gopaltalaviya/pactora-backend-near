@@ -57,6 +57,18 @@ const CASES = [
     {NODE_ENV: 'production', DATABASE_URL: CLOSED_DB},
     /CORS_ORIGINS is required when NODE_ENV=production/,
   ],
+  [
+    'api',
+    'production with evidence uploads on and no object store',
+    {NODE_ENV: 'production', DATABASE_URL: CLOSED_DB, CORS_ORIGINS: 'https://pactora.example'},
+    /OBJECT_STORE_BUCKET is required when NODE_ENV=production and EVIDENCE_UPLOADS=on/,
+  ],
+  [
+    'api',
+    'an object store key id without its secret',
+    {DATABASE_URL: CLOSED_DB, OBJECT_STORE_BUCKET: 'evidence', OBJECT_STORE_ACCESS_KEY_ID: 'id'},
+    /OBJECT_STORE_ACCESS_KEY_ID and OBJECT_STORE_SECRET_ACCESS_KEY together/,
+  ],
   ['api', 'SIGNER_URL is not http(s)', {DATABASE_URL: CLOSED_DB, SIGNER_URL: 'ftp://signer'}, /SIGNER_URL/],
   ['api', 'SIGNER_TOKEN too short', {DATABASE_URL: CLOSED_DB, SIGNER_TOKEN: 'short'}, /SIGNER_TOKEN/],
   ['api', 'PORT out of range', {DATABASE_URL: CLOSED_DB, PORT: '70000'}, /PORT/],
@@ -126,7 +138,10 @@ function run(entry, extra) {
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
     const timer = setTimeout(() => child.kill('SIGKILL'), TIMEOUT_MS);
-    child.on('exit', (code, signal) => {
+    // 'close', not 'exit': 'exit' can fire before the pipes are drained, and
+    // then the refusal's own words are not in `out` yet (seen as a flaky
+    // "refused without naming").
+    child.on('close', (code, signal) => {
       clearTimeout(timer);
       resolve({code, signal, out});
     });
@@ -140,14 +155,34 @@ for (const entry of Object.values(ENTRY)) {
   }
 }
 
-const results = await Promise.all(
-  CASES.map(async ([service, what, extra, expect]) => ({
-    service,
-    what,
-    expect,
-    ...(await run(ENTRY[service], extra)),
-  })),
-);
+/**
+ * Node itself can die with a Windows access violation (exit 0xC0000005,
+ * nothing printed) when many processes start at once — seen 1 in ~40 starts
+ * with all cases in parallel. That is not a guard failing, so such a run is
+ * retried once and said so; any other outcome counts as it is.
+ */
+const NATIVE_CRASH = 0xc0000005;
+async function runCase(entry, extra) {
+  const first = await run(entry, extra);
+  if (first.code !== NATIVE_CRASH) return first;
+  console.warn(`! ${entry}: node crashed natively (0xC0000005) before running — retrying once`);
+  return run(entry, extra);
+}
+
+// Four at a time: starting every case at once is what makes node crash.
+const results = [];
+for (let i = 0; i < CASES.length; i += 4) {
+  results.push(
+    ...(await Promise.all(
+      CASES.slice(i, i + 4).map(async ([service, what, extra, expect]) => ({
+        service,
+        what,
+        expect,
+        ...(await runCase(ENTRY[service], extra)),
+      })),
+    )),
+  );
+}
 
 let failed = 0;
 for (const r of results) {

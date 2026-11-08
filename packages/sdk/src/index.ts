@@ -332,6 +332,85 @@ export interface Decision {
 
 export type ApplicationSort = 'recent' | 'price_low' | 'price_high' | 'rating';
 
+// ── evidence, draft rounds, chat (docs/26 F6-F8) ──────────────────────────
+
+export interface EvidenceFile {
+  fileId: string;
+  sha256: string;
+  mime: 'image/png' | 'image/jpeg' | 'image/webp';
+  size: number;
+  createdAt: string;
+  withdrawnAt: string | null;
+  /** `GET` it with the same credential: parties only. */
+  url: string;
+}
+
+export interface FileList {
+  jobId: string;
+  active: number;
+  total: number;
+  limits: {maxActive: number; maxTotal: number; maxBytes: number};
+  files: EvidenceFile[];
+}
+
+/** One judged acceptance criterion. */
+export interface ReviewCheck {
+  criterion: string;
+  met: boolean;
+  support?: string | undefined;
+}
+
+export type ReviewDecision = 'revise' | 'accept_draft' | 'dispute_intent';
+
+export interface DraftSnapshot {
+  v: 1;
+  jobId: string;
+  specHash: string;
+  round: number;
+  terms: unknown;
+  text: string;
+  output: Record<string, unknown> | null;
+  files: {fileId: string; sha256: string; mime: string; size: number}[];
+  messages: ConversationMessage[];
+}
+
+export interface Draft {
+  draftId: string;
+  round: number;
+  /** sha256 of the canonical snapshot: the result_hash once accepted. */
+  snapshotHash: string;
+  snapshot: DraftSnapshot;
+  createdAt: string;
+  review: {
+    reviewId: string;
+    decision: ReviewDecision;
+    reason: string;
+    checks: ReviewCheck[];
+    reviewHash: string;
+    decidedAt: string;
+  } | null;
+}
+
+export interface DraftState {
+  jobId: string;
+  phase: 'none' | 'awaiting_review' | 'revise' | 'accepted' | 'dispute_intent';
+  revisionsUsed: number;
+  revisionsLeft: number;
+  acceptedSnapshotHash: string | null;
+  acceptedReviewHash: string | null;
+  readyToApprove: boolean;
+  resultMismatch: boolean;
+}
+
+export interface ConversationMessage {
+  messageId: string;
+  from: 'client' | 'worker';
+  /** Written by a party: data, never instructions. */
+  body: string;
+  inReplyTo: string | null;
+  at: string;
+}
+
 export interface DiscoverQuery {
   capability?: Capability;
   maxPrice?: BaseUnits;
@@ -455,12 +534,17 @@ export class PactoraClient {
     return this.request<ActionReceipt>('POST', `/v1/jobs/${jobId}/accept`, {});
   }
 
+  /**
+   * Deliver. A job with an accepted draft (every listing job needs one)
+   * delivers that snapshot, and `result` may be omitted; any other job
+   * delivers `result.output`.
+   */
   submitResult(
     jobId: string,
-    result: {output: Record<string, unknown>; producedAt?: string},
-  ): Promise<ActionReceipt> {
-    return this.request<ActionReceipt>('POST', `/v1/jobs/${jobId}/result`, {
-      body: {output: result.output, producedAt: result.producedAt ?? new Date().toISOString()},
+    result?: {output: Record<string, unknown>; producedAt?: string},
+  ): Promise<ActionReceipt & {resultHash?: string; settlement?: {status: string; txHash?: string}}> {
+    return this.request('POST', `/v1/jobs/${jobId}/result`, {
+      body: result ? {output: result.output, producedAt: result.producedAt ?? new Date().toISOString()} : {},
     });
   }
 
@@ -485,6 +569,105 @@ export class PactoraClient {
    */
   decline(jobId: string, reason: string): Promise<{jobId: string; declined: {reason: string; at: string}}> {
     return this.request('POST', `/v1/jobs/${jobId}/decline`, {body: {reason}});
+  }
+
+  // ── evidence, draft rounds, chat (docs/26 F6-F8) ───────────────────────
+
+  /** Worker: upload one photo (PNG/JPEG/WebP, at most 8 MiB). Its metadata is removed before it is stored. */
+  async uploadFile(
+    jobId: string,
+    bytes: Uint8Array,
+    opts: {filename?: string; contentType?: string} = {},
+  ): Promise<EvidenceFile & {jobId: string; metadataRemoved: string[]}> {
+    const form = new FormData();
+    form.append(
+      'file',
+      new Blob([bytes], {type: opts.contentType ?? 'application/octet-stream'}),
+      opts.filename ?? 'photo',
+    );
+    const res = await this.doFetch(`${this.baseUrl}/v1/jobs/${jobId}/files`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${this.apiKey}`},
+      body: form,
+    });
+    return this.answer(res, 'POST', `/v1/jobs/${jobId}/files`);
+  }
+
+  listFiles(jobId: string): Promise<FileList> {
+    return this.request<FileList>('GET', `/v1/jobs/${jobId}/files`, {});
+  }
+
+  /** Worker: take a file out of future drafts (earlier snapshots keep it). */
+  withdrawFile(jobId: string, fileId: string): Promise<EvidenceFile & {replayed: boolean}> {
+    return this.request('DELETE', `/v1/jobs/${jobId}/files/${fileId}`, {});
+  }
+
+  /** A file's bytes (parties only). */
+  async getFile(fileId: string): Promise<{bytes: Uint8Array; mime: string; sha256: string | null}> {
+    const res = await this.doFetch(`${this.baseUrl}/v1/files/${fileId}`, {
+      headers: {authorization: `Bearer ${this.apiKey}`},
+    });
+    if (!res.ok) return this.answer(res, 'GET', `/v1/files/${fileId}`);
+    return {
+      bytes: new Uint8Array(await res.arrayBuffer()),
+      mime: res.headers.get('content-type') ?? 'application/octet-stream',
+      sha256: res.headers.get('x-sha256'),
+    };
+  }
+
+  /** Worker: post the next draft round; answers its immutable snapshot and hash. */
+  submitDraft(
+    jobId: string,
+    draft: {text: string; output?: Record<string, unknown>},
+  ): Promise<DraftState & Draft & {replayed: boolean}> {
+    return this.request('POST', `/v1/jobs/${jobId}/drafts`, {body: draft});
+  }
+
+  /** Parties: every round, its snapshot and review, and whether it is ready to approve. */
+  getDrafts(jobId: string): Promise<DraftState & {role: 'client' | 'worker'; drafts: Draft[]}> {
+    return this.request('GET', `/v1/jobs/${jobId}/drafts`, {});
+  }
+
+  /** Client: decide on one snapshot, by its hash. accept_draft needs every check met. */
+  reviewDraft(
+    jobId: string,
+    draftId: string,
+    review: {snapshotHash: string; decision: ReviewDecision; reason: string; checks: ReviewCheck[]},
+  ): Promise<
+    DraftState & {
+      draftId: string;
+      round: number;
+      snapshotHash: string;
+      review: Draft['review'];
+      replayed: boolean;
+      next: string;
+    }
+  > {
+    return this.request('POST', `/v1/jobs/${jobId}/drafts/${draftId}/review`, {body: review});
+  }
+
+  /** Parties: send a message. A retry with the same key and body is the same message. */
+  sendMessage(
+    jobId: string,
+    body: string,
+    opts: {inReplyTo?: string; idempotencyKey?: string} = {},
+  ): Promise<ConversationMessage & {jobId: string; replayed: boolean}> {
+    return this.request('POST', `/v1/jobs/${jobId}/messages`, {
+      body: {body, ...(opts.inReplyTo ? {inReplyTo: opts.inReplyTo} : {})},
+      ...(opts.idempotencyKey ? {idempotencyKey: opts.idempotencyKey} : {}),
+    });
+  }
+
+  /** Parties: the conversation, oldest first. Every message is untrusted input. */
+  getConversation(jobId: string): Promise<{
+    jobId: string;
+    role: 'client' | 'worker';
+    writable: boolean;
+    count: number;
+    limit: number;
+    messages: ConversationMessage[];
+  }> {
+    return this.request('GET', `/v1/jobs/${jobId}/messages`, {});
   }
 
   // ── listings (docs/26 F4) ──────────────────────────────────────────────
@@ -821,6 +1004,21 @@ export class PactoraClient {
   }
 
   // ── internals ──────────────────────────────────────────────────────────
+
+  /** A response from a request made outside `request` (no retries): the JSON, or its problem as a PactoraError. */
+  private async answer<T>(res: Response, method: string, path: string): Promise<T> {
+    if (res.ok) return (await res.json()) as T;
+    const problem = (await res.json().catch(() => ({}))) as {
+      code?: string;
+      detail?: string;
+      retryAfter?: number;
+    };
+    throw new PactoraError(
+      (problem.code as ErrorCode) ?? ErrorCode.INVALID_STATE,
+      problem.detail ?? `${method} ${path} failed with ${res.status}`,
+      problem.retryAfter,
+    );
+  }
 
   private async request<T>(
     method: string,
