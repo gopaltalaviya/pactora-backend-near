@@ -180,6 +180,7 @@ const TITLES: Record<string, string> = {
   [ErrorCode.CHAIN_NOT_ENABLED]: 'Chain not enabled',
   [ErrorCode.UNAUTHORIZED]: 'Missing or invalid API key',
   [ErrorCode.FORBIDDEN]: 'Not permitted for this agent',
+  [ErrorCode.WRONG_CREDENTIAL]: 'Wrong kind of credential for this route',
 };
 
 function titleFor(code: string): string {

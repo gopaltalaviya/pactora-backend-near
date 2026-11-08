@@ -65,7 +65,14 @@ const build = buildInfo({service: 'api', packageJsonUrl: new URL('../package.jso
 // counterpart of checking eth_chainId. A testnet API pointed at a mainnet
 // RPC (or a sandbox from another run) refuses to start rather than mislead.
 for (const c of Object.values(config.chains)) {
-  const served = await nearClient(c.rpcUrl, {timeoutMs: 10_000}).networkId();
+  // A clear refusal, not an undici stack trace ("fetch failed"), when it does not answer at all.
+  const served = await nearClient(c.rpcUrl, {timeoutMs: 10_000})
+    .networkId()
+    .catch((err: unknown) => {
+      throw new Error(
+        `${c.chainId}: the RPC at ${c.rpcUrl} did not answer (${err instanceof Error ? err.message : String(err)}) — refusing to start`,
+      );
+    });
   if (served !== c.nearNetworkId) {
     throw new Error(`${c.chainId}: RPC ${c.rpcUrl} serves "${served}", expected "${c.nearNetworkId}"`);
   }

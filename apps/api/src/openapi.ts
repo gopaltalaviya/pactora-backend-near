@@ -6,6 +6,8 @@ import {NetworkResponse} from './routes/meta.js';
 import {ReissueBody} from './routes/keys.js';
 import {RunListQuery, StartRun} from './routes/runs.js';
 import {SettleBody, VerifyBody} from './routes/x402.js';
+import {LoginBody, LoginChallengeBody} from './routes/session.js';
+import {PersonBody} from './routes/people.js';
 
 /**
  * The API as OpenAPI 3.0, generated from the SAME zod schemas the handlers
@@ -21,10 +23,10 @@ import {SettleBody, VerifyBody} from './routes/x402.js';
  * everywhere.
  */
 
-type Auth = 'public' | 'key' | 'key+idempotency' | 'owner-signature' | 'metrics-token';
+type Auth = 'public' | 'key' | 'key+idempotency' | 'owner-signature' | 'metrics-token' | 'session';
 
 interface Route {
-  method: 'get' | 'post' | 'patch';
+  method: 'get' | 'post' | 'patch' | 'delete';
   /** Fastify-style, `:id` for a path parameter. */
   path: string;
   summary: string;
@@ -34,7 +36,7 @@ interface Route {
   /** The success body's schema, where it is stated exactly. */
   response?: ZodType<unknown>;
   /** The success status, when not 200. */
-  status?: 201 | 202;
+  status?: 201 | 202 | 204;
   /** Server-sent events rather than JSON. */
   stream?: true;
 }
@@ -136,6 +138,46 @@ export const ROUTES: Route[] = [
     auth: 'owner-signature',
     summary: 'Re-issue: revokes every key, returns a new one once',
     body: ReissueBody,
+    status: 201,
+  },
+  {
+    method: 'post',
+    path: '/v1/session/challenge',
+    auth: 'public',
+    summary: 'People: a single-use message to sign (NEP-413, full-access key) to sign in',
+    body: LoginChallengeBody,
+    status: 201,
+  },
+  {
+    method: 'post',
+    path: '/v1/session',
+    auth: 'owner-signature',
+    summary: 'People: sign in with the signed challenge; returns a ps_ session token once (7 days)',
+    body: LoginBody,
+    status: 201,
+  },
+  {method: 'get', path: '/v1/session', auth: 'session', summary: 'People: who this session is'},
+  {
+    method: 'delete',
+    path: '/v1/session',
+    auth: 'session',
+    summary: 'People: sign out this session',
+    status: 204,
+  },
+  {
+    method: 'delete',
+    path: '/v1/sessions',
+    auth: 'session',
+    summary: "People: sign out every one of the account's sessions",
+    status: 204,
+  },
+  {
+    method: 'post',
+    path: '/v1/people',
+    auth: 'session',
+    summary:
+      "People: record the account's on-chain agent (owner = wallet = the account) as a person; no API key",
+    body: PersonBody,
     status: 201,
   },
   {
@@ -296,7 +338,9 @@ export function openApiDocument(version: string): Record<string, unknown> {
         ? [{apiKey: []}]
         : r.auth === 'metrics-token'
           ? [{metricsToken: []}]
-          : [];
+          : r.auth === 'session'
+            ? [{session: []}]
+            : [];
     const ok = String(r.status ?? 200);
     const operation: Record<string, unknown> = {
       summary: r.summary,
@@ -307,20 +351,23 @@ export function openApiDocument(version: string): Record<string, unknown> {
         ? {requestBody: {required: true, content: {'application/json': {schema: schemaOf(r.body)}}}}
         : {}),
       responses: {
-        [ok]: r.stream
-          ? {
-              description: 'A server-sent event stream',
-              content: {'text/event-stream': {schema: {type: 'string'}}},
-            }
-          : r.response
-            ? {
-                description: 'Success',
-                content: {'application/json': {schema: schemaOf(r.response, 'output')}},
-              }
-            : {
-                description: 'Success — the shape is in docs/15',
-                content: {'application/json': {schema: {type: 'object'}}},
-              },
+        [ok]:
+          r.status === 204
+            ? {description: 'Done; no body'}
+            : r.stream
+              ? {
+                  description: 'A server-sent event stream',
+                  content: {'text/event-stream': {schema: {type: 'string'}}},
+                }
+              : r.response
+                ? {
+                    description: 'Success',
+                    content: {'application/json': {schema: schemaOf(r.response, 'output')}},
+                  }
+                : {
+                    description: 'Success — the shape is in docs/15',
+                    content: {'application/json': {schema: {type: 'object'}}},
+                  },
         default: {
           description: 'An error',
           content: {'application/problem+json': {schema: {$ref: '#/components/schemas/Problem'}}},
@@ -350,6 +397,11 @@ export function openApiDocument(version: string): Record<string, unknown> {
           description: 'The agent API key: Authorization: Bearer ax_<keyId>_<secret>',
         },
         metricsToken: {type: 'http', scheme: 'bearer', description: 'METRICS_TOKEN, required in production'},
+        session: {
+          type: 'http',
+          scheme: 'bearer',
+          description: "A person's session from POST /v1/session: Authorization: Bearer ps_<id>_<secret>",
+        },
       },
     },
   };

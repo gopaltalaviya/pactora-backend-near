@@ -15,6 +15,9 @@ import {registerJobRoutes, type JobRouteDeps} from './routes/jobs.js';
 import {registerKeyRoutes} from './routes/keys.js';
 import {registerMetaRoutes} from './routes/meta.js';
 import {registerRunRoutes} from './routes/runs.js';
+import {registerPeopleRoutes} from './routes/people.js';
+import {registerSessionRoutes} from './routes/session.js';
+import {sweepExpiredSessions} from './auth.js';
 import {registerStatusRoutes, type StatusDeps} from './routes/status.js';
 import {registerX402Routes} from './routes/x402.js';
 import {RunService, type RunExecutor} from './runs.js';
@@ -83,6 +86,8 @@ export interface AppDeps {
   build?: BuildInfo;
   /** Dependencies `/v1/status` reports on. */
   status?: StatusDeps;
+  /** How often expired sessions and sign-in challenges are deleted; default hourly. */
+  sessionSweepMs?: number;
   /** Called for every route as it is registered — the docs test lists them. */
   onRoute?: (route: {method: string | string[]; url: string}) => void;
 }
@@ -124,7 +129,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: deps.corsOrigins && deps.corsOrigins.length > 0 ? deps.corsOrigins : '*',
     credentials: false,
-    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    // DELETE: signing out (DELETE /v1/session, /v1/sessions).
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'last-event-id', 'x-payment'],
     exposedHeaders: ['x-trace-id', 'retry-after'],
   });
@@ -278,6 +284,41 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     bus,
     submit: deps.submit,
     ...(deps.readPayment ? {readPayment: deps.readPayment} : {}),
+  });
+
+  await registerSessionRoutes(app, {
+    db: deps.db,
+    enabled: Object.keys(deps.chains),
+    defaultChainId: deps.defaultChainId,
+    verifyOwner: deps.verifyOwner,
+    ...(deps.signRecipient ? {signRecipient: deps.signRecipient} : {}),
+    ...(deps.rateLimitPerMinute ? {rateLimitPerMinute: deps.rateLimitPerMinute} : {}),
+  });
+  await registerPeopleRoutes(app, {
+    db: deps.db,
+    enabled: Object.keys(deps.chains),
+    ...(deps.readIdentity ? {readIdentity: deps.readIdentity} : {}),
+  });
+
+  // Expired sessions and sign-in challenges authenticate nobody; deleting
+  // them only keeps the tables small. In-process, on a timer that close()
+  // stops, so no extra service is needed. A failed sweep waits for the next.
+  let sweepTimer: NodeJS.Timeout | undefined;
+  const sweepEvery = deps.sessionSweepMs ?? 60 * 60 * 1000;
+  const sweep = () => {
+    sweepTimer = setTimeout(() => {
+      sweepExpiredSessions(deps.db)
+        .catch((err: unknown) => app.log.warn({err}, 'session sweep failed'))
+        .finally(() => {
+          if (sweepTimer) sweep();
+        });
+    }, sweepEvery);
+    sweepTimer.unref();
+  };
+  sweep();
+  app.addHook('onClose', async () => {
+    clearTimeout(sweepTimer);
+    sweepTimer = undefined;
   });
 
   await registerRunRoutes(app, {

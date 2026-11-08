@@ -21,6 +21,7 @@
     "lint:fix": "eslint . --fix",
     "format:check": "prettier --check .",
     "test:coverage": "vitest run --coverage",
+    "test:startup": "node scripts/test-startup.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test"
   },
   "devDependencies": {

@@ -51,6 +51,20 @@ export interface OnChainJob {
   disputeDeadline: bigint;
 }
 
+/** The deadline whose passing made `exit` due. */
+export function deadlineOf(job: OnChainJob, exit: Exit): bigint {
+  switch (exit) {
+    case 'expire_unaccepted':
+      return job.acceptDeadline;
+    case 'expire_undelivered':
+      return job.workDeadline;
+    case 'auto_approve':
+      return job.reviewDeadline;
+    case 'expire_dispute':
+      return job.disputeDeadline;
+  }
+}
+
 /**
  * Which exit, if any, the chain will accept for this job at `now`.
  *
@@ -86,6 +100,13 @@ export interface KeeperDeps {
   };
   /** Counts exits sent and failed, by exit — optional. */
   onExit?: (exit: Exit, outcome: 'sent' | 'failed') => void;
+  /**
+   * After each sweep: seconds since the deadline of the oldest exit that was
+   * due and still not sent (0 when none is left). docs/26 F29 — an exit
+   * that keeps failing is money held past its deadline, and this is what an
+   * alert watches.
+   */
+  onBacklog?: (ageSeconds: number) => void;
 }
 
 export interface SweepResult {
@@ -104,14 +125,18 @@ export class Keeper {
   async sweep(): Promise<SweepResult> {
     const ids = await this.deps.openJobs();
     const result: SweepResult = {checked: ids.length, sent: [], failed: []};
-    if (ids.length === 0) return result;
+    if (ids.length === 0) {
+      this.deps.onBacklog?.(0);
+      return result;
+    }
 
     const now = await this.deps.now();
+    let oldestUnsent: bigint | null = null;
 
     for (const id of ids) {
       const job = await this.deps.readJob(id);
       const exit = job ? dueExit(job, now) : null;
-      if (!exit) continue;
+      if (!job || !exit) continue;
 
       try {
         const txHash = await this.deps.send(exit, id);
@@ -124,10 +149,13 @@ export class Keeper {
         // working, not breaking.
         const reason = err instanceof Error ? err.message.split('\n')[0]! : String(err);
         result.failed.push({chainJobId: id.toString(), exit, reason});
+        const due = deadlineOf(job, exit);
+        if (oldestUnsent === null || due < oldestUnsent) oldestUnsent = due;
         this.deps.onExit?.(exit, 'failed');
         this.log.warn({chainJobId: id.toString(), exit, reason}, 'exit not sent');
       }
     }
+    this.deps.onBacklog?.(oldestUnsent === null ? 0 : Number(now - oldestUnsent));
     return result;
   }
 
@@ -227,10 +255,15 @@ export function chainKeeper(opts: {
     'Permissionless exits the keeper sent or failed to send',
     ['exit', 'outcome'],
   );
+  const backlog = opts.metrics?.gauge(
+    'keeper_backlog_age_seconds',
+    'Seconds since the deadline of the oldest due exit the keeper has not managed to send (0 = none)',
+  );
 
   return new Keeper({
     ...(opts.logger ? {logger: opts.logger} : {}),
     ...(exits ? {onExit: (exit, outcome) => exits.labels(exit, outcome).inc()} : {}),
+    ...(backlog ? {onBacklog: (age) => backlog.set(age)} : {}),
     openJobs:
       opts.openJobs ??
       (async () => {

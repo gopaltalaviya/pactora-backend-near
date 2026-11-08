@@ -31,6 +31,11 @@ export const ErrorCode = {
    * refusal the caller's model cannot argue with: hire someone else.
    */
   COUNTERPARTY_BLOCKED: 'COUNTERPARTY_BLOCKED',
+  /**
+   * A real credential of the wrong kind: a person's session (`ps_`) on a
+   * route for agent keys, or an agent key (`ax_`) on a route for people.
+   */
+  WRONG_CREDENTIAL: 'WRONG_CREDENTIAL',
 } as const;
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
@@ -52,6 +57,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   UPSTREAM_UNAVAILABLE: 503,
   RATE_LIMITED: 429,
   COUNTERPARTY_BLOCKED: 403,
+  WRONG_CREDENTIAL: 401,
 };
 
 export interface Problem {

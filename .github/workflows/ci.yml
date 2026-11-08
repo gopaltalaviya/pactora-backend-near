@@ -110,6 +110,10 @@ jobs:
           PACTORA_CONTRACTS_ROOT: ../pactora-contracts-near
         # Coverage floors are enforced by vitest.config.ts.
         run: pnpm test:coverage
+      # Each service, given a bad configuration, must refuse to start and say
+      # why (docs/26 F26). Needs the build above; reaches no network.
+      - working-directory: pactora-backend-near
+        run: pnpm test:startup
 
   images:
     name: images

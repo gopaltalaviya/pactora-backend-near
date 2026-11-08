@@ -51,12 +51,23 @@ export const jobPath = pgEnum('job_path', ['escrow', 'direct']);
 
 export const outcome = pgEnum('outcome', ['success', 'failed', 'dispute_lost']);
 
+/**
+ * Who an `agents` row is (docs/26 F2). `agent`: software, with an API key and
+ * a function-call key the signer holds. `person`: a human whose own NEAR
+ * account is both the on-chain agent's owner and its wallet, who signs in
+ * with a session and signs transactions in the browser — never an API key.
+ */
+export const agentKind = pgEnum('agent_kind', ['agent', 'person']);
+
 // ─────────────────────────── identity ───────────────────────────
 
 export const agents = pgTable(
   'agents',
   {
     id: bigserial('id', {mode: 'number'}).primaryKey(),
+    /** The id a person's record is shown by (docs/26 F2); agents are still shown by `id`. */
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    kind: agentKind('kind').notNull().default('agent'),
     chainId: text('chain_id').notNull(),
     /** ERC-8004 ERC-721 token id. NULL until the indexer sees Registered. */
     chainAgentId: chainUint('chain_agent_id'),
@@ -90,6 +101,7 @@ export const agents = pgTable(
     index('agents_discovery_idx').on(t.chainId, t.active, t.pricePerTask),
     // Target of the composite FK that makes a cross-chain job impossible.
     uniqueIndex('agents_id_chain_uk').on(t.id, t.chainId),
+    uniqueIndex('agents_public_id_uk').on(t.publicId),
   ],
 );
 
@@ -463,6 +475,53 @@ export const registrationChallenges = pgTable(
     expiresAt: timestamp('expires_at', {withTimezone: true}).notNull(),
   },
   (t) => [index('registration_challenges_owner_idx').on(t.ownerAddress, t.requester)],
+);
+
+/**
+ * A pending person sign-in (docs/26 F1): the nonce a person signs with
+ * NEP-413 to prove control of `accountId`. Same rules as
+ * `registration_challenges`: single-use (deleted when spent), five minutes,
+ * a few live per requester address.
+ */
+export const loginChallenges = pgTable(
+  'login_challenges',
+  {
+    nonce: text('nonce').primaryKey(),
+    chainId: text('chain_id').notNull(),
+    accountId: text('account_id').notNull(),
+    requester: text('requester').notNull().default(''),
+    expiresAt: timestamp('expires_at', {withTimezone: true}).notNull(),
+  },
+  (t) => [index('login_challenges_account_idx').on(t.accountId, t.requester)],
+);
+
+/**
+ * A person's signed-in session (docs/26 F1): a bearer token
+ * `ps_<keyId>_<secret>`, distinct from an agent's `ax_` key. Only
+ * `sha256$<hex>` of the whole token is stored, as for API keys. Not a cookie:
+ * the site and the API are on different domains.
+ */
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    /** The public half of the token; how a request finds its row. */
+    keyId: text('key_id').notNull(),
+    secretHash: text('secret_hash').notNull(),
+    accountId: text('account_id').notNull(),
+    chainId: text('chain_id').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', {withTimezone: true}).notNull(),
+    revokedAt: timestamp('revoked_at', {withTimezone: true}),
+    lastUsedAt: timestamp('last_used_at', {withTimezone: true}),
+    /** The client address that signed in. */
+    requester: text('requester').notNull().default(''),
+  },
+  (t) => [
+    uniqueIndex('sessions_key_id_uk').on(t.keyId),
+    index('sessions_account_idx').on(t.accountId),
+    index('sessions_expires_idx').on(t.expiresAt),
+  ],
 );
 
 /**

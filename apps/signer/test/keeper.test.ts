@@ -3,6 +3,7 @@ import {fileURLToPath} from 'node:url';
 import {loadConfig} from '@pactora/config';
 import {KeyPair, TGAS, keyPairKey, nearClient} from '@pactora/near';
 import {Keeper, JobState, chainKeeper, dueExit, type Exit, type OnChainJob} from '../src/keeper.js';
+import {createMetrics} from '@pactora/service';
 import {FakeNear} from './helpers/fake-near.js';
 
 /**
@@ -121,6 +122,38 @@ describe('a sweep', () => {
     ]);
   });
 
+  /**
+   * docs/26 F29: an exit that keeps failing is money held past its deadline.
+   * The gauge is how long the OLDEST due exit has been waiting, so an alert
+   * can fire on it; 0 once nothing due is left unsent.
+   */
+  it('reports how long the oldest due exit it could not send has been waiting', async () => {
+    const ages: number[] = [];
+    const jobs = {
+      '1': job({}), //                                          due since 1000, fails
+      '2': job({state: JobState.ACCEPTED}), //                   due since 2000, fails
+      '3': job({state: JobState.SUBMITTED, reviewDeadline: 500n}), // due since 500, sent
+    };
+    const failing = new Set(['1', '2']);
+    const keeper = new Keeper({
+      openJobs: async () => Object.keys(jobs).map(BigInt),
+      readJob: async (id) => jobs[id.toString() as keyof typeof jobs],
+      now: async () => 5_000n,
+      send: async (_exit, id) => {
+        if (failing.has(id.toString())) throw new Error('rpc down');
+        return 'tx';
+      },
+      onBacklog: (s) => ages.push(s),
+    });
+
+    await keeper.sweep();
+    expect(ages).toEqual([4_000]);
+
+    failing.clear();
+    await keeper.sweep();
+    expect(ages).toEqual([4_000, 0]);
+  });
+
   it('reads no clock and sends nothing when there is nothing open', async () => {
     let clockRead = false;
     const keeper = new Keeper({
@@ -204,6 +237,25 @@ describe('on a NEAR chain', () => {
     }
     expect(fake.state.sent.map((s) => s.nonce)).toEqual([71n, 72n, 73n]);
     expect(result.sent.map((s) => s.txHash)).toEqual(fake.state.sent.map((s) => s.hash));
+  });
+
+  it('exports the backlog age as keeper_backlog_age_seconds', async () => {
+    const t = nowS();
+    onChain[1] = jobView('Created', {accept_deadline: t - 30});
+    fake.state.onSend = () => ({kind: 'panic', name: 'InvalidState'});
+    const metrics = createMetrics('keeper-backlog-test');
+    await chainKeeper({
+      db: undefined as never,
+      chain,
+      near: nearClient(fake.url, {retries: 1}),
+      account: {accountId: KEEPER, key},
+      openJobs: async () => [1n],
+      metrics,
+    }).sweep();
+    const text = await metrics.registry.metrics();
+    const line = text.split('\n').find((l) => l.startsWith('keeper_backlog_age_seconds'));
+    expect(line).toBeDefined();
+    expect(Number(line!.split(' ').pop())).toBeGreaterThanOrEqual(30);
   });
 
   it('never reuses a nonce when the node has not caught up', async () => {

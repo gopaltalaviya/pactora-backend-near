@@ -1,7 +1,7 @@
 import {createHash, randomBytes, timingSafeEqual} from 'node:crypto';
-import {eq, and, isNull} from 'drizzle-orm';
+import {eq, and, isNull, lte} from 'drizzle-orm';
 import type {FastifyRequest} from 'fastify';
-import {type Db, apiKeys, agents} from '@pactora/db';
+import {type Db, apiKeys, agents, loginChallenges, sessions} from '@pactora/db';
 import {PactoraError, ErrorCode} from '@pactora/shared';
 
 /**
@@ -21,6 +21,16 @@ import {PactoraError, ErrorCode} from '@pactora/shared';
  * saying to re-issue them.
  */
 const KEY_PATTERN = /^ax_([0-9a-f]{16})_([A-Za-z0-9_-]{32})$/;
+
+/**
+ * Person sessions (docs/26 F1): `ps_<keyId>_<secret>`, the same shape as an
+ * agent key with a different prefix, so neither can be mistaken for the
+ * other. Bearer, never a cookie: the site and the API are on different
+ * domains, and a token a page must attach itself is no ambient credential —
+ * a hostile page cannot ride it, so no CSRF defence is needed. Only
+ * `sha256$<hex>` of the whole token is stored.
+ */
+const SESSION_PATTERN = /^ps_([0-9a-f]{16})_([A-Za-z0-9_-]{32})$/;
 
 export function generateApiKey(): {key: string; keyId: string} {
   const keyId = randomBytes(8).toString('hex');
@@ -69,6 +79,13 @@ export async function authenticate(db: Db, request: FastifyRequest): Promise<Cal
   }
   const presented = header.slice('Bearer '.length).trim();
 
+  if (SESSION_PATTERN.test(presented)) {
+    throw new PactoraError(
+      ErrorCode.WRONG_CREDENTIAL,
+      "a person's session token cannot call this route; it takes an agent API key (ax_<id>_<secret>)",
+    );
+  }
+
   const keyId = keyIdOf(presented);
   if (!keyId) {
     throw new PactoraError(
@@ -92,6 +109,93 @@ export async function authenticate(db: Db, request: FastifyRequest): Promise<Cal
   await db.update(apiKeys).set({lastUsedAt: new Date()}).where(eq(apiKeys.id, match.id));
 
   return {agentId: agent.id, chainId: agent.chainId, scopes: match.scopes, keyId};
+}
+
+// ─────────────────────────── people ───────────────────────────
+
+/** How long a session lasts. Not extended by use: signing in again is one wallet prompt. */
+export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function generateSessionToken(): {token: string; keyId: string} {
+  const keyId = randomBytes(8).toString('hex');
+  return {token: `ps_${keyId}_${randomBytes(24).toString('base64url')}`, keyId};
+}
+
+/** A signed-in person: the NEAR account that proved control, on one chain. */
+export interface PersonCaller {
+  kind: 'person';
+  account: string;
+  chainId: string;
+  /** The session row; logging out acts on it. */
+  sessionId: number;
+  expiresAt: Date;
+}
+
+export type AgentCaller = Caller & {kind: 'agent'};
+
+function bearerOf(request: FastifyRequest, what: string): string {
+  const header = request.headers.authorization;
+  if (!header?.startsWith('Bearer ')) {
+    throw new PactoraError(ErrorCode.UNAUTHORIZED, `missing Authorization: Bearer <${what}>`);
+  }
+  return header.slice('Bearer '.length).trim();
+}
+
+/**
+ * Resolve a person from `Authorization: Bearer ps_...`. Refuses an expired
+ * or revoked session, and an agent key (which is a credential for software,
+ * not for a person).
+ */
+export async function authenticatePerson(db: Db, request: FastifyRequest): Promise<PersonCaller> {
+  const presented = bearerOf(request, 'session token');
+  if (keyIdOf(presented)) {
+    throw new PactoraError(
+      ErrorCode.WRONG_CREDENTIAL,
+      'an agent API key cannot call this route; sign in as a person (POST /v1/session)',
+    );
+  }
+  const keyId = SESSION_PATTERN.exec(presented)?.[1];
+  if (!keyId) {
+    throw new PactoraError(ErrorCode.UNAUTHORIZED, 'not a Pactora session token (expected ps_<id>_<secret>)');
+  }
+  const row = await db.query.sessions.findFirst({
+    where: and(eq(sessions.keyId, keyId), isNull(sessions.revokedAt)),
+  });
+  if (!row || !verifyApiKey(presented, row.secretHash) || row.expiresAt.getTime() <= Date.now()) {
+    throw new PactoraError(ErrorCode.UNAUTHORIZED, 'unknown, expired or signed-out session — sign in again');
+  }
+  await db.update(sessions).set({lastUsedAt: new Date()}).where(eq(sessions.id, row.id));
+  return {
+    kind: 'person',
+    account: row.accountId,
+    chainId: row.chainId,
+    sessionId: row.id,
+    expiresAt: row.expiresAt,
+  };
+}
+
+/** For a route either kind of caller may use: dispatched on the token's prefix. */
+export async function authenticateCaller(
+  db: Db,
+  request: FastifyRequest,
+): Promise<AgentCaller | PersonCaller> {
+  const presented = bearerOf(request, 'API key or session token');
+  if (SESSION_PATTERN.test(presented)) return authenticatePerson(db, request);
+  return {kind: 'agent', ...(await authenticate(db, request))};
+}
+
+/**
+ * Delete expired sessions and sign-in challenges. Run hourly by the API
+ * (app.ts); a lapsed row authenticates nobody, so this only bounds the tables.
+ */
+export async function sweepExpiredSessions(db: Db): Promise<{sessions: number; challenges: number}> {
+  const now = new Date();
+  const s = await db.delete(sessions).where(lte(sessions.expiresAt, now)).returning({id: sessions.id});
+  const c = await db
+    .delete(loginChallenges)
+    .where(lte(loginChallenges.expiresAt, now))
+    .returning({nonce: loginChallenges.nonce});
+  return {sessions: s.length, challenges: c.length};
 }
 
 /** The chain a request operates on: explicit `?chainId=`, else the caller's. */

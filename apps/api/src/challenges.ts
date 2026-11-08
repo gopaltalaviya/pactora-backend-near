@@ -55,6 +55,18 @@ export function registrationMessage(r: {
   ].join('\n');
 }
 
+/**
+ * What a person signs to sign in (docs/26 F1). Names the chain and the
+ * account, so a signature for one cannot open a session for another; the
+ * nonce makes it single-use. Signing it moves no funds and approves nothing
+ * on chain — the first line says what it is, and the site shows it.
+ */
+export function loginMessage(r: {chainId: string; accountId: string; nonce: string}): string {
+  return ['Pactora: sign in.', `Chain: ${r.chainId}`, `Account: ${r.accountId}`, `Nonce: ${r.nonce}`].join(
+    '\n',
+  );
+}
+
 /** A NEP-413 signature as a wallet returns it, plus what it was over. */
 export interface OwnerSignature {
   chainId: string;

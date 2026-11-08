@@ -65,7 +65,12 @@ const near = nearClient(chain.rpcUrl);
 
 // Before any key is loaded: an RPC serving another network — a mistyped
 // RPC_URL_<SLUG> — would have this signer sign that network's transactions.
-const served = await near.networkId();
+// A clear refusal, not an undici stack trace ("fetch failed"), when it does not answer at all.
+const served = await near.networkId().catch((err: unknown) => {
+  throw new Error(
+    `the RPC at ${chain.rpcUrl} (${chain.chainId}) did not answer (${err instanceof Error ? err.message : String(err)}) — refusing to start`,
+  );
+});
 if (served !== chain.nearNetworkId) {
   throw new Error(
     `the RPC at ${chain.rpcUrl} serves NEAR network "${served}", not "${chain.nearNetworkId}" (${chain.chainId}) — refusing to start`,
