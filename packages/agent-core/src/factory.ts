@@ -6,8 +6,10 @@ import {ClaudeBrain} from './providers/claude.js';
 import {GeminiBrain} from './providers/gemini.js';
 import {GroqBrain} from './providers/groq.js';
 import {OllamaBrain} from './providers/ollama.js';
+import {NearAiBrain} from './providers/near-ai.js';
+import {parseJudgeEnv} from '@pactora/shared';
 
-export {ClaudeBrain, GeminiBrain, GroqBrain, OllamaBrain};
+export {ClaudeBrain, GeminiBrain, GroqBrain, OllamaBrain, NearAiBrain};
 
 /**
  * Brain assembly, kept out of `index.ts`.
@@ -66,6 +68,40 @@ export function buildBrain(opts: BuildBrainOptions): Brain {
     opts,
   );
 
+  return mode === 'record' ? new RecordingBrain(withBackstop, cachePath) : withBackstop;
+}
+
+export interface BuildJudgeBrainOptions extends FallbackOptions {
+  env?: NodeJS.ProcessEnv;
+  cacheDir?: string;
+}
+
+/**
+ * The judge's own brain, when `JUDGE_PROVIDER` names one; `undefined` means
+ * the orchestrator's brain judges, as it always has (the default).
+ *
+ * `JUDGE_PROVIDER=near-ai` needs `NEAR_AI_API_KEY`, and is refused without
+ * it in every mode, so a deployment cannot look configured and not be.
+ *
+ * `AGENT_MODE` still decides whether tokens are spent: under `cached` (the
+ * default) this returns `undefined`, so the judge replays the orchestrator's
+ * recordings — the Verdict cache key does not depend on who answered — and
+ * nothing reaches the network. Under `live` and `record` NEAR AI answers,
+ * with the recording as the backstop, as for every other chain.
+ */
+export function buildJudgeBrain(opts: BuildJudgeBrainOptions = {}): Brain | undefined {
+  const env = opts.env ?? process.env;
+  const judge = parseJudgeEnv(env);
+  const mode = (env['AGENT_MODE'] ?? 'cached') as AgentMode;
+  if (judge.JUDGE_PROVIDER === 'chain' || mode === 'cached') return undefined;
+
+  const cacheDir = opts.cacheDir ?? env['AGENT_CACHE_DIR'] ?? join(process.cwd(), '.agent-cache');
+  const cachePath = join(cacheDir, 'orchestrator.json');
+  const nearAi = new NearAiBrain(judge.NEAR_AI_MODEL, judge.NEAR_AI_API_KEY, judge.NEAR_AI_BASE_URL);
+  const withBackstop = new FallbackBrain(
+    [nearAi, new CachedBrain(cachePath, {maxReplayMs: replayCap(env)})],
+    opts,
+  );
   return mode === 'record' ? new RecordingBrain(withBackstop, cachePath) : withBackstop;
 }
 

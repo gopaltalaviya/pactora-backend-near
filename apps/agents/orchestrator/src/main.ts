@@ -3,6 +3,7 @@ import {
   Orchestrator,
   assertNoLegacyEnv,
   buildBrain,
+  buildJudgeBrain,
   describeBrain,
   type OrchestratorEvent,
 } from '@pactora/agent-core';
@@ -43,15 +44,17 @@ const client = new PactoraClient({
 });
 
 const brain = buildBrain({role: 'orchestrator'});
+const judgeBrain = buildJudgeBrain();
 const network = await client.network();
 const budget = await client.budget();
 
 console.log(`\nPactora orchestrator — ${network.name}${network.testnet ? ' (testnet)' : ' — REAL FUNDS'}`);
 console.log(`  brain    ${await describeBrain(brain)}`);
+if (judgeBrain) console.log(`  judge    ${await describeBrain(judgeBrain)}`);
 console.log(`  budget   ${budget.dailyRemainingDisplay} today, ${budget.maxSingleSpendDisplay} per hire`);
 console.log(`  goal     ${goal}\n`);
 
-const orchestrator = new Orchestrator({client, brain, log: print});
+const orchestrator = new Orchestrator({client, brain, ...(judgeBrain ? {judgeBrain} : {}), log: print});
 const report = await orchestrator.run(goal);
 
 console.log(`\n── result ──`);

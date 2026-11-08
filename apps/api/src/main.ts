@@ -27,6 +27,7 @@ import {DEFAULT_SIGN_RECIPIENT, makeOwnerVerifier} from './challenges.js';
 import {makeRunExecutor} from './run-executor.js';
 import {coalesce} from './coalesce.js';
 import {S3ObjectStore} from '@pactora/storage';
+import {JudgeEnv, judgeKeyRule} from '@pactora/shared';
 
 const Env = z
   .object({
@@ -114,7 +115,15 @@ const Env = z
           .map((s) => s.trim())
           .filter(Boolean),
       ),
+    /** Who judges returned work: `chain` (the default, the orchestrator's brain) or `near-ai` (NEAR AI Cloud). Rules in @pactora/shared. */
+    JUDGE_PROVIDER: JudgeEnv.shape.JUDGE_PROVIDER,
+    /** Required with JUDGE_PROVIDER=near-ai. A secret: never logged. */
+    NEAR_AI_API_KEY: JudgeEnv.shape.NEAR_AI_API_KEY,
+    NEAR_AI_MODEL: JudgeEnv.shape.NEAR_AI_MODEL,
+    NEAR_AI_BASE_URL: JudgeEnv.shape.NEAR_AI_BASE_URL,
   })
+  // A judge that is chosen but cannot authenticate is refused at boot, not at the first run.
+  .refine(judgeKeyRule.check, {message: judgeKeyRule.message, path: judgeKeyRule.path})
   // In production the browser origins must be named: `*` is fine for a local
   // demo and wrong for a deployment with a real front end.
   .refine((e) => e.NODE_ENV !== 'production' || e.CORS_ORIGINS.length > 0, {

@@ -230,6 +230,11 @@ services:
       BRAIN_CHAIN_ORCHESTRATOR: ${BRAIN_CHAIN_ORCHESTRATOR:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # The judge on NEAR AI Cloud (off unless JUDGE_PROVIDER=near-ai; then the key is required).
+      JUDGE_PROVIDER: ${JUDGE_PROVIDER:-}
+      NEAR_AI_API_KEY: ${NEAR_AI_API_KEY:-}
+      NEAR_AI_MODEL: ${NEAR_AI_MODEL:-}
+      NEAR_AI_BASE_URL: ${NEAR_AI_BASE_URL:-}
       # A local model (no quota): BRAIN_CHAIN_ORCHESTRATOR=ollama, Ollama on the host.
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}

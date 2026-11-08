@@ -36,7 +36,14 @@ import {loadConfig} from '@pactora/config';
 import {createDb, closeDb} from '@pactora/db';
 import {PactoraClient, verifyWebhook} from '@pactora/sdk';
 import {signNep413} from '@pactora/near';
-import {Orchestrator, Worker, buildBrain, describeBrain, confidence} from '@pactora/agent-core';
+import {
+  Orchestrator,
+  Worker,
+  buildBrain,
+  buildJudgeBrain,
+  describeBrain,
+  confidence,
+} from '@pactora/agent-core';
 import {Indexer} from '../apps/indexer/dist/indexer.js';
 import {openSource} from '../apps/indexer/dist/source.js';
 import {
@@ -196,6 +203,9 @@ try {
   await portFree(SIGNER_PORT, 'signer');
   const orchestratorBrain = buildBrain({role: 'orchestrator'});
   ok(`models: ${await describeBrain(orchestratorBrain)}`);
+  // JUDGE_PROVIDER=near-ai judges on NEAR AI Cloud; under AGENT_MODE=cached it replays like the rest.
+  const judgeBrain = buildJudgeBrain();
+  if (judgeBrain) ok(`judge: ${await describeBrain(judgeBrain)}`);
 
   // ── 1. people and money ───────────────────────────────────────────────
   const run = `d${Date.now().toString(36)}`;
@@ -439,6 +449,7 @@ try {
   const orchestrator = new Orchestrator({
     client,
     brain: orchestratorBrain,
+    ...(judgeBrain ? {judgeBrain} : {}),
     log: (e) => console.log(`  ${describeEvent(e)}`),
   });
   const report = await orchestrator.run(GOAL, {timeoutMs: 180_000});
@@ -1061,6 +1072,96 @@ try {
     } finally {
       await call(root.account, PACTORA, 'set_arbiter', {arbiter: chain.contracts.Arbiter}, {deposit: 1n});
     }
+  }
+
+  // ── 8h. a held payout, on chain (docs/26 F14) ─────────────────────────
+  // A worker put on hold mid-job must not be paid by Pactora's own services:
+  // the signer refuses the client's approve, and the keeper leaves the job
+  // alone even after its auto_approve falls due. The hold is written the way
+  // screening writes it (openCases: a strong match holds the account).
+  // Clearing it lets the keeper's auto_approve pay, on chain. Soft by design:
+  // anyone else could still send the permissionless exit (docs/26 F13).
+  {
+    const hOwner = await createPerson(root, `${run}-heldworker`, '3', {save: keep});
+    await mintTo(root, TOKEN, hOwner, 20_000_000);
+    // A capability no in-process worker listens for: this job moves only when the demo moves it.
+    const hw = await registerAgent(hOwner, {name: 'Held Worker', capability: 'held-review', price: '40000'});
+    await deposit(hOwner, TOKEN, PACTORA, BigInt(params.min_stake) + 1_000_000n, {
+      Stake: {agent_id: Number(hw.chainAgentId)},
+    });
+    const hsdk = new PactoraClient({baseUrl: base, apiKey: hw.apiKey, chainId: CHAIN_ID});
+    const PRICE = 40_000n;
+    const purseStart = BigInt((await purse(hw)).balance);
+    const hired = await client.hire({
+      workerAgentId: Number(hw.agentId),
+      spec: {capability: 'held-review', input: {q: 'review this contract'}},
+      maxPrice: String(PRICE),
+      path: 'escrow',
+    });
+    const jobId = hired.jobId;
+    const stateOf = async () => (await client.getJob(jobId)).state;
+    for (let i = 0; i < 60 && !(await client.getJob(jobId)).chainJobId; i++) await sleep(500);
+    await hsdk.accept(jobId);
+    for (let i = 0; i < 60 && (await stateOf()) !== 'accepted'; i++) await sleep(500);
+    await hsdk.submitResult(jobId, {output: {verdict: 'no issues found'}});
+    for (let i = 0; i < 60 && (await stateOf()) !== 'submitted'; i++) await sleep(500);
+    const chainJobId = Number((await client.getJob(jobId)).chainJobId);
+    const jobOnChain = () => view(root.provider, PACTORA, 'get_job', {job_id: chainJobId});
+
+    const [{id: heldId}] = await sql`SELECT id FROM agents WHERE wallet_address = ${hw.wallet}`;
+    const setStanding = (standing, reason) => sql`
+      INSERT INTO account_standing (agent_id, standing, reason, updated_at)
+      VALUES (${heldId}, ${standing}, ${reason}, now())
+      ON CONFLICT (agent_id) DO UPDATE SET standing = EXCLUDED.standing, reason = EXCLUDED.reason, updated_at = now()`;
+    await setStanding('hold', 'a strong sanctions-list match is under review');
+    const atHold = BigInt((await purse(hw)).balance);
+    (await jobOnChain()).state === 'Submitted'
+      ? ok(`job ${chainJobId} reached the payout point (Submitted on chain), and its worker is put on hold`)
+      : fail(`held job before payout: ${(await jobOnChain()).state}`);
+
+    // The client's approve: the signer must refuse to sign it.
+    await client.approve(jobId).then(
+      () => fail('the signer signed an approve paying a worker on hold'),
+      (e) =>
+        /held|hold/i.test(`${e.code ?? ''} ${e.message ?? e}`)
+          ? ok(`the client's approve is refused by the signer: ${e.code ?? e.status} (${e.message})`)
+          : fail(`approve refused, but not for the hold: ${e.code ?? ''} ${e.message ?? e}`),
+    );
+
+    // The keeper: wait until auto_approve is due by the chain's own clock,
+    // then two more sweeps (KEEPER_INTERVAL_MS is 5 s here).
+    const deadline = BigInt((await jobOnChain()).review_deadline);
+    const chainNow = async () =>
+      BigInt((await root.provider.viewBlock({finality: 'final'})).header.timestamp_nanosec) / 1_000_000_000n;
+    for (let i = 0; i < 120 && (await chainNow()) <= deadline + 1n; i++) await sleep(500);
+    await sleep(12_000);
+    const whileHeld = await jobOnChain();
+    const purseHeld = BigInt((await purse(hw)).balance);
+    const [dbJob] =
+      await sql`SELECT state FROM jobs WHERE chain_id = ${CHAIN_ID} AND chain_job_id = ${String(chainJobId)}`;
+    (await chainNow()) > deadline && whileHeld.state === 'Submitted' && purseHeld === atHold
+      ? ok(
+          `after its review deadline passed (auto_approve due) and two keeper sweeps, the held job is still Submitted on chain, not settled; the worker's purse is unchanged (${chain.formatToken(purseHeld)})`,
+        )
+      : fail(
+          `while held: job ${whileHeld.state}, purse ${atHold} → ${purseHeld}, chain now ${await chainNow()} vs deadline ${deadline}`,
+        );
+    dbJob?.state === 'submitted'
+      ? ok('the database agrees: the held job is not settled')
+      : fail(`held job in the database: ${dbJob?.state}`);
+
+    // Cleared (two reviewers in production): the keeper's auto_approve pays.
+    await setStanding('clear', 'cleared by review');
+    for (let i = 0; i < 60 && (await jobOnChain()).state !== 'Settled'; i++) await sleep(500);
+    const paidOut = await jobOnChain();
+    const gain = BigInt((await purse(hw)).balance) - purseStart;
+    const bps = (PRICE * BigInt(params.protocol_fee_bps)) / 10_000n;
+    const expected = PRICE - (bps > BigInt(params.min_fee) ? bps : BigInt(params.min_fee));
+    paidOut.state === 'Settled' && gain === expected
+      ? ok(
+          `once the hold is cleared the keeper's auto_approve settles job ${chainJobId} on chain; the worker's purse rose by ${chain.formatToken(gain)} (the price less the fee)`,
+        )
+      : fail(`after clearing: job ${paidOut.state}, worker gained ${gain}, expected ${expected}`);
   }
 
   // ── 9. the attack (DEMO_ATTACK=0 skips it) ────────────────────────────

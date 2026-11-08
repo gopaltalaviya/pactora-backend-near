@@ -65,10 +65,16 @@ function composeKeys(service: string): Set<string> {
   return keys;
 }
 
-/** Variables a service's config schema (its `loadEnv` object in main.ts) reads. */
+/** Variables a service's config schema (its `loadEnv` object in main.ts) reads, shared fields (`JudgeEnv.shape.X`) included. */
 function schemaKeys(app: string): string[] {
   const src = readFileSync(join(ROOT, 'apps', app, 'src', 'main.ts'), 'utf8');
-  return [...new Set([...src.matchAll(/^\s+([A-Z][A-Z0-9_]*): (?:z\b|env\.)/gm)].map((m) => m[1]!))];
+  return [
+    ...new Set(
+      [...src.matchAll(/^\s+([A-Z][A-Z0-9_]*): (?:z\b|env\.|[A-Z][A-Za-z]*Env\.shape\.)/gm)].map(
+        (m) => m[1]!,
+      ),
+    ),
+  ];
 }
 
 describe('docker-compose.full.yml passes every setting the services read', () => {

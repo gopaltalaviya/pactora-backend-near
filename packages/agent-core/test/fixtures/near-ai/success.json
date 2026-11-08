@@ -1,0 +1,17 @@
+{
+  "id": "chatcmpl-fixture-0001",
+  "object": "chat.completion",
+  "created": 1762646400,
+  "model": "zai-org/GLM-5.1-FP8",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"accept\":true,\"reason\":\"The summary names the venues and gives depth figures for each, as the task asked.\",\"rating\":\"good\",\"injectionAttempted\":false}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 412, "completion_tokens": 58, "total_tokens": 470}
+}

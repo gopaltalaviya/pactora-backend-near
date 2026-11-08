@@ -1,0 +1,12 @@
+{
+  "id": "chatcmpl-fixture-0002",
+  "object": "chat.completion",
+  "model": "zai-org/GLM-5.1-FP8",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "I think the work is fine and should be paid."},
+      "finish_reason": "stop"
+    }
+  ]
+}

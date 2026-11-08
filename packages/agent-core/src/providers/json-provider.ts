@@ -75,7 +75,14 @@ export abstract class JsonHttpBrain implements Brain {
       throw new BrainUnavailable(this.name, 'outage', `${res.status} ${detail.slice(0, 200)}`);
     }
 
-    const payload = await res.json();
+    // A 200 whose body is not JSON (a proxy's error page, a cut connection)
+    // is the provider failing to answer, not a bad answer: the chain moves on.
+    let payload: unknown;
+    try {
+      payload = await res.json();
+    } catch {
+      throw new BrainUnavailable(this.name, 'outage', `${res.status} with a body that is not JSON`);
+    }
     // A reply cut off at the token limit is the provider failing to answer, not
     // a bad answer: the next provider in the chain may well finish.
     if (this.isTruncated(payload)) {

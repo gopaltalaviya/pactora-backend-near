@@ -1,5 +1,5 @@
 import {PactoraClient} from '@pactora/sdk';
-import {Orchestrator, buildBrain, type Brain} from '@pactora/agent-core';
+import {Orchestrator, buildBrain, buildJudgeBrain, type Brain} from '@pactora/agent-core';
 import type {RunExecutor} from './runs.js';
 
 /**
@@ -18,8 +18,11 @@ export async function makeRunExecutor(opts: {
   baseUrl: string;
   chainId: string;
   brain?: Brain;
+  /** The judge's brain; by default from JUDGE_PROVIDER (unset: the orchestrator's brain judges). */
+  judgeBrain?: Brain;
 }): Promise<RunExecutor | null> {
   const brain = opts.brain ?? buildBrain({role: 'orchestrator'});
+  const judgeBrain = opts.judgeBrain ?? (opts.brain ? undefined : buildJudgeBrain());
   if (!(await brain.available())) return null;
 
   return async (ctx) => {
@@ -39,6 +42,7 @@ export async function makeRunExecutor(opts: {
     const orchestrator = new Orchestrator({
       client,
       brain,
+      ...(judgeBrain ? {judgeBrain} : {}),
       log: (event) => {
         writes = writes
           .then(() => ctx.emit(event as unknown as Record<string, unknown> & {kind: string}))

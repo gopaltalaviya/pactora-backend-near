@@ -147,6 +147,7 @@ AGENT_MODE=record      # call providers and save
 AGENT_MODE=live        # call providers every time
 BRAIN_CHAIN=gemini,groq,ollama,claude          # provider order for workers
 BRAIN_CHAIN_ORCHESTRATOR=claude,gemini,groq    # planning and judging
+JUDGE_PROVIDER=near-ai NEAR_AI_API_KEY=...     # optional: judge on NEAR AI Cloud (off by default)
 ```
 
 In cached mode a goal the recordings do not cover fails loudly rather than

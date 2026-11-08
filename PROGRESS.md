@@ -91,6 +91,39 @@ the EVM variables (refused by every NEAR service) and the Dockerfile copied a
 images build, and the stack ran `operational` on the sandbox in Docker. Server
 `.env` and steps: `deploy/vps/README.md`.
 
+**2026-11-09 (branch human-work): held payout on the sandbox, NEAR AI judge.**
+
+- `pnpm demo:local` §8h: a worker is put on hold after submitting (the
+  `account_standing` row screening writes). The client's approve is refused
+  by the signer (FORBIDDEN, "payout is held"). After the review deadline
+  passes by the chain's clock and two keeper sweeps, the job is still
+  `Submitted` on chain and in the database, and the worker's purse is
+  unchanged. Cleared, the keeper's `auto_approve` settles it and the purse
+  rises by the price less the fee (39600). Red first: with the keeper filter
+  removed, 2 checks failed (auto-approved while held); with the signer's
+  refusal removed, 3 failed. Green: `Demo passed.`, 64 checks.
+- `JUDGE_PROVIDER=near-ai` (off by default; `chain` = the orchestrator's
+  brain judges, as before): `NearAiBrain` (packages/agent-core
+  `providers/near-ai.ts`), OpenAI-compatible chat completions at
+  `https://cloud-api.near.ai/v1`, default model `zai-org/GLM-5.1-FP8`
+  (docs.near.ai, 2026-11; `NEAR_AI_MODEL`, `NEAR_AI_BASE_URL` override).
+  Settings are validated by `JudgeEnv` in `@pactora/shared`, used by the api's
+  boot schema and by `buildJudgeBrain`. The key is required when chosen, and
+  `test:startup` refuses that (4 new cases, 40 in all). The key is never
+  logged: it is a private field, and any echo is scrubbed from errors.
+  `AGENT_MODE=cached` returns no judge brain, so the recordings answer and
+  nothing reaches the network. Never called live: tests use a fake fetch over
+  fixtures written to the documented shape (`test/fixtures/near-ai`). Before
+  the first live run, re-capture them from the real API with the owner's OK.
+  A JSON provider's 200 with a body that is not JSON now counts as an outage
+  (it used to throw a raw SyntaxError).
+- Gate: `pnpm check` 1231 passed, 10 skipped (a first run had one
+  `channels` outbox failure, which also failed 1 of 3 runs alone; channels
+  is unchanged here); `test:startup` all 40 refused; `demo:local` 64 checks.
+- Docs follow-up: `pactora-docs-near` `check:env` needs the 4 new names in
+  docs/08 (`JUDGE_PROVIDER`, `NEAR_AI_API_KEY`, `NEAR_AI_MODEL`,
+  `NEAR_AI_BASE_URL`).
+
 ---
 
 ## 🏷 Rebrand: AGENTX → Pactora (decided 2026-10-30)

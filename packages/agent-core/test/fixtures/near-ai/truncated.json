@@ -1,0 +1,8 @@
+{
+  "id": "chatcmpl-fixture-0003",
+  "object": "chat.completion",
+  "model": "zai-org/GLM-5.1-FP8",
+  "choices": [
+    {"index": 0, "message": {"role": "assistant", "content": "{\"accept\":tr"}, "finish_reason": "length"}
+  ]
+}

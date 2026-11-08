@@ -52,8 +52,39 @@ const ENTRY = {
 /** 32 random-looking bytes, hex: a WEBHOOK_SECRET_KEY the check accepts. */
 const GOOD_WEBHOOK_KEY = '7e'.repeat(32);
 
-/** [service, what is wrong, env on top of BASE, what the refusal must say] */
+/** [service, what is wrong, env on top of BASE, what the refusal must say, what it must NOT say] */
 const CASES = [
+  // The NEAR AI Cloud judge: off by default; chosen, it needs its key. The key is never echoed.
+  [
+    'api',
+    'the NEAR AI judge without its key',
+    {DATABASE_URL: CLOSED_DB, JUDGE_PROVIDER: 'near-ai'},
+    /JUDGE_PROVIDER=near-ai needs NEAR_AI_API_KEY/,
+  ],
+  [
+    'api',
+    'the NEAR AI judge with an empty key',
+    {DATABASE_URL: CLOSED_DB, JUDGE_PROVIDER: 'near-ai', NEAR_AI_API_KEY: ''},
+    /JUDGE_PROVIDER=near-ai needs NEAR_AI_API_KEY/,
+  ],
+  [
+    'api',
+    'an unknown judge provider',
+    {DATABASE_URL: CLOSED_DB, JUDGE_PROVIDER: 'openai'},
+    /JUDGE_PROVIDER must be one of/,
+  ],
+  [
+    'api',
+    'a NEAR AI base URL that is not https (the key must not be printed)',
+    {
+      DATABASE_URL: CLOSED_DB,
+      JUDGE_PROVIDER: 'near-ai',
+      NEAR_AI_API_KEY: 'startup-test-not-a-real-key-7f3a',
+      NEAR_AI_BASE_URL: 'http://plain.example/v1',
+    },
+    /NEAR_AI_BASE_URL must be an https URL/,
+    /startup-test-not-a-real-key-7f3a/,
+  ],
   // docs/26 F11, F12 (branch human-work)
   ['channels', 'no DATABASE_URL', {}, /DATABASE_URL/],
   [
@@ -292,10 +323,11 @@ const results = [];
 for (let i = 0; i < CASES.length; i += 4) {
   results.push(
     ...(await Promise.all(
-      CASES.slice(i, i + 4).map(async ([service, what, extra, expect]) => ({
+      CASES.slice(i, i + 4).map(async ([service, what, extra, expect, forbid]) => ({
         service,
         what,
         expect,
+        forbid,
         ...(await runCase(ENTRY[service], extra)),
       })),
     )),
@@ -306,16 +338,19 @@ let failed = 0;
 for (const r of results) {
   const refused = r.code !== null && r.code !== 0;
   const named = r.expect.test(r.out);
-  if (refused && named) {
+  const leaked = r.forbid ? r.forbid.test(r.out) : false;
+  if (refused && named && !leaked) {
     console.log(`✓ ${r.service}: ${r.what} — refused (exit ${r.code})`);
     continue;
   }
   failed += 1;
-  const why = r.signal
-    ? `still running after ${TIMEOUT_MS / 1000} s`
-    : refused
-      ? `refused without naming ${r.expect}`
-      : 'started';
+  const why = leaked
+    ? `printed what it must not (${r.forbid})`
+    : r.signal
+      ? `still running after ${TIMEOUT_MS / 1000} s`
+      : refused
+        ? `refused without naming ${r.expect}`
+        : 'started';
   console.error(`✗ ${r.service}: ${r.what} — ${why}`);
   console.error(
     r.out
