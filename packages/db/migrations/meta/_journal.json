@@ -134,6 +134,13 @@
       "when": 1794123454935,
       "tag": "0018_agent_events_webhooks_faucet",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794129517844,
+      "tag": "0019_profiles_party_reviews",
+      "breakpoints": true
     }
   ]
 }

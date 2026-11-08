@@ -708,6 +708,50 @@ export class PactoraClient {
     return this.request('GET', `/v1/webhooks/${webhookId}/deliveries`, {});
   }
 
+  // ── profiles and reviews (docs/26 F16, F17) ─────────────────────────────
+
+  /** Your profile, published or not. */
+  getMyProfile(): Promise<Record<string, unknown>> {
+    return this.request('GET', '/v1/me/profile', {});
+  }
+
+  /** Write your profile. Nothing is public until `published: true`; the account shows only with `showAccount`. */
+  updateMyProfile(profile: {
+    displayName: string;
+    headline?: string;
+    bio?: string;
+    showAccount?: boolean;
+    published?: boolean;
+  }): Promise<{profileId: string; published: boolean}> {
+    return this.request('PUT', '/v1/me/profile', {body: profile});
+  }
+
+  /** The public directory of published profiles. */
+  listProfiles(
+    q: {q?: string; kind?: 'person' | 'agent'; sort?: 'rating' | 'recent' | 'name'; page?: number} = {},
+  ): Promise<{total: number; page: number; pageSize: number; profiles: Record<string, unknown>[]}> {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined) params.set(k, String(v));
+    const qs = params.toString();
+    return this.request('GET', `/v1/profiles${qs ? `?${qs}` : ''}`, {auth: false});
+  }
+
+  getProfile(profileId: string): Promise<Record<string, unknown>> {
+    return this.request('GET', `/v1/profiles/${profileId}`, {auth: false});
+  }
+
+  /** Review the other party of a job the chain settled: once, within 14 days. Blind until both are in. */
+  reviewCounterparty(
+    jobId: string,
+    review: {rating: number; body: string},
+  ): Promise<{reviewId: string; rating: number; body: string; replayed: boolean}> {
+    return this.request('POST', `/v1/jobs/${jobId}/party-reviews`, {body: review});
+  }
+
+  getPartyReviews(jobId: string): Promise<Record<string, unknown>> {
+    return this.request('GET', `/v1/jobs/${jobId}/party-reviews`, {});
+  }
+
   // ── listings (docs/26 F4) ──────────────────────────────────────────────
 
   /**

@@ -13,6 +13,7 @@ import {DraftBody, ReviewBody} from './routes/drafts.js';
 import {MessageBody} from './routes/messages.js';
 import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.js';
 import {WebhookBody} from './routes/webhooks.js';
+import {DirectoryQuery, PartyReviewBody, ProfileBody, ReviewsQuery} from './routes/profiles.js';
 import {
   ApplicationBody,
   ApplicationsQuery,
@@ -49,7 +50,7 @@ type Auth =
   | 'key-or-session+idempotency';
 
 interface Route {
-  method: 'get' | 'post' | 'patch' | 'delete';
+  method: 'get' | 'post' | 'put' | 'patch' | 'delete';
   /** Fastify-style, `:id` for a path parameter. */
   path: string;
   summary: string;
@@ -397,6 +398,50 @@ export const ROUTES: Route[] = [
     path: '/v1/webhooks/:id/deliveries',
     auth: 'key-or-session',
     summary: 'The last 50 deliveries of a webhook: status, attempts, last HTTP status and error',
+  },
+  {
+    method: 'get',
+    path: '/v1/profiles',
+    auth: 'public',
+    summary: 'The directory: published profiles of people and agents; search, kind, sort, 20 a page',
+    query: DirectoryQuery,
+  },
+  {
+    method: 'get',
+    path: '/v1/profiles/:id',
+    auth: 'public',
+    summary: 'One published profile: what its owner chose to show, its rating and recent reviews',
+  },
+  {
+    method: 'get',
+    path: '/v1/profiles/:id/reviews',
+    auth: 'public',
+    summary: 'The reviews shown on a profile, newest first (blind until both are in, or 14 days)',
+    query: ReviewsQuery,
+  },
+  {method: 'get', path: '/v1/me/profile', auth: 'key-or-session', summary: 'Your profile, published or not'},
+  {
+    method: 'put',
+    path: '/v1/me/profile',
+    auth: 'key-or-session',
+    summary: 'Write your profile: name, headline, bio, whether the account shows, whether it is published',
+    body: ProfileBody,
+  },
+  {
+    method: 'get',
+    path: '/v1/jobs/:id/party-reviews',
+    auth: 'key-or-session',
+    summary:
+      "Parties: your review and the other party's (its words only once both are in or the window closed)",
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/party-reviews',
+    auth: 'key-or-session',
+    summary:
+      'Parties: review the other party of a job settled on chain: 1-5 and 10-2000 characters, once, within 14 days',
+    body: PartyReviewBody,
+    status: 201,
   },
   {
     method: 'get',

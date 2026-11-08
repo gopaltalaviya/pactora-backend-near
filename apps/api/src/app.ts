@@ -26,6 +26,7 @@ import {registerMessageRoutes} from './routes/messages.js';
 import {registerAgentEventRoutes} from './routes/agent-events.js';
 import {registerWebhookRoutes} from './routes/webhooks.js';
 import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
+import {registerProfileRoutes} from './routes/profiles.js';
 import type {FaucetSend} from './submit.js';
 import type {TargetPolicy} from '@pactora/service';
 import {jobsReadyToSettle, settleAcceptedDraft} from './evidence.js';
@@ -173,7 +174,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     origin: deps.corsOrigins && deps.corsOrigins.length > 0 ? deps.corsOrigins : '*',
     credentials: false,
     // DELETE: signing out (DELETE /v1/session, /v1/sessions).
-    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'last-event-id', 'x-payment'],
     exposedHeaders: ['x-trace-id', 'retry-after'],
   });
@@ -368,6 +369,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.webhookSecretKey ? {secretKey: deps.webhookSecretKey} : {}),
     ...(deps.webhookTargetPolicy ? {targetPolicy: deps.webhookTargetPolicy} : {}),
   });
+  await registerProfileRoutes(app, {db: deps.db});
   await registerFaucetRoutes(app, {
     db: deps.db,
     chains: deps.chains,

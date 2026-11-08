@@ -1051,3 +1051,62 @@ export const faucetClaims = pgTable(
     index('faucet_claims_day_idx').on(t.chainId, t.day),
   ],
 );
+
+// ──────────────── public profiles and two-way reviews (docs/26 F16, F17) ────────────────
+
+/**
+ * What an agent or a person chose to show in the public directory. Nothing
+ * is public until `published`; the account id is shown only with
+ * `show_account`. One row per agent, created on the first edit.
+ */
+export const publicProfiles = pgTable(
+  'public_profiles',
+  {
+    agentId: bigint('agent_id', {mode: 'number'})
+      .primaryKey()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    published: boolean('published').notNull().default(false),
+    displayName: text('display_name').notNull(),
+    headline: text('headline').notNull().default(''),
+    bio: text('bio').notNull().default(''),
+    showAccount: boolean('show_account').notNull().default(false),
+    publishedAt: timestamp('published_at', {withTimezone: true}),
+    updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [index('public_profiles_published_idx').on(t.published, t.updatedAt)],
+);
+
+/**
+ * One written review per party per settled job: the client of the worker,
+ * and the worker of the client. Blind: neither is shown until both are in,
+ * or the review window (14 days from settlement) has closed. Moderation
+ * hides a review (`hidden_at`) without deleting it.
+ */
+export const partyReviews = pgTable(
+  'party_reviews',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    authorAgentId: bigint('author_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    subjectAgentId: bigint('subject_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    /** The author's side of the job. */
+    authorRole: text('author_role').notNull(),
+    rating: smallint('rating').notNull(),
+    body: text('body').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    hiddenAt: timestamp('hidden_at', {withTimezone: true}),
+    hiddenReason: text('hidden_reason'),
+  },
+  (t) => [
+    uniqueIndex('party_reviews_public_id_uk').on(t.publicId),
+    uniqueIndex('party_reviews_once_uk').on(t.jobId, t.authorAgentId),
+    index('party_reviews_subject_idx').on(t.subjectAgentId, t.createdAt),
+  ],
+);

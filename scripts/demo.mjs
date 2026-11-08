@@ -815,6 +815,57 @@ try {
       ? ok('a delivery with another secret, or a changed body, does not verify')
       : fail('a forged delivery verified');
     receiver.close();
+
+    // ── 8e. profiles and blind two-way reviews (docs/26 F16, F17) ────────
+    // Reviews are allowed only for a job the indexer saw settle on chain.
+    const reviewedJob = listingJobs[0];
+    const reviewedWorker = workerOf(reviewedJob);
+    await client.updateMyProfile({
+      displayName: 'Demo Orchestrator',
+      headline: 'Hires specialists',
+      published: true,
+    });
+    await reviewedWorker.sdk.updateMyProfile({displayName: 'Shop Photos Pro', published: true});
+    const workerProfileId = (await reviewedWorker.sdk.getMyProfile()).profileId;
+    const clientProfileId = (await client.getMyProfile()).profileId;
+    // The indexer may be a few blocks behind the chain: wait for its settled event.
+    for (let i = 0; i < 60; i++) {
+      if ((await client.getPartyReviews(reviewedJob.job.jobId)).window?.settledOnChain) break;
+      await sleep(500);
+    }
+    const first = await client.reviewCounterparty(reviewedJob.job.jobId, {
+      rating: 5,
+      body: 'Both shop fronts, in focus, first time after one revision.',
+    });
+    const blind = await client.getProfile(workerProfileId);
+    const theirView = await reviewedWorker.sdk.getPartyReviews(reviewedJob.job.jobId);
+    first.reviewId &&
+    blind.rating.count === 0 &&
+    theirView.theirs?.submitted === true &&
+    !theirView.theirs.body
+      ? ok(
+          "the client's review of the worker is in, and blind: not on the worker's profile, its words hidden from the worker",
+        )
+      : fail(`blind review: ${JSON.stringify({blind: blind.rating, theirs: theirView.theirs})}`);
+    await reviewedWorker.sdk.reviewCounterparty(reviewedJob.job.jobId, {
+      rating: 4,
+      body: 'Clear brief and quick review.',
+    });
+    const shownWorker = await client.getProfile(workerProfileId);
+    const shownClient = await client.getProfile(clientProfileId);
+    shownWorker.rating.average === 5 &&
+    shownWorker.rating.count === 1 &&
+    shownClient.rating.average === 4 &&
+    shownWorker.reviews[0]?.author === 'Demo Orchestrator' &&
+    shownWorker.account === null
+      ? ok(
+          'once both reviewed, both show: worker 5/5 from "Demo Orchestrator", client 4/5; neither profile shows an account it did not choose to',
+        )
+      : fail(`reviews after both: ${JSON.stringify({w: shownWorker.rating, c: shownClient.rating})}`);
+    const dir = await client.listProfiles({q: 'Shop Photos'});
+    dir.profiles.length === 1 && dir.profiles[0].settledJobs >= 1
+      ? ok(`the directory finds the worker by name, with ${dir.profiles[0].settledJobs} settled job(s)`)
+      : fail(`directory: ${JSON.stringify(dir)}`);
   }
 
   // ── 8d. the test-token faucet, on chain (docs/26 F23) ─────────────────

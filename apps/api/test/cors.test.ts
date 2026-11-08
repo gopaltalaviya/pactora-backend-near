@@ -27,6 +27,8 @@ const config = loadConfig({
 let db: Db;
 let open: FastifyInstance;
 let pinned: FastifyInstance;
+/** Every method some route of `open` is served on. */
+const served = new Set<string>();
 
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 2});
@@ -38,7 +40,12 @@ beforeAll(async () => {
     bus: new EventBus(),
     submit: async () => ({txHash: '0x'}),
   };
-  open = await buildApp(base);
+  open = await buildApp({
+    ...base,
+    onRoute: (r: {method: string | string[]}) => {
+      for (const m of [r.method].flat()) if (!['HEAD', 'OPTIONS'].includes(m)) served.add(m);
+    },
+  });
   pinned = await buildApp({...base, corsOrigins: ['https://pactora.example']});
 });
 
@@ -69,6 +76,22 @@ describe('a browser on another origin', () => {
     expect(res.statusCode).toBeLessThan(300);
     const allowed = String(res.headers['access-control-allow-headers']).toLowerCase();
     for (const h of ['authorization', 'content-type', 'idempotency-key']) expect(allowed).toContain(h);
+  });
+
+  // Every method a route uses must pass a preflight: an API test calls the
+  // route with inject, which never asks, so only this catches a method the
+  // browser would be refused (PUT /v1/me/profile was, at first).
+  it('allows, on a preflight, every method the API serves', async () => {
+    expect(served).toContain('PUT');
+    for (const method of served) {
+      const res = await open.inject({
+        method: 'OPTIONS',
+        url: '/v1/me/profile',
+        headers: {origin: UI, 'access-control-request-method': method},
+      });
+      expect(res.statusCode, method).toBeLessThan(300);
+      expect(String(res.headers['access-control-allow-methods']), method).toContain(method);
+    }
   });
 
   it('never allows credentials, which is what makes allowing origins safe', async () => {
