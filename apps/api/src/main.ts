@@ -14,6 +14,7 @@ import {
 } from '@pactora/service';
 import {buildApp} from './app.js';
 import {makeSignerFaucet, makeSignerSubmit, makeSignerWalletKeys} from './submit.js';
+import {SanctionsIndex, SimulatedIdentityProvider} from './compliance.js';
 import {
   makeBudgetReader,
   makeDisputeBondReader,
@@ -87,6 +88,24 @@ const Env = z
     FAUCET_AMOUNT: z.coerce.bigint().positive().default(5_000_000n),
     FAUCET_PER_IP_PER_DAY: env.positiveInt(5),
     FAUCET_DAILY_CAP: z.coerce.bigint().positive().default(500_000_000n),
+    /** Sanctions screening of a person's legal name (docs/26 F14). `off` is refused in production. */
+    SANCTIONS_SCREENING: z.enum(['on', 'off']).default('on'),
+    /** Identity checks (docs/26 F13): `none`, or `simulated` (test chains only, labelled everywhere). */
+    IDENTITY_PROVIDER: z.enum(['none', 'simulated']).default('none'),
+    /** Verifies the identity provider's webhooks (HMAC). Required with a provider. */
+    KYC_WEBHOOK_SECRET: z.string().min(32, 'KYC_WEBHOOK_SECRET must be at least 32 characters').optional(),
+    /** Where the simulated provider's page lives (the interface). */
+    KYC_PAGE_BASE: env.httpUrl().default('http://localhost:3000'),
+    /** NEAR accounts that decide compliance cases, comma-separated. Production with screening needs two. */
+    COMPLIANCE_REVIEWERS: z
+      .string()
+      .default('')
+      .transform((v) =>
+        v
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
   })
   // In production the browser origins must be named: `*` is fine for a local
   // demo and wrong for a deployment with a real front end.
@@ -104,6 +123,23 @@ const Env = z
     message: 'WEBHOOK_ALLOW_PRIVATE is for local development and is refused when NODE_ENV=production',
     path: ['WEBHOOK_ALLOW_PRIVATE'],
   })
+  .refine((e) => e.NODE_ENV !== 'production' || e.SANCTIONS_SCREENING === 'on', {
+    message: 'SANCTIONS_SCREENING=off is refused when NODE_ENV=production',
+    path: ['SANCTIONS_SCREENING'],
+  })
+  .refine((e) => e.IDENTITY_PROVIDER === 'none' || Boolean(e.KYC_WEBHOOK_SECRET), {
+    message: 'an IDENTITY_PROVIDER needs KYC_WEBHOOK_SECRET',
+    path: ['KYC_WEBHOOK_SECRET'],
+  })
+  .refine(
+    (e) =>
+      e.NODE_ENV !== 'production' || e.SANCTIONS_SCREENING !== 'on' || e.COMPLIANCE_REVIEWERS.length >= 2,
+    {
+      message:
+        'production screening needs at least two COMPLIANCE_REVIEWERS (a strong match is cleared by two)',
+      path: ['COMPLIANCE_REVIEWERS'],
+    },
+  )
   .refine((e) => e.FAUCET_AMOUNT <= e.FAUCET_DAILY_CAP, {
     message: 'FAUCET_AMOUNT must not exceed FAUCET_DAILY_CAP',
     path: ['FAUCET_AMOUNT'],
@@ -194,6 +230,17 @@ if (objectStore) {
   );
 }
 
+// The simulated identity provider never looks at a document: only where
+// every enabled chain is a test chain.
+if (cfg.IDENTITY_PROVIDER === 'simulated' && !Object.values(config.chains).every((c) => c.testnet)) {
+  throw new Error('IDENTITY_PROVIDER=simulated is for test chains only; a chain enabled here is not one');
+}
+const identityProvider =
+  cfg.IDENTITY_PROVIDER === 'simulated'
+    ? new SimulatedIdentityProvider(cfg.KYC_WEBHOOK_SECRET!, cfg.KYC_PAGE_BASE.replace(/\/$/, ''))
+    : undefined;
+if (identityProvider) logger.warn('identity provider: SIMULATED (testnet only; no document is checked)');
+
 const signerDeps = {
   signerUrl: cfg.SIGNER_URL,
   ...(cfg.SIGNER_TOKEN ? {signerToken: cfg.SIGNER_TOKEN} : {}),
@@ -202,6 +249,10 @@ const signerDeps = {
 };
 const app = await buildApp({
   ...(objectStore ? {objectStore} : {}),
+  ...(identityProvider ? {identityProvider} : {}),
+  sanctions: new SanctionsIndex(db),
+  screening: cfg.SANCTIONS_SCREENING === 'on',
+  complianceReviewers: cfg.COMPLIANCE_REVIEWERS,
   ...(cfg.WEBHOOK_SECRET_KEY ? {webhookSecretKey: parseSecretKey(cfg.WEBHOOK_SECRET_KEY)} : {}),
   ...(cfg.WEBHOOK_ALLOW_PRIVATE ? {webhookTargetPolicy: {allowHttp: true, allowPrivate: true}} : {}),
   // Only where every enabled chain is a test chain; the route refuses others anyway.

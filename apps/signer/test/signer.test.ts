@@ -759,3 +759,77 @@ describe('accepting a wallet before its agent row exists', () => {
     expect(next.nonce).toBe(5_000_002);
   });
 });
+
+describe('a held payout (docs/26 F14)', () => {
+  /** A job row the API knows: `chainJobId` on chain, `workerId` its worker's agent row. */
+  async function jobRow(chainJobId: number, clientId: number, workerId: number) {
+    await db.execute(
+      sql`INSERT INTO jobs (chain_id, chain_job_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash, state)
+          VALUES ('near:sandbox', ${String(chainJobId)}, ${clientId}, ${workerId}, 'escrow', 20000, '{}'::jsonb, ${SPEC}, 'submitted')`,
+    );
+  }
+
+  it('refuses to sign approve while the worker is on hold or blocked, and signs once cleared', async () => {
+    const client = await anAgent();
+    const worker = await anAgent(WORKER_WALLET, WORKER_ID);
+    await jobRow(41, client, worker);
+    const approve = (key: string) =>
+      makeSigner().sign(
+        request(client, {method: 'approve', args: {job_id: 41}, spend: 0n, idempotencyKey: key}),
+      );
+
+    for (const standing of ['hold', 'blocked']) {
+      await db.execute(sql`DELETE FROM account_standing`);
+      await db.execute(
+        sql`INSERT INTO account_standing (agent_id, standing, reason) VALUES (${worker}, ${standing}, 'a review is open')`,
+      );
+      const err = await expectRefusal(approve(`held-${standing}`), ErrorCode.FORBIDDEN);
+      expect(err.message).toContain(`payout is held (${standing})`);
+    }
+    expect(fake.state.sent).toEqual([]);
+
+    await db.execute(sql`DELETE FROM account_standing`);
+    await approve('cleared');
+    expect(fake.state.sent.map((t) => t.method)).toEqual(['approve']);
+  });
+
+  it('other calls for a held worker are not this gate (the API gates accepting)', async () => {
+    const client = await anAgent();
+    const worker = await anAgent(WORKER_WALLET, WORKER_ID);
+    await jobRow(42, client, worker);
+    await db.execute(
+      sql`INSERT INTO account_standing (agent_id, standing, reason) VALUES (${worker}, 'hold', 'a review is open')`,
+    );
+    await makeSigner().sign(request(client, {method: 'cancel', args: {job_id: 42}, spend: 0n}));
+    expect(fake.state.sent.map((t) => t.method)).toEqual(['cancel']);
+    await db.execute(sql`DELETE FROM account_standing`);
+  });
+});
+
+describe('the keeper skips held jobs (docs/26 F14)', () => {
+  it('an open escrow job with a held or blocked party is not swept; the others are', async () => {
+    const {openEscrowJobs} = await import('../src/keeper.js');
+    const a = await anAgent('a.owner.test.near', 11);
+    const b = await anAgent('b.owner.test.near', 12);
+    const c = await anAgent('c.owner.test.near', 13);
+    const row = (chainJobId: number, client: number, worker: number, state = 'accepted') =>
+      db.execute(
+        sql`INSERT INTO jobs (chain_id, chain_job_id, client_agent_id, worker_agent_id, path, amount, spec, spec_hash, state)
+            VALUES ('near:sandbox', ${String(chainJobId)}, ${client}, ${worker}, 'escrow', 20000, '{}'::jsonb, ${SPEC}, ${state})`,
+      );
+    await row(1, a, b); // clear
+    await row(2, a, c); // worker held
+    await row(3, c, b); // client held
+    await row(4, a, b, 'settled'); // not open
+    expect((await openEscrowJobs(db, 'near:sandbox')).sort()).toEqual([1n, 2n, 3n]);
+    await db.execute(
+      sql`INSERT INTO account_standing (agent_id, standing, reason) VALUES (${c}, 'hold', 'a review is open')`,
+    );
+    expect(await openEscrowJobs(db, 'near:sandbox')).toEqual([1n]);
+    await db.execute(
+      sql`UPDATE account_standing SET standing = 'clear', reason = 'cleared by review' WHERE agent_id = ${c}`,
+    );
+    expect((await openEscrowJobs(db, 'near:sandbox')).sort()).toEqual([1n, 2n, 3n]);
+    await db.execute(sql`DELETE FROM account_standing`);
+  });
+});

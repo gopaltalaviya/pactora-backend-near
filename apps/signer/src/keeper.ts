@@ -1,6 +1,6 @@
-import {and, eq, inArray, isNotNull} from 'drizzle-orm';
+import {and, eq, inArray, isNotNull, not} from 'drizzle-orm';
 import type {ChainConfig} from '@pactora/config';
-import {type Db, jobs} from '@pactora/db';
+import {type Db, isHeldSql, jobs} from '@pactora/db';
 import {signFunctionCallWith, type NearClient} from '@pactora/near';
 import type {Metrics} from '@pactora/service';
 import type {ServiceAccount} from './keysource.js';
@@ -237,6 +237,28 @@ export function keeperSender(near: NearClient, chain: ChainConfig, account: Serv
   };
 }
 
+/**
+ * The escrow jobs the keeper asks the chain about: open, on chain, and with
+ * neither party on hold or blocked (docs/26 F14). The hold is soft: anyone
+ * else may still send the same permissionless exit.
+ */
+export async function openEscrowJobs(db: Db, chainId: string): Promise<bigint[]> {
+  const rows = await db
+    .select({chainJobId: jobs.chainJobId})
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.chainId, chainId),
+        eq(jobs.path, 'escrow'),
+        isNotNull(jobs.chainJobId),
+        inArray(jobs.state, ['created', 'accepted', 'submitted', 'disputed']),
+        not(isHeldSql(jobs.workerAgentId)),
+        not(isHeldSql(jobs.clientAgentId)),
+      ),
+    );
+  return rows.map((r) => BigInt(r.chainJobId!));
+}
+
 /** Wire a keeper to a real chain and database. */
 export function chainKeeper(opts: {
   db: Db;
@@ -264,22 +286,7 @@ export function chainKeeper(opts: {
     ...(opts.logger ? {logger: opts.logger} : {}),
     ...(exits ? {onExit: (exit, outcome) => exits.labels(exit, outcome).inc()} : {}),
     ...(backlog ? {onBacklog: (age) => backlog.set(age)} : {}),
-    openJobs:
-      opts.openJobs ??
-      (async () => {
-        const rows = await db
-          .select({chainJobId: jobs.chainJobId})
-          .from(jobs)
-          .where(
-            and(
-              eq(jobs.chainId, chain.chainId),
-              eq(jobs.path, 'escrow'),
-              isNotNull(jobs.chainJobId),
-              inArray(jobs.state, ['created', 'accepted', 'submitted', 'disputed']),
-            ),
-          );
-        return rows.map((r) => BigInt(r.chainJobId!));
-      }),
+    openJobs: opts.openJobs ?? (() => openEscrowJobs(db, chain.chainId)),
     readJob: async (id) => {
       const v = await near.view<JobView | null>(chain.contracts.Pactora, 'get_job', {job_id: Number(id)});
       return v ? onChainJobOf(v) : null;

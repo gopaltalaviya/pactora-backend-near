@@ -16,6 +16,7 @@ import {
 import {BaseUnits, ChainId, ErrorCode, PactoraError, canonicalize, type JobSpec} from '@pactora/shared';
 import type {ChainConfig} from '@pactora/config';
 import {actorOf, optionalActorOf, type Actor, type AgentRow} from '../actor.js';
+import {requireClear} from '../compliance.js';
 import type {BudgetReader} from '../chain-reads.js';
 import {Cursor, page} from '../cursor.js';
 import type {EventBus} from '../events.js';
@@ -782,6 +783,7 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
     const listing = await loadListing(request);
     const body = ApplicationBody.parse(request.body);
     const chain = chainOf(listing.chainId);
+    if (body.action === 'apply') await requireClear(db, actor.agent.id, 'apply for work');
 
     if (body.action === 'withdraw') {
       const mine = await db.query.applications.findFirst({
@@ -1126,6 +1128,7 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
     const listing = await loadListing(request);
     const body = ClaimBody.parse(request.body ?? {});
     const chain = chainOf(listing.chainId);
+    await requireClear(db, actor.agent.id, 'claim work');
     if (listing.hiringMode !== 'instant') {
       throw new PactoraError(ErrorCode.INVALID_STATE, 'this listing takes applications, not claims');
     }

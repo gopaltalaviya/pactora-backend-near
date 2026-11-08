@@ -1110,3 +1110,137 @@ export const partyReviews = pgTable(
     index('party_reviews_subject_idx').on(t.subjectAgentId, t.createdAt),
   ],
 );
+
+// ──────────────── identity, sanctions screening, standing (docs/26 F13, F14, F27) ────────────────
+
+/** One fetched copy of a sanctions list. Exactly one `active` per source (partial unique index, 0020). */
+export const sanctionsListVersions = pgTable('sanctions_list_versions', {
+  id: bigserial('id', {mode: 'number'}).primaryKey(),
+  source: text('source').notNull(),
+  sha256: text('sha256').notNull(),
+  entryCount: integer('entry_count').notNull(),
+  active: boolean('active').notNull().default(false),
+  fetchedAt: timestamp('fetched_at', {withTimezone: true}).notNull().defaultNow(),
+});
+
+export const sanctionsEntries = pgTable(
+  'sanctions_entries',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    versionId: bigint('version_id', {mode: 'number'})
+      .notNull()
+      .references(() => sanctionsListVersions.id, {onDelete: 'cascade'}),
+    source: text('source').notNull(),
+    ref: text('ref').notNull(),
+    kind: text('kind').notNull(),
+    names: text('names').array().notNull(),
+    /** Digital currency addresses the list gives, `TICKER address`. */
+    addresses: text('addresses')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+  },
+  (t) => [index('sanctions_entries_version_idx').on(t.versionId, t.kind)],
+);
+
+/**
+ * A person's identity check with a provider. Only what is needed is kept:
+ * the outcome, whether an identity document was verified, and the
+ * provider's session id. Never the document itself.
+ */
+export const identityVerifications = pgTable(
+  'identity_verifications',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    provider: text('provider').notNull(),
+    providerSessionId: text('provider_session_id'),
+    /** screening → pending → approved | rejected | expired; held = stopped by a sanctions match. */
+    status: text('status').notNull().default('screening'),
+    documentVerified: boolean('document_verified').notNull().default(false),
+    /** The name screened before any vendor session was created. */
+    legalName: text('legal_name').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    decidedAt: timestamp('decided_at', {withTimezone: true}),
+  },
+  (t) => [
+    uniqueIndex('identity_verifications_public_id_uk').on(t.publicId),
+    uniqueIndex('identity_verifications_session_uk').on(t.provider, t.providerSessionId),
+    index('identity_verifications_agent_idx').on(t.agentId, t.createdAt),
+  ],
+);
+
+/** clear | hold | blocked. No row = clear. Every change is in compliance_audit. */
+export const accountStanding = pgTable('account_standing', {
+  agentId: bigint('agent_id', {mode: 'number'})
+    .primaryKey()
+    .references(() => agents.id, {onDelete: 'cascade'}),
+  standing: text('standing').notNull(),
+  reason: text('reason').notNull(),
+  updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
+});
+
+/** A screening hit for reviewers: open → cleared | confirmed. */
+export const complianceCases = pgTable(
+  'compliance_cases',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    /** The account the case is about: a reviewer may never decide their own. */
+    subjectAccount: text('subject_account').notNull(),
+    source: text('source').notNull(),
+    entryRef: text('entry_ref').notNull(),
+    queryName: text('query_name').notNull(),
+    matchedName: text('matched_name').notNull(),
+    score: numeric('score', {precision: 5, scale: 4}).notNull(),
+    /** strong: needs two different reviewers to clear. */
+    strength: text('strength').notNull(),
+    status: text('status').notNull().default('open'),
+    /** Bumped by each decision; a decision names the version it read (stale → 409). */
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    closedAt: timestamp('closed_at', {withTimezone: true}),
+  },
+  (t) => [
+    uniqueIndex('compliance_cases_public_id_uk').on(t.publicId),
+    index('compliance_cases_status_idx').on(t.status, t.createdAt),
+  ],
+);
+
+export const complianceDecisions = pgTable(
+  'compliance_decisions',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    caseId: bigint('case_id', {mode: 'number'})
+      .notNull()
+      .references(() => complianceCases.id, {onDelete: 'cascade'}),
+    reviewer: text('reviewer').notNull(),
+    decision: text('decision').notNull(),
+    reason: text('reason').notNull(),
+    caseVersion: integer('case_version').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  // One decision per reviewer per case: a second is a replay or a conflict.
+  (t) => [uniqueIndex('compliance_decisions_once_uk').on(t.caseId, t.reviewer)],
+);
+
+/** Append-only: a trigger (0020) refuses UPDATE and DELETE. */
+export const complianceAudit = pgTable(
+  'compliance_audit',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    at: timestamp('at', {withTimezone: true}).notNull().defaultNow(),
+    actor: text('actor').notNull(),
+    action: text('action').notNull(),
+    agentId: bigint('agent_id', {mode: 'number'}),
+    caseId: bigint('case_id', {mode: 'number'}),
+    detail: jsonb('detail').notNull().default({}),
+  },
+  (t) => [index('compliance_audit_agent_idx').on(t.agentId, t.at)],
+);

@@ -1,7 +1,16 @@
 import {and, eq, sql} from 'drizzle-orm';
 import {z} from 'zod';
 import type {ChainConfig} from '@pactora/config';
-import {type Db, agents, signerTxs, signerWalletTxs, withAdvisoryLock, type LockPool} from '@pactora/db';
+import {
+  type Db,
+  agents,
+  jobs,
+  signerTxs,
+  signerWalletTxs,
+  standingOf,
+  withAdvisoryLock,
+  type LockPool,
+} from '@pactora/db';
 import {
   TGAS,
   sha256Hex,
@@ -240,6 +249,10 @@ export class SignerService {
       );
     }
     const args = parsed.data;
+
+    // docs/26 F14: no payout is signed for a worker on hold or blocked. A
+    // soft gate: the contract's permissionless auto_approve still pays.
+    if (method === 'approve') await this.refuseHeldPayout(chain.chainId, (args as {job_id: number}).job_id);
 
     // What this key is being used FOR. A replay must be the same call by the
     // same agent; anything else under the key is a conflict, never a replay.
@@ -753,6 +766,21 @@ export class SignerService {
   }
 
   /** This agent's use of this key, if any. A key belongs to the agent that used it. */
+  /** The job's worker is on hold or blocked (docs/26 F14): refuse to sign its payout. */
+  private async refuseHeldPayout(chainId: string, chainJobId: number): Promise<void> {
+    const job = await this.deps.db.query.jobs.findFirst({
+      where: and(eq(jobs.chainId, chainId), eq(jobs.chainJobId, String(chainJobId))),
+    });
+    if (!job) return; // a job the API does not know: the contract decides.
+    const standing = await standingOf(this.deps.db, job.workerAgentId);
+    if (standing !== 'clear') {
+      throw new PactoraError(
+        ErrorCode.FORBIDDEN,
+        `the worker's payout is held (${standing}) while a compliance review is open or after it confirmed a match`,
+      );
+    }
+  }
+
   private async findKey(req: SignRequest) {
     return this.deps.db.query.signerTxs.findFirst({
       where: and(

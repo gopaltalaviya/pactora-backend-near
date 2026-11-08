@@ -53,6 +53,37 @@ const GOOD_WEBHOOK_KEY = '7e'.repeat(32);
 
 /** [service, what is wrong, env on top of BASE, what the refusal must say] */
 const CASES = [
+  // docs/26 F13, F14 (branch human-work)
+  [
+    'api',
+    'production with screening off',
+    {
+      NODE_ENV: 'production',
+      DATABASE_URL: CLOSED_DB,
+      CORS_ORIGINS: 'https://p.example',
+      EVIDENCE_UPLOADS: 'off',
+      SANCTIONS_SCREENING: 'off',
+    },
+    /SANCTIONS_SCREENING=off is refused/,
+  ],
+  [
+    'api',
+    'production screening with one reviewer',
+    {
+      NODE_ENV: 'production',
+      DATABASE_URL: CLOSED_DB,
+      CORS_ORIGINS: 'https://p.example',
+      EVIDENCE_UPLOADS: 'off',
+      COMPLIANCE_REVIEWERS: 'one.testnet',
+    },
+    /at least two COMPLIANCE_REVIEWERS/,
+  ],
+  [
+    'api',
+    'an identity provider without its webhook secret',
+    {DATABASE_URL: CLOSED_DB, IDENTITY_PROVIDER: 'simulated'},
+    /KYC_WEBHOOK_SECRET/,
+  ],
   // docs/26 F9, F23 (branch human-work)
   [
     'api',

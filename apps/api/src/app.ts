@@ -27,6 +27,8 @@ import {registerAgentEventRoutes} from './routes/agent-events.js';
 import {registerWebhookRoutes} from './routes/webhooks.js';
 import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
 import {registerProfileRoutes} from './routes/profiles.js';
+import {kycSweep, registerKycRoutes} from './routes/kyc.js';
+import type {IdentityProvider, SanctionsIndex} from './compliance.js';
 import type {FaucetSend} from './submit.js';
 import type {TargetPolicy} from '@pactora/service';
 import {jobsReadyToSettle, settleAcceptedDraft} from './evidence.js';
@@ -132,6 +134,14 @@ export interface AppDeps {
   /** The signer's faucet (testnet and sandbox only); omitted, POST /v1/faucet answers 503. */
   faucetSend?: FaucetSend;
   faucet?: FaucetConfig;
+  /** Identity checks (docs/26 F13); omitted, POST /v1/kyc/start answers 503. */
+  identityProvider?: IdentityProvider;
+  /** Sanctions screening (docs/26 F14) of a person's legal name before an identity session. */
+  sanctions?: SanctionsIndex;
+  /** Screening on; off only in development (main.ts refuses production without it). Default on. */
+  screening?: boolean;
+  /** NEAR accounts that may decide compliance cases. */
+  complianceReviewers?: string[];
   /** Called for every route as it is registered — the docs test lists them. */
   onRoute?: (route: {method: string | string[]; url: string}) => void;
 }
@@ -370,6 +380,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.webhookTargetPolicy ? {targetPolicy: deps.webhookTargetPolicy} : {}),
   });
   await registerProfileRoutes(app, {db: deps.db});
+  await registerKycRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    ...(deps.identityProvider ? {provider: deps.identityProvider} : {}),
+    ...(deps.sanctions ? {sanctions: deps.sanctions} : {}),
+    screening: deps.screening ?? true,
+    reviewers: () => deps.complianceReviewers ?? [],
+  });
   await registerFaucetRoutes(app, {
     db: deps.db,
     chains: deps.chains,
@@ -392,7 +410,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const sweepEvery = deps.sessionSweepMs ?? 60 * 60 * 1000;
   const sweep = () => {
     sweepTimer = setTimeout(() => {
-      sweepExpiredSessions(deps.db)
+      Promise.all([sweepExpiredSessions(deps.db), kycSweep(deps.db, deps.identityProvider)])
         .catch((err: unknown) => app.log.warn({err}, 'session sweep failed'))
         .finally(() => {
           if (sweepTimer) sweep();

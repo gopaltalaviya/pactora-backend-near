@@ -7,6 +7,7 @@ import {ErrorCode, JobResult, type JobSpec, PactoraError, canonicalize, validate
 import type {ChainConfig} from '@pactora/config';
 import {authenticatePerson} from '../auth.js';
 import {personAgentOf, type AgentRow} from '../actor.js';
+import {requireClear} from '../compliance.js';
 import type {TxEventsReader, JobTxEvent, JobTxEventName} from '../chain-reads.js';
 import type {EventBus} from '../events.js';
 import {contractCall} from '../submit.js';
@@ -208,6 +209,7 @@ export async function registerPersonActionRoutes(
     const body = PrepareBody.parse(request.body);
     const action = body.action;
     checkParty(job, person, action);
+    if (action === 'accept') await requireClear(db, person.id, 'accept work');
 
     const rule = RULES[action];
     if (!rule.from.includes(job.state)) {

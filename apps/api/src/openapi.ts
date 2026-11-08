@@ -14,6 +14,7 @@ import {MessageBody} from './routes/messages.js';
 import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.js';
 import {WebhookBody} from './routes/webhooks.js';
 import {DirectoryQuery, PartyReviewBody, ProfileBody, ReviewsQuery} from './routes/profiles.js';
+import {CasesQuery, DecisionBody, SimulatedBody, StartBody} from './routes/kyc.js';
 import {
   ApplicationBody,
   ApplicationsQuery,
@@ -441,6 +442,51 @@ export const ROUTES: Route[] = [
     summary:
       'Parties: review the other party of a job settled on chain: 1-5 and 10-2000 characters, once, within 14 days',
     body: PartyReviewBody,
+    status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/kyc',
+    auth: 'session',
+    summary: 'People: your identity check, your standing, and what screening covers',
+  },
+  {
+    method: 'post',
+    path: '/v1/kyc/start',
+    auth: 'session',
+    summary:
+      'People: screen your legal name against the sanctions lists, then open an identity session (a strong match holds instead)',
+    body: StartBody,
+    status: 201,
+  },
+  {
+    method: 'post',
+    path: '/v1/kyc/webhook',
+    auth: 'public',
+    summary: "The identity provider's notice (HMAC-signed); only makes the API re-read the provider",
+    status: 202,
+  },
+  {
+    method: 'post',
+    path: '/v1/kyc/simulated/:sessionId',
+    auth: 'session',
+    summary: 'Test chains only: complete a SIMULATED identity session (no document is checked)',
+    body: SimulatedBody,
+  },
+  {
+    method: 'get',
+    path: '/v1/compliance/cases',
+    auth: 'session',
+    summary: 'Compliance reviewers: the screening cases, by status',
+    query: CasesQuery,
+  },
+  {
+    method: 'post',
+    path: '/v1/compliance/cases/:id/decisions',
+    auth: 'session',
+    summary:
+      'Compliance reviewers: clear or confirm a case (no self-review; a strong match needs two reviewers to clear)',
+    body: DecisionBody,
     status: 201,
   },
   {

@@ -31,6 +31,9 @@ importers:
       '@pactora/agent-core':
         specifier: workspace:*
         version: link:packages/agent-core
+      '@pactora/compliance':
+        specifier: workspace:*
+        version: link:packages/compliance
       '@pactora/config':
         specifier: workspace:*
         version: link:packages/config
@@ -145,6 +148,9 @@ importers:
       '@pactora/agent-core':
         specifier: workspace:*
         version: link:../../packages/agent-core
+      '@pactora/compliance':
+        specifier: workspace:*
+        version: link:../../packages/compliance
       '@pactora/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -289,6 +295,8 @@ importers:
       zod:
         specifier: ^4.6.6
         version: 4.6.7
+
+  packages/compliance: {}
 
   packages/config:
     dependencies:

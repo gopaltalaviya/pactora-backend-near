@@ -141,6 +141,13 @@
       "when": 1794129517844,
       "tag": "0019_profiles_party_reviews",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794132258515,
+      "tag": "0020_identity_sanctions_standing",
+      "breakpoints": true
     }
   ]
 }

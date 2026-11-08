@@ -21,6 +21,7 @@ import {personAgentOf} from '../actor.js';
 import {Cursor, page} from '../cursor.js';
 import {lastEventIdOf, streamEventOf, streamEvents, type EventBus} from '../events.js';
 import {acceptedDraftOf, draftDeliveryOf, settleAcceptedDraft, type DraftDelivery} from '../evidence.js';
+import {requireClear} from '../compliance.js';
 
 /** Query for `GET /v1/jobs`. Coerced, because query strings are strings. */
 export const JobListQuery = z.object({
@@ -236,10 +237,12 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     '/v1/jobs/:id/accept',
     async (request) =>
       (
-        await transition(request, 'accept', 'created', 'accepted', (job, caller) => {
+        await transition(request, 'accept', 'created', 'accepted', async (job, caller) => {
           if (job.workerAgentId !== caller.agentId) {
             throw new PactoraError(ErrorCode.FORBIDDEN, 'only the assigned worker may accept');
           }
+          // docs/26 F14: a soft gate; the chain does not know about holds.
+          await requireClear(db, caller.agentId, 'accept work');
         })
       ).receipt,
   );
