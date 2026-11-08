@@ -6,7 +6,7 @@
 #
 # SERVICE is the workspace package: @pactora/api, @pactora/signer,
 # @pactora/indexer, or an agent (@pactora/research-bot, …). The chain facts the
-# config loader reads — networks, parameters, deployed addresses, ABIs — come
+# config loader reads — networks, parameters, deployed accounts — come
 # from `chain/`, a committed copy of pactora-contracts-near kept exact by
 # `scripts/sync-chain-facts.mjs` (CI fails on drift). That is what lets a
 # hosted build that clones one repo (Railway) build at all, and an image
@@ -61,7 +61,6 @@ WORKDIR /app
 COPY --from=build --chown=node:node /out ./
 COPY --from=contracts --chown=node:node config /contracts/config
 COPY --from=contracts --chown=node:node deployments /contracts/deployments
-COPY --from=contracts --chown=node:node export /contracts/export
 # Which code this image is. Railway passes RAILWAY_GIT_COMMIT_SHA to builds
 # from GitHub; CI and local builds pass GIT_SHA. /health and /v1/status read
 # this file (packages/service/src/build.ts), which accepts only a hex commit

@@ -1,8 +1,12 @@
 # The whole Pactora backend from its production images — the same recipe a
 # deployment builds — on a Postgres of its own:
 #
-#   SIGNER_TOKEN=$(openssl rand -hex 24) SIGNER_DEV_PRIVATE_KEY=0x… \
+#   SIGNER_TOKEN=$(openssl rand -hex 24) SIGNER_KEY_PASSPHRASE=$(openssl rand -hex 24) \
 #     docker compose -f docker-compose.full.yml up --build
+#
+# NEAR testnet by default (ENABLED_CHAINS / DEFAULT_CHAIN, CAIP-2 ids). Against
+# a local sandbox node on this machine:
+#   ENABLED_CHAINS=near:sandbox RPC_URL_SANDBOX=http://host.docker.internal:3030 …
 #
 # Separate from docker-compose.yml (the dev database the tests use), on its own
 # project, volume and host port, so bringing this up never touches dev data.
@@ -24,8 +28,13 @@ x-logging: &logging
   options: {max-size: '10m', max-file: '5'}
 
 x-chain: &chain
-  ENABLED_CHAIN_IDS: ${ENABLED_CHAIN_IDS:-10143}
-  DEFAULT_CHAIN_ID: ${DEFAULT_CHAIN_ID:-10143}
+  ENABLED_CHAINS: ${ENABLED_CHAINS:-near:testnet}
+  DEFAULT_CHAIN: ${DEFAULT_CHAIN:-near:testnet}
+  # RPC per network slug. The config reads these with `??`, so an empty value
+  # would be used as the URL: each has a real default. A sandbox node runs on
+  # the host, which a container reaches as host.docker.internal.
+  RPC_URL_TESTNET: ${RPC_URL_TESTNET:-https://rpc.testnet.near.org}
+  RPC_URL_SANDBOX: ${RPC_URL_SANDBOX:-http://host.docker.internal:3030}
   DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
   LOG_LEVEL: ${LOG_LEVEL:-info}
 
@@ -62,24 +71,19 @@ services:
       # With a token the signer listens on every interface — here, only the
       # compose network; it publishes no port.
       SIGNER_TOKEN: ${SIGNER_TOKEN:?set SIGNER_TOKEN (32+ characters), shared with the api}
-      SIGNER_KEYSTORE_JSON: ${SIGNER_KEYSTORE_JSON:-}
-      SIGNER_KEYSTORE_PASSPHRASE: ${SIGNER_KEYSTORE_PASSPHRASE:-}
-      # Testnet only; the signer refuses a raw key anywhere else.
-      SIGNER_DEV_PRIVATE_KEY: ${SIGNER_DEV_PRIVATE_KEY:-}
-      # Hosted agents (scripts/seed-hosted.mjs → artifacts/hosted-agents.json "env"):
-      # their session keys, and the session manager that extends them every
-      # day (never the accounts' owner key — audit F1). SESSION_OWNER_* is the
-      # old name, still read.
-      SIGNER_DEV_PRIVATE_KEYS: ${SIGNER_DEV_PRIVATE_KEYS:-}
-      SESSION_MANAGER_PRIVATE_KEY: ${SESSION_MANAGER_PRIVATE_KEY:-}
-      SESSION_OWNER_PRIVATE_KEY: ${SESSION_OWNER_PRIVATE_KEY:-}
-      SESSION_RENEW_BEFORE_S: ${SESSION_RENEW_BEFORE_S:-21600}
-      KEEPER_PRIVATE_KEY: ${KEEPER_PRIVATE_KEY:-}
-      # Off testnet (v3): AWS KMS instead of every raw key above — docs/21.
+      # The agents' wallet keys (POST /keys) are kept encrypted in Postgres
+      # under this; without it the signer cannot create a wallet key.
+      SIGNER_KEY_PASSPHRASE: ${SIGNER_KEY_PASSPHRASE:?set SIGNER_KEY_PASSPHRASE (32+ characters)}
+      # Testnet only (near-cli credential JSON); the signer refuses it elsewhere.
+      SIGNER_DEV_CREDENTIALS: ${SIGNER_DEV_CREDENTIALS:-}
+      # The keeper: its own gas-only account, never a wallet the signer signs
+      # for. No KEEPER_ACCOUNT_ID → no keeper runs.
+      KEEPER_ACCOUNT_ID: ${KEEPER_ACCOUNT_ID:-}
+      KEEPER_SECRET_KEY: ${KEEPER_SECRET_KEY:-}
+      KEEPER_INTERVAL_MS: ${KEEPER_INTERVAL_MS:-15000}
+      # Off testnet: AWS KMS instead of the raw keys above — docs/21.
       SIGNER_KMS_KEYS: ${SIGNER_KMS_KEYS:-}
       KEEPER_KMS_KEY_ID: ${KEEPER_KMS_KEY_ID:-}
-      SESSION_MANAGER_KMS_KEY_ID: ${SESSION_MANAGER_KMS_KEY_ID:-}
-      SESSION_OWNER_KMS_KEY_ID: ${SESSION_OWNER_KMS_KEY_ID:-}
       AWS_REGION: ${AWS_REGION:-}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
@@ -98,6 +102,8 @@ services:
       <<: *chain
       INDEXER_HEALTH_PORT: 9090
       INDEXER_START_AT_HEAD: ${INDEXER_START_AT_HEAD:-0}
+      # Optional: a neardata.xyz key, for its higher rate limit on testnet.
+      NEARDATA_API_KEY: ${NEARDATA_API_KEY:-}
     depends_on:
       migrate: {condition: service_completed_successfully}
     healthcheck:
@@ -140,7 +146,7 @@ services:
     build: {<<: *build, args: {SERVICE: '@pactora/research-bot'}}
     environment: &worker-env
       PACTORA_API_URL: http://api:8080
-      PACTORA_CHAIN_ID: ${DEFAULT_CHAIN_ID:-10143}
+      PACTORA_CHAIN_ID: ${DEFAULT_CHAIN:-near:testnet}
       PACTORA_API_KEY: ${RESEARCH_BOT_API_KEY:-}
       AGENT_MODE: ${AGENT_MODE:-cached}
       BRAIN_CHAIN: ${BRAIN_CHAIN:-}

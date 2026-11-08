@@ -5,6 +5,36 @@
 > no Pactora-on-NEAR backend is hosted today. Paths below that name
 > `agentx-contracts` refer to the Monad build; for NEAR read
 > `pactora-contracts-near` and its `.env`.
+>
+> **NEAR (2026-11-08):** `docker-compose.full.yml` and this overlay now carry
+> the NEAR variables; before that they set the EVM ones, which every NEAR
+> service refuses at start, and the Dockerfile copied a `chain/export` that the
+> NEAR layout does not have, so no image built. Checked locally: all seven
+> images build and run as uid 1000; the stack (`ENABLED_CHAINS=near:sandbox`,
+> the RPC on the host) reached `operational` with every component up, the
+> indexer read the chain, and `POST /v1/agents/wallet-key` stored the new key
+> encrypted. The merged config with this overlay publishes only Caddy's 80/443.
+
+## NEAR testnet: the server's `.env`
+
+Never committed. After `pactora-contracts-near` is deployed to testnet and
+`node scripts/sync-chain-facts.mjs` has copied `deployments/testnet.json` into
+`chain/` (and that is committed), build the images from that commit:
+
+```bash
+SIGNER_TOKEN=            # openssl rand -hex 24 — shared by api and signer
+SIGNER_KEY_PASSPHRASE=   # openssl rand -hex 24 — encrypts the agents' wallet keys in Postgres; keep it, or those keys are lost
+API_HOST=api.<ip-with-dashes>.sslip.io
+CORS_ORIGINS=https://<the interface's Vercel URL>
+ENABLED_CHAINS=near:testnet
+DEFAULT_CHAIN=near:testnet
+# The keeper (optional, recommended): its own gas-only testnet account.
+KEEPER_ACCOUNT_ID=
+KEEPER_SECRET_KEY=       # ed25519:… — testnet only
+# Optional: RPC_URL_TESTNET, NEARDATA_API_KEY; model keys for live runs (§3b).
+```
+
+Then on Vercel: `NEXT_PUBLIC_API_URL=https://$API_HOST`, and redeploy.
 
 One Ubuntu VPS (2 vCPU / 4 GB), the production images from
 `docker-compose.full.yml`, and Caddy in front for HTTPS. Full steps:

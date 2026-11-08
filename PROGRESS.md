@@ -85,6 +85,12 @@ on Windows (`near-workspaces`) nor in the cargo-near image (no OpenSSL
 headers): run them in WSL. An empty `.env` (gitignored) is in place in
 `pactora-contracts-near` for step 1.
 
+**Hosting fixed 2026-11-08 (Vultr + Vercel):** the production compose still set
+the EVM variables (refused by every NEAR service) and the Dockerfile copied a
+`chain/export` the NEAR layout lacks (no image built). Both fixed; all seven
+images build, and the stack ran `operational` on the sandbox in Docker. Server
+`.env` and steps: `deploy/vps/README.md`.
+
 ---
 
 ## 🏷 Rebrand: AGENTX → Pactora (decided 2026-10-30)

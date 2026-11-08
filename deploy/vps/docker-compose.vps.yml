@@ -8,12 +8,6 @@
 services:
   postgres:
     ports: !reset []
-  signer:
-    environment:
-      # Hosted session keys live 24 h and are renewed in their last 6. A pass
-      # can fail on the public RPC's rate limit (seen live, "requests limited
-      # to 15/sec"); every 15 min leaves ~24 tries inside the window, not 6.
-      SESSION_RENEW_INTERVAL_MS: '900000'
   api:
     ports: !reset []
     environment:
