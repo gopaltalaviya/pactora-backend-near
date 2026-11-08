@@ -15,6 +15,7 @@ import {
   timestamp,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
+import {sql} from 'drizzle-orm';
 
 /**
  * Pactora database schema.
@@ -90,6 +91,11 @@ export const agents = pgTable(
     pricePerTask: baseUnits('price_per_task').notNull(),
     stake: baseUnits('stake').notNull().default('0'),
     metadataUri: text('metadata_uri'),
+    /**
+     * Where the agent or person works, "City" or "City, Region" (docs/26
+     * F18); '' = anywhere. Read by listing matching (apps/api matching.ts).
+     */
+    location: text('location').notNull().default(''),
     active: boolean('active').notNull().default(true),
     registeredAt: timestamp('registered_at', {withTimezone: true}).notNull().defaultNow(),
   },
@@ -180,6 +186,12 @@ export const jobs = pgTable(
      * signer correctly refused to pay twice.
      */
     idempotencyKey: text('idempotency_key'),
+    /**
+     * The `result_hash` the chain committed is not the one stored for the
+     * delivery (docs/26 gap 2). Set by the indexer or a person's confirm,
+     * never cleared; the API refuses approval while it is true.
+     */
+    resultMismatch: boolean('result_mismatch').notNull().default(false),
   },
   (t) => [
     uniqueIndex('jobs_chain_job_uk').on(t.chainId, t.chainJobId),
@@ -534,6 +546,164 @@ export const rateLimits = pgTable('rate_limits', {
   count: integer('count').notNull(),
   windowStart: timestamp('window_start', {withTimezone: true}).notNull(),
 });
+
+// ─────────────────────────── listings (docs/26 F4, F5, F6-a, F31) ───────────────────────────
+
+export const listingCategory = pgEnum('listing_category', ['physical', 'expertise', 'judgment']);
+export const interactionMode = pgEnum('interaction_mode', ['task', 'conversation', 'capture']);
+/** `applications`: the client picks among priced bids. `instant`: the first eligible claimers win. */
+export const hiringMode = pgEnum('hiring_mode', ['applications', 'instant']);
+/**
+ * open: taking applications or claims. closed: the client stopped hiring.
+ * filled: every worker slot is taken. cancelled: the client withdrew it
+ * before selecting anyone. A deadline that passed reads as closed.
+ */
+export const listingStatus = pgEnum('listing_status', ['open', 'closed', 'filled', 'cancelled']);
+export const applicationStatus = pgEnum('application_status', [
+  'pending',
+  'selected',
+  'rejected',
+  'withdrawn',
+]);
+
+/**
+ * Work offered to many (docs/26 F4). A listing holds no money: each selected
+ * bid becomes an ordinary 1:1 Pactora job (F5). `reserved` is what posting
+ * checked against the client's on-chain daily allowance: max_workers × the
+ * per-worker ceiling (the contract takes its fee out of the worker's
+ * payout, so the client's cost per worker is at most the ceiling).
+ */
+export const listings = pgTable(
+  'listings',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    chainId: text('chain_id').notNull(),
+    clientAgentId: bigint('client_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    category: listingCategory('category').notNull(),
+    interactionMode: interactionMode('interaction_mode').notNull(),
+    /** Lower-case, at most 20. */
+    skills: text('skills').array().notNull().default([]),
+    location: text('location').notNull().default(''),
+    /** The most the client pays ONE worker, in base units. */
+    maxPrice: baseUnits('max_price').notNull(),
+    maxWorkers: smallint('max_workers').notNull(),
+    hiringMode: hiringMode('hiring_mode').notNull(),
+    estimatedMinutes: integer('estimated_minutes').notNull(),
+    deadline: timestamp('deadline', {withTimezone: true}).notNull(),
+    criteria: text('criteria').notNull(),
+    acceptWindowSeconds: integer('accept_window_seconds').notNull(),
+    workWindowSeconds: integer('work_window_seconds').notNull(),
+    status: listingStatus('status').notNull().default('open'),
+    reserved: baseUnits('reserved').notNull(),
+    /** The client's Idempotency-Key, and the sha256 of the body it was first used with. */
+    idempotencyKey: text('idempotency_key').notNull(),
+    requestHash: text('request_hash').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
+    closedAt: timestamp('closed_at', {withTimezone: true}),
+  },
+  (t) => [
+    uniqueIndex('listings_public_id_uk').on(t.publicId),
+    uniqueIndex('listings_client_idempotency_uk').on(t.clientAgentId, t.idempotencyKey),
+    index('listings_board_idx').on(t.chainId, t.status, t.id),
+    index('listings_client_idx').on(t.clientAgentId, t.id),
+  ],
+);
+
+/**
+ * A priced bid on a listing. `reopenable` is the explicit flag (never a
+ * reason string) marking a bid rejected only because hiring closed:
+ * reopening revives exactly those, and they do not count toward the 3-bid
+ * limit.
+ */
+export const applications = pgTable(
+  'applications',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    listingId: bigint('listing_id', {mode: 'number'})
+      .notNull()
+      .references(() => listings.id, {onDelete: 'cascade'}),
+    applicantAgentId: bigint('applicant_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    price: baseUnits('price').notNull(),
+    proposal: text('proposal').notNull(),
+    status: applicationStatus('status').notNull().default('pending'),
+    /** The client's reason, shown to the applicant; or why the API closed it. */
+    reason: text('reason'),
+    reopenable: boolean('reopenable').notNull().default(false),
+    /** The job a selection created. */
+    jobId: bigint('job_id', {mode: 'number'}).references(() => jobs.id),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    decidedAt: timestamp('decided_at', {withTimezone: true}),
+  },
+  (t) => [
+    uniqueIndex('applications_public_id_uk').on(t.publicId),
+    // One live bid per applicant per listing, enforced by the database.
+    uniqueIndex('applications_one_live_uk')
+      .on(t.listingId, t.applicantAgentId)
+      .where(sql`status IN ('pending', 'selected')`),
+    index('applications_listing_idx').on(t.listingId, t.createdAt),
+    index('applications_applicant_idx').on(t.applicantAgentId, t.listingId),
+  ],
+);
+
+/** One row per filled worker slot (listing, slot 1..max_workers): the primary key makes over-filling impossible. */
+export const listingSlots = pgTable(
+  'listing_slots',
+  {
+    listingId: bigint('listing_id', {mode: 'number'})
+      .notNull()
+      .references(() => listings.id, {onDelete: 'cascade'}),
+    slot: smallint('slot').notNull(),
+    applicationId: bigint('application_id', {mode: 'number'})
+      .notNull()
+      .references(() => applications.id, {onDelete: 'cascade'}),
+    jobId: bigint('job_id', {mode: 'number'}).references(() => jobs.id),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({columns: [t.listingId, t.slot]}),
+    uniqueIndex('listing_slots_application_uk').on(t.applicationId),
+  ],
+);
+
+/**
+ * A transaction a person signs in the browser (docs/26 "prepare → sign →
+ * confirm"): what the API told them to sign and, once confirmed, the
+ * transaction that did it. A confirmed hash is unique per job, so a replayed
+ * confirm answers the first result.
+ */
+export const personActions = pgTable(
+  'person_actions',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    action: text('action').notNull(),
+    /** The FunctionCall: receiverId, methodName, args, gas, deposit. */
+    call: jsonb('call').notNull(),
+    /** Off-chain words a hash commits to (a dispute's reason). */
+    payload: jsonb('payload').notNull().default({}),
+    txHash: text('tx_hash'),
+    confirmedAt: timestamp('confirmed_at', {withTimezone: true}),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('person_actions_tx_uk').on(t.jobId, t.txHash),
+    index('person_actions_job_idx').on(t.jobId, t.agentId, t.action),
+  ],
+);
 
 // ─────────────────────────── indexer ───────────────────────────
 

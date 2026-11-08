@@ -36,6 +36,13 @@ export const ErrorCode = {
    * route for agent keys, or an agent key (`ax_`) on a route for people.
    */
   WRONG_CREDENTIAL: 'WRONG_CREDENTIAL',
+  /**
+   * The result hash committed on chain is not the one the API stored for the
+   * delivery (docs/26 gap 2). Approval is refused; only a dispute is offered.
+   */
+  RESULT_MISMATCH: 'RESULT_MISMATCH',
+  /** A bounded count was reached: bids per applicant, bids per listing, workers per listing. */
+  LIMIT_REACHED: 'LIMIT_REACHED',
 } as const;
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
@@ -58,6 +65,8 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   RATE_LIMITED: 429,
   COUNTERPARTY_BLOCKED: 403,
   WRONG_CREDENTIAL: 401,
+  RESULT_MISMATCH: 409,
+  LIMIT_REACHED: 409,
 };
 
 export interface Problem {

@@ -624,3 +624,49 @@ describe('payX402 with the escrow-backed scheme', () => {
     expect(out.refundError).toMatch(/no/);
   });
 });
+
+describe('listings (docs/26 F4)', () => {
+  it('sends each listing call to its route, with an idempotency key on a post', async () => {
+    const {calls, impl} = fakeFetch(() => ({status: 200, body: {listings: [], applications: []}}));
+    const c = client(impl as typeof fetch);
+    await c.postListing({title: 't'} as never, 'my-listing-key');
+    await c.postListing({title: 't'} as never);
+    await c.getListing('L1');
+    await c.listListings({match: 'me', skill: 'photography'});
+    await c.applyToListing('L1', {priceBaseUnits: '30000', proposal: 'p'});
+    await c.withdrawApplication('L1');
+    await c.withdrawApplication('L1', 'A1');
+    await c.listApplications('L1', {sort: 'price_high', page: 2});
+    await c.decideApplication('L1', {applicationId: 'A1', action: 'reject', reason: 'not this time, thanks'});
+    await c.closeApplications('L1');
+    await c.reopenApplications('L1');
+    await c.claimListing('L1');
+    await c.claimListing('L1', 'claiming it');
+
+    const seen = calls.map((x) => `${x.init?.method} ${x.url.replace('http://api.test', '')}`);
+    expect(seen).toEqual([
+      'POST /v1/listings',
+      'POST /v1/listings',
+      'GET /v1/listings/L1',
+      'GET /v1/listings?match=me&skill=photography&chainId=near%3Atestnet',
+      'POST /v1/listings/L1/applications',
+      'POST /v1/listings/L1/applications',
+      'POST /v1/listings/L1/applications',
+      'GET /v1/listings/L1/applications?sort=price_high&page=2',
+      'POST /v1/listings/L1/decide',
+      'POST /v1/listings/L1/close',
+      'POST /v1/listings/L1/reopen',
+      'POST /v1/listings/L1/claim',
+      'POST /v1/listings/L1/claim',
+    ]);
+    const headers = (i: number) => calls[i]!.init!.headers as Record<string, string>;
+    expect(headers(0)['idempotency-key']).toBe('my-listing-key');
+    expect(headers(1)['idempotency-key']).toMatch(/^listing_/);
+    expect(JSON.parse(String(calls[4]!.init!.body))).toEqual({
+      action: 'apply',
+      priceBaseUnits: '30000',
+      proposal: 'p',
+    });
+    expect(JSON.parse(String(calls[6]!.init!.body))).toEqual({action: 'withdraw', applicationId: 'A1'});
+  });
+});

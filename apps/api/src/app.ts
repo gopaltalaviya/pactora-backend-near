@@ -16,12 +16,21 @@ import {registerKeyRoutes} from './routes/keys.js';
 import {registerMetaRoutes} from './routes/meta.js';
 import {registerRunRoutes} from './routes/runs.js';
 import {registerPeopleRoutes} from './routes/people.js';
+import {registerListingRoutes} from './routes/listings.js';
+import {registerMeRoutes} from './routes/me.js';
+import {registerPersonActionRoutes} from './routes/person-actions.js';
 import {registerSessionRoutes} from './routes/session.js';
 import {sweepExpiredSessions} from './auth.js';
 import {registerStatusRoutes, type StatusDeps} from './routes/status.js';
 import {registerX402Routes} from './routes/x402.js';
 import {RunService, type RunExecutor} from './runs.js';
-import type {BudgetReader, DisputeBondReader, IdentityReader, PaymentReader} from './chain-reads.js';
+import type {
+  BudgetReader,
+  DisputeBondReader,
+  IdentityReader,
+  PaymentReader,
+  TxEventsReader,
+} from './chain-reads.js';
 import type {OwnerVerifier} from './challenges.js';
 import type {WalletKeys} from './routes/agents.js';
 
@@ -43,6 +52,8 @@ export interface AppDeps {
   signRecipient?: string;
   /** Omitted, the x402 facilitator can settle but never confirms a payment. */
   readPayment?: PaymentReader;
+  /** Omitted, a transaction a person signed in the browser cannot be confirmed (the indexer still sees it). */
+  readTxEvents?: TxEventsReader;
   /** Omitted, a dispute declares no spend and the contract alone enforces the cap. */
   readDisputeBond?: DisputeBondReader;
   /** Omitted, the API serves everything except starting a run. */
@@ -298,6 +309,21 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     db: deps.db,
     enabled: Object.keys(deps.chains),
     ...(deps.readIdentity ? {readIdentity: deps.readIdentity} : {}),
+  });
+  await registerMeRoutes(app, {db: deps.db, chains: deps.chains});
+  await registerPersonActionRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    bus,
+    ...(deps.readTxEvents ? {readTxEvents: deps.readTxEvents} : {}),
+  });
+  await registerListingRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    defaultChainId: deps.defaultChainId,
+    bus,
+    submit: deps.submit,
+    ...(deps.readBudget ? {readBudget: deps.readBudget} : {}),
   });
 
   // Expired sessions and sign-in challenges authenticate nobody; deleting

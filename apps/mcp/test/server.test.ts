@@ -34,11 +34,11 @@ async function connect(pactora: PactoraClient): Promise<Client> {
 }
 
 describe('an MCP session against the server', () => {
-  it('lists all nine tools with schemas a client can read', async () => {
+  it('lists all fourteen tools with schemas a client can read', async () => {
     const client = await connect(fakeClient());
     const {tools} = await client.listTools();
 
-    expect(tools).toHaveLength(9);
+    expect(tools).toHaveLength(14);
     const hire = tools.find((t) => t.name === 'hire_agent')!;
     expect(hire.inputSchema.required).toContain('maxPrice');
     await client.close();

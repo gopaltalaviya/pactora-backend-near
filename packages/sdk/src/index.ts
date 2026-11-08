@@ -242,6 +242,96 @@ export class NotAccepted extends PactoraError {
   }
 }
 
+/** A listing (docs/26 F4): work offered to many, priced by bids. Amounts are base units. */
+export interface Listing {
+  listingId: string;
+  chainId: string;
+  client: {agentId: string; kind: 'agent' | 'person'; name: string; publicId: string} | null;
+  title: string;
+  description: string;
+  category: 'physical' | 'expertise' | 'judgment';
+  interactionMode: 'task' | 'conversation' | 'capture';
+  skills: string[];
+  location: string;
+  maxPriceBaseUnits: BaseUnits;
+  maxPriceDisplay: string;
+  /** Taken from the worker's payout when a job settles; the client pays the price alone. */
+  feeAtCeilingBaseUnits: BaseUnits;
+  workerReceivesAtCeilingBaseUnits: BaseUnits;
+  maxWorkers: number;
+  slotsFilled: number;
+  hiringMode: 'applications' | 'instant';
+  estimatedMinutes: number;
+  deadline: string;
+  criteria: string;
+  acceptWindowSeconds: number;
+  workWindowSeconds: number;
+  status: 'open' | 'closed' | 'filled' | 'cancelled';
+  reservedBaseUnits: BaseUnits;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewListing {
+  title: string;
+  description: string;
+  category: Listing['category'];
+  interactionMode: Listing['interactionMode'];
+  skills?: string[];
+  location?: string;
+  maxPriceBaseUnits: BaseUnits;
+  maxWorkers: number;
+  hiringMode?: Listing['hiringMode'];
+  estimatedMinutes: number;
+  /** ISO 8601, at most 90 days ahead. */
+  deadline: string;
+  criteria: string;
+  acceptWindowSeconds?: number;
+  workWindowSeconds?: number;
+}
+
+export interface Application {
+  applicationId: string;
+  status: 'pending' | 'selected' | 'rejected' | 'withdrawn';
+  priceBaseUnits: BaseUnits;
+  priceDisplay: string;
+  feeBaseUnits: BaseUnits;
+  workerReceivesBaseUnits: BaseUnits;
+  proposal: string;
+  reason: string | null;
+  reopenable: boolean;
+  jobId: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+  /** On the client's list only. */
+  applicant?: {
+    agentId: string;
+    publicId: string;
+    kind: 'agent' | 'person';
+    name: string;
+    location: string;
+    score: number;
+    completed: number;
+  };
+}
+
+export interface Decision {
+  application: Application;
+  /** On a selection: the job it created, at the bid price. */
+  job?: {
+    jobId: string;
+    chainJobId: string | null;
+    state: JobState;
+    amount: BaseUnits;
+    amountDisplay: string;
+    specHash: string;
+  };
+  funding?: Record<string, unknown>;
+  replayed: boolean;
+}
+
+export type ApplicationSort = 'recent' | 'price_low' | 'price_high' | 'rating';
+
 export interface DiscoverQuery {
   capability?: Capability;
   maxPrice?: BaseUnits;
@@ -395,6 +485,100 @@ export class PactoraClient {
    */
   decline(jobId: string, reason: string): Promise<{jobId: string; declined: {reason: string; at: string}}> {
     return this.request('POST', `/v1/jobs/${jobId}/decline`, {body: {reason}});
+  }
+
+  // ── listings (docs/26 F4) ──────────────────────────────────────────────
+
+  /**
+   * Post a listing. Reserves `maxWorkers × maxPriceBaseUnits` of the on-chain
+   * daily allowance; spends nothing until a bid is selected. The key makes a
+   * retry the same listing (a changed body under it is a 409).
+   */
+  postListing(listing: NewListing, idempotencyKey?: string): Promise<Listing> {
+    return this.request<Listing>('POST', '/v1/listings', {
+      idempotencyKey: idempotencyKey ?? `listing_${globalThis.crypto.randomUUID()}`,
+      body: listing,
+    });
+  }
+
+  getListing(listingId: string): Promise<Listing> {
+    return this.request<Listing>('GET', `/v1/listings/${listingId}`, {});
+  }
+
+  async listListings(
+    q: {
+      category?: string;
+      skill?: string;
+      location?: string;
+      match?: 'me';
+      mine?: boolean;
+      limit?: number;
+    } = {},
+  ): Promise<Listing[]> {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined) params.set(k, String(v));
+    if (this.chainId) params.set('chainId', this.chainId);
+    const {listings} = await this.request<{listings: Listing[]}>(
+      'GET',
+      `/v1/listings?${params.toString()}`,
+      {},
+    );
+    return listings;
+  }
+
+  /** Bid on a listing, at or under its ceiling. */
+  applyToListing(
+    listingId: string,
+    bid: {priceBaseUnits: BaseUnits; proposal: string},
+  ): Promise<Application> {
+    return this.request<Application>('POST', `/v1/listings/${listingId}/applications`, {
+      body: {action: 'apply', ...bid},
+    });
+  }
+
+  withdrawApplication(listingId: string, applicationId?: string): Promise<Application> {
+    return this.request<Application>('POST', `/v1/listings/${listingId}/applications`, {
+      body: {action: 'withdraw', ...(applicationId ? {applicationId} : {})},
+    });
+  }
+
+  /** The bids on a listing you posted, 20 a page. */
+  listApplications(
+    listingId: string,
+    q: {sort?: ApplicationSort; page?: number; status?: Application['status']} = {},
+  ): Promise<{
+    total: number;
+    page: number;
+    pageSize: number;
+    sort: ApplicationSort;
+    applications: Application[];
+  }> {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined) params.set(k, String(v));
+    return this.request('GET', `/v1/listings/${listingId}/applications?${params.toString()}`, {});
+  }
+
+  /** Select (creates the job at the bid price — spends) or reject a bid, with a reason the applicant sees. */
+  decideApplication(
+    listingId: string,
+    decision: {applicationId: string; action: 'select' | 'reject'; reason: string},
+  ): Promise<Decision> {
+    return this.request<Decision>('POST', `/v1/listings/${listingId}/decide`, {body: decision});
+  }
+
+  closeApplications(listingId: string): Promise<Listing> {
+    return this.request<Listing>('POST', `/v1/listings/${listingId}/close`, {});
+  }
+
+  reopenApplications(listingId: string): Promise<Listing> {
+    return this.request<Listing>('POST', `/v1/listings/${listingId}/reopen`, {});
+  }
+
+  /** Instant mode: take a worker slot at the listed price. */
+  claimListing(listingId: string, proposal?: string): Promise<Decision> {
+    return this.request<Decision>('POST', `/v1/listings/${listingId}/claim`, {
+      body: proposal !== undefined ? {proposal} : {},
+    });
   }
 
   // ── x402 ───────────────────────────────────────────────────────────────

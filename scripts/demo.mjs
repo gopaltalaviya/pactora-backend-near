@@ -214,7 +214,7 @@ try {
     });
     children.push(child);
   };
-  await sql`TRUNCATE agents, jobs, job_events, agent_stats, agent_capabilities, api_keys, payments, signer_txs, signer_keys, signer_wallet_txs, spend_policies, token_transfers RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE agents, jobs, job_events, agent_stats, agent_capabilities, api_keys, payments, signer_txs, signer_keys, signer_wallet_txs, spend_policies, token_transfers, listings, applications, listing_slots, person_actions RESTART IDENTITY CASCADE`;
   await sql`DELETE FROM indexer_cursor`;
   start('signer', 'apps/signer/dist/main.js');
   start('api', 'apps/api/dist/main.js');
@@ -441,7 +441,129 @@ try {
 
   if (report.answer) console.log(`\n  answer: ${report.answer}\n`);
 
-  // ── 8. the attack (DEMO_ATTACK=0 skips it) ────────────────────────────
+  // ── 8. a listing with two workers (docs/26 F4, F5) ────────────────────
+  // The orchestrator posts work offered to many; two worker agents bid
+  // different prices; selecting both creates two ordinary escrow jobs, each
+  // at ITS bid price, funded by the signer. Then both settle, and I1 holds.
+  {
+    const bidders = [];
+    for (const [i, price] of ['30000', '35000'].entries()) {
+      const owner = await createPerson(root, `${run}-bidder${i + 1}`, '3', {save: keep});
+      await mintTo(root, TOKEN, owner, 20_000_000);
+      const a = await registerAgent(owner, {
+        name: `Bidder ${i + 1}`,
+        capability: 'shop-photos',
+        price: '20000',
+      });
+      await deposit(owner, TOKEN, PACTORA, BigInt(params.min_stake) + 1_000_000n, {
+        Stake: {agent_id: Number(a.chainAgentId)},
+      });
+      bidders.push({
+        ...a,
+        price,
+        sdk: new PactoraClient({baseUrl: base, apiKey: a.apiKey, chainId: CHAIN_ID}),
+      });
+    }
+    const listing = await client.postListing(
+      {
+        title: 'Photograph two shop fronts',
+        description: 'A clear daytime photo of each of two shop fronts on the same street.',
+        category: 'physical',
+        interactionMode: 'capture',
+        skills: ['shop-photos'],
+        location: 'Berlin',
+        maxPriceBaseUnits: '40000',
+        maxWorkers: 2,
+        estimatedMinutes: 30,
+        deadline: new Date(Date.now() + 86_400_000).toISOString(),
+        criteria: 'Each photo shows the whole shop front and its sign, in focus.',
+        acceptWindowSeconds: 300,
+        workWindowSeconds: 600,
+      },
+      `${run}-listing`,
+    );
+    listing.reservedBaseUnits === '80000'
+      ? ok(
+          `listing posted: 2 workers × ${chain.formatToken(40_000n)} reserved against the on-chain daily allowance`,
+        )
+      : fail(`listing reserved ${listing.reservedBaseUnits}, expected 80000`);
+    for (const b of bidders) {
+      await b.sdk.applyToListing(listing.listingId, {
+        priceBaseUnits: b.price,
+        proposal: `I can photograph both fronts within the hour for ${b.price}.`,
+      });
+    }
+    const {applications} = await client.listApplications(listing.listingId, {sort: 'price_low'});
+    applications.map((a) => a.priceBaseUnits).join(',') === '30000,35000'
+      ? ok('two bids received, sorted by price: 30000, 35000')
+      : fail(`bids: ${applications.map((a) => a.priceBaseUnits).join(',')}`);
+    const decided = [];
+    for (const a of applications) {
+      decided.push(
+        await client.decideApplication(listing.listingId, {
+          applicationId: a.applicationId,
+          action: 'select',
+          reason: 'Good price and a clear plan for the photos.',
+        }),
+      );
+    }
+    const onChainJob = (id) => view(root.provider, PACTORA, 'get_job', {job_id: Number(id)});
+    const listingJobs = [];
+    for (const d of decided) {
+      let chainJobId = d.job.chainJobId;
+      for (let i = 0; i < 40 && !chainJobId; i++) {
+        await sleep(500);
+        chainJobId = (await client.getJob(d.job.jobId)).chainJobId;
+      }
+      const j = chainJobId ? await onChainJob(chainJobId) : null;
+      listingJobs.push({...d, chainJobId, onChain: j});
+    }
+    listingJobs.every((j, i) => j.onChain?.amount === applications[i].priceBaseUnits)
+      ? ok(
+          `selecting both created ${listingJobs.length} escrow jobs on chain at the bid prices: ${listingJobs.map((j) => `#${j.chainJobId} = ${j.onChain.amount}`).join(', ')}`,
+        )
+      : fail(`on-chain jobs: ${JSON.stringify(listingJobs.map((j) => [j.chainJobId, j.onChain?.amount]))}`);
+    const status = (await client.getListing(listing.listingId)).status;
+    status === 'filled' ? ok('the listing is filled') : fail(`listing status ${status}`);
+
+    const workerOf = (d) => bidders.find((b) => b.price === d.job.amount);
+    const pursesBefore = await Promise.all(bidders.map(purse));
+    for (const j of listingJobs) {
+      const w = workerOf(j);
+      await w.sdk.accept(j.job.jobId);
+      await w.sdk.submitResult(j.job.jobId, {output: {photos: ['front-1.jpg', 'front-2.jpg']}});
+      await client.approve(j.job.jobId);
+    }
+    for (let i = 0; i < 40; i++) {
+      const states = await Promise.all(listingJobs.map((j) => onChainJob(j.chainJobId)));
+      if (states.every((s) => s.state === 'Settled')) break;
+      await sleep(500);
+    }
+    const settledNow = await Promise.all(listingJobs.map((j) => onChainJob(j.chainJobId)));
+    settledNow.every((s) => s.state === 'Settled')
+      ? ok('both listing jobs settled on chain')
+      : fail(`listing jobs: ${settledNow.map((s) => s.state).join(', ')}`);
+    const pursesAfter = await Promise.all(bidders.map(purse));
+    const fee = (amount) => {
+      const bps = (BigInt(amount) * BigInt(params.protocol_fee_bps)) / 10_000n;
+      return bps > BigInt(params.min_fee) ? bps : BigInt(params.min_fee);
+    };
+    const gains = bidders.map((b, i) => BigInt(pursesAfter[i].balance) - BigInt(pursesBefore[i].balance));
+    gains.every((g, i) => g === BigInt(bidders[i].price) - fee(bidders[i].price))
+      ? ok(
+          `each worker received its bid less the fee taken from the payout: ${gains.map((g) => chain.formatToken(g)).join(', ')}`,
+        )
+      : fail(`worker gains ${gains.join(', ')}`);
+    const t2 = await view(root.provider, PACTORA, 'get_totals');
+    const held2 = await view(root.provider, TOKEN, 'ft_balance_of', {account_id: PACTORA});
+    t2.sum === held2
+      ? ok(
+          `I1 holds after the listing: the contract holds exactly what it owes (${chain.formatToken(BigInt(held2))})`,
+        )
+      : fail(`I1 after the listing: owes ${t2.sum}, holds ${held2}`);
+  }
+
+  // ── 9. the attack (DEMO_ATTACK=0 skips it) ────────────────────────────
   // No model is asked anything here: the point is that no defence below
   // depends on a model saying no. We ASSUME the injection worked.
   if (process.env.DEMO_ATTACK !== '0') {

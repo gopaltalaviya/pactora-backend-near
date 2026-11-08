@@ -344,3 +344,48 @@ describe('the confidence floor', () => {
     expect(strict).toBeLessThan(lenient);
   });
 });
+
+describe('the result hash on chain against the stored delivery (docs/26 gap 2)', () => {
+  const stored = 'ef'.repeat(32);
+  const flags = async (jobId: number) =>
+    (
+      (await db.execute(
+        sql`SELECT result_hash, result_mismatch FROM jobs WHERE id = ${jobId}`,
+      )) as unknown as {result_hash: string | null; result_mismatch: boolean}[]
+    )[0]!;
+
+  it('flags result_mismatch and keeps the stored hash when the chain committed a different one', async () => {
+    const {jobId} = await seedJob(db, {state: 'accepted'});
+    await db.execute(sql`UPDATE jobs SET result_hash = ${stored} WHERE id = ${jobId}`);
+    const h = harness();
+    h.pactora(log.resultSubmitted({jobId: 7, resultHash: R}));
+    await h.sync();
+    expect(await flags(jobId)).toEqual({result_hash: stored, result_mismatch: true});
+    expect((await jobRow(db, jobId)).state).toBe('submitted');
+  });
+
+  it('flags it even when the job has moved past submitted already', async () => {
+    const {jobId} = await seedJob(db, {state: 'settled'});
+    await db.execute(sql`UPDATE jobs SET result_hash = ${stored} WHERE id = ${jobId}`);
+    const h = harness();
+    h.pactora(log.resultSubmitted({jobId: 7, resultHash: R}));
+    await h.sync();
+    expect((await flags(jobId)).result_mismatch).toBe(true);
+  });
+
+  it('leaves the flag off when the hashes agree, or when none was stored', async () => {
+    const {jobId} = await seedJob(db, {state: 'accepted'});
+    await db.execute(sql`UPDATE jobs SET result_hash = ${R} WHERE id = ${jobId}`);
+    const h = harness();
+    h.pactora(log.resultSubmitted({jobId: 7, resultHash: R}));
+    await h.sync();
+    expect(await flags(jobId)).toEqual({result_hash: R, result_mismatch: false});
+
+    await reset(db);
+    const fresh = await seedJob(db, {state: 'accepted'});
+    const h2 = harness();
+    h2.pactora(log.resultSubmitted({jobId: 7, resultHash: R}));
+    await h2.sync();
+    expect(await flags(fresh.jobId)).toEqual({result_hash: R, result_mismatch: false});
+  });
+});

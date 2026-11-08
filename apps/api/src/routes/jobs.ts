@@ -1,11 +1,12 @@
 import type {FastifyInstance, FastifyRequest} from 'fastify';
-import {and, asc, desc, eq, exists, gt, inArray, isNotNull, or} from 'drizzle-orm';
+import {and, asc, desc, eq, exists, gt, inArray, isNotNull, or, sql} from 'drizzle-orm';
 import {sha256Hex} from '@pactora/near';
 import {z} from 'zod';
 import {agents, agentStats, jobEvents, jobs, readTrust, type Db} from '@pactora/db';
 import {
   PactoraError,
   BaseUnits,
+  Capability,
   ErrorCode,
   HireRequest,
   JobResult,
@@ -15,7 +16,8 @@ import {
   validateShape,
 } from '@pactora/shared';
 import type {ChainConfig} from '@pactora/config';
-import {authenticate, resolveChainId, type Caller} from '../auth.js';
+import {authenticate, authenticateCaller, resolveChainId, type Caller} from '../auth.js';
+import {personAgentOf} from '../actor.js';
 import {Cursor, page} from '../cursor.js';
 import {lastEventIdOf, streamEventOf, streamEvents, type EventBus} from '../events.js';
 
@@ -23,6 +25,8 @@ import {lastEventIdOf, streamEventOf, streamEvents, type EventBus} from '../even
 export const JobListQuery = z.object({
   role: z.enum(['worker', 'client']).optional(),
   state: JobState.optional(),
+  /** The spec's capability (a listing job's is its first skill, or its category). */
+  capability: Capability.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   /** v3: the `nextCursor` of the previous page. */
   cursor: Cursor.optional(),
@@ -92,8 +96,17 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
    * client did not want.
    */
   app.get('/v1/jobs', async (request) => {
-    const caller = await authenticate(db, request);
+    // An agent key, or a person's session acting through its person agent
+    // (docs/26 F3). A person who has not registered one has no jobs.
+    const who = await authenticateCaller(db, request);
     const query = JobListQuery.parse(request.query ?? {});
+    const caller =
+      who.kind === 'agent'
+        ? who
+        : await personAgentOf(db, who.account, who.chainId).then((a) =>
+            a ? {agentId: a.id, chainId: a.chainId} : null,
+          );
+    if (!caller) return {count: 0, nextCursor: null, jobs: []};
 
     // Work is offered only once it is paid for (audit H2). The row is written
     // before the signer is asked, so a hire the signer refused — no funds, a
@@ -129,6 +142,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
           side,
           eq(jobs.chainId, caller.chainId),
           query.state ? eq(jobs.state, query.state) : undefined,
+          query.capability ? sql`${jobs.spec}->>'capability' = ${query.capability}` : undefined,
           // v3: oldest first, so the next page starts after the cursor.
           query.cursor !== undefined ? gt(jobs.id, query.cursor) : undefined,
         ),
@@ -166,6 +180,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
            * saw it and the client waited for a result no one was producing.
            */
           hasResult: job.result !== null,
+          resultMismatch: job.resultMismatch,
           clientAgentId: String(job.clientAgentId),
           workerAgentId: String(job.workerAgentId),
           createdAt: job.createdAt,
@@ -196,6 +211,10 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       specHash: job.specHash,
       result: job.result,
       resultHash: job.resultHash,
+      /** The chain committed a different result hash than the delivery stored: approve is refused. */
+      resultMismatch: job.resultMismatch,
+      clientAgentId: String(job.clientAgentId),
+      workerAgentId: String(job.workerAgentId),
       createdAt: job.createdAt,
       settledAt: job.settledAt,
       events: events.map((e) => ({
@@ -272,6 +291,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       if (job.clientAgentId !== caller.agentId) {
         throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may approve');
       }
+      refuseMismatched(job);
     }),
   );
 
@@ -543,10 +563,25 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
  * URL — and a second copy of this logic would be a second place for the
  * rules about idempotency, on-chain agent ids and the fast path to drift apart.
  */
+/**
+ * How a hire from a listing (docs/26 F4) differs from one from discovery:
+ * the price is the accepted bid, not the worker's `pricePerTask`; the
+ * windows are the listing's; it is always escrow; and the worker may be a
+ * person, whose row is inactive for discovery — selecting them is how they
+ * are hired. Everything else (trust, minimums, idempotency, the signer) is
+ * the same code.
+ */
+export interface ListingHire {
+  amount: bigint;
+  acceptWindowSeconds: number;
+  workWindowSeconds: number;
+}
+
 export async function hire(
   deps: Pick<JobRouteDeps, 'db' | 'bus' | 'submit'>,
   ctx: {caller: Caller; chainId: string; chain: ChainConfig; idempotencyKey: string; traceId: string},
   body: z.infer<typeof HireRequest>,
+  listing?: ListingHire,
 ): Promise<ReturnType<typeof receipt>> {
   const {db, bus, submit} = deps;
   const {caller, chainId, chain, idempotencyKey} = ctx;
@@ -577,7 +612,7 @@ export async function hire(
       2,
     );
   }
-  if (!worker.active) {
+  if (!worker.active && !listing) {
     throw new PactoraError(ErrorCode.AGENT_NOT_HIREABLE, `agent ${workerAgentId} is not accepting work`);
   }
 
@@ -596,7 +631,7 @@ export async function hire(
     );
   }
 
-  const price = BigInt(worker.pricePerTask);
+  const price = listing ? listing.amount : BigInt(worker.pricePerTask);
   const maxPrice = BigInt(body.maxPrice);
 
   // The escrow refuses any job below its minimum (v2): said here, before a
@@ -628,8 +663,13 @@ export async function hire(
   const fastPathMinScore = Number(chain.params.fastPathMinScore ?? 0);
   const workerStats = await db.query.agentStats.findFirst({where: eq(agentStats.agentId, worker.id)});
   const earnedFastPath = (workerStats?.score ?? 0) >= fastPathMinScore;
-  const path =
-    body.path === 'auto' ? (price <= fastPathMax && earnedFastPath ? 'direct' : 'escrow') : body.path;
+  const path = listing
+    ? 'escrow'
+    : body.path === 'auto'
+      ? price <= fastPathMax && earnedFastPath
+        ? 'direct'
+        : 'escrow'
+      : body.path;
 
   // Insert first so the job has an id, then commit to a hash that includes
   // it.
@@ -681,7 +721,7 @@ export async function hire(
       })
       .returning();
     // The PUBLIC id — the one in the receipt — so the client can recompute it.
-    const hashed = await sha256Of(`${canonicalize(body.spec)}:${inserted!.publicId}`);
+    const hashed = specHashOf(body.spec, inserted!.publicId);
     const [row] = await db.update(jobs).set({specHash: hashed}).where(eq(jobs.id, inserted!.id)).returning();
     return row!;
   }
@@ -712,6 +752,9 @@ export async function hire(
       workerChainAgentId: worker.chainAgentId,
       amount: amount.toString(),
       specHash,
+      ...(listing
+        ? {acceptWindowSeconds: listing.acceptWindowSeconds, workWindowSeconds: listing.workWindowSeconds}
+        : {}),
     },
   });
 
@@ -829,6 +872,25 @@ function receipt(
   };
 }
 
+/**
+ * Approval of a job whose on-chain result hash is not the stored delivery's
+ * (docs/26 gap 2) would pay for something nobody can show. Refused for
+ * agents and people alike; a dispute stays open.
+ */
+export function refuseMismatched(job: {resultMismatch: boolean; resultHash: string | null}): void {
+  if (job.resultMismatch) {
+    throw new PactoraError(
+      ErrorCode.RESULT_MISMATCH,
+      `the result hash committed on chain is not the delivered result's (${job.resultHash ?? 'none stored'}) — dispute instead`,
+    );
+  }
+}
+
+/** The commitment a job is created with: sha256(canonical spec + ':' + the job's public id). */
+export function specHashOf(spec: unknown, publicId: string): string {
+  return sha256Hex(`${canonicalize(spec)}:${publicId}`);
+}
+
 export const DisputeBody = z.object({
   reason: z
     .string()
@@ -869,7 +931,7 @@ function disputeOf(
   return {reason: p.reason, reasonHash: p.reasonHash, at: new Date(e.occurredAt).toISOString()};
 }
 
-async function recordEvent(
+export async function recordEvent(
   db: Db,
   bus: EventBus,
   jobId: number,

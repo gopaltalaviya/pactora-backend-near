@@ -181,6 +181,8 @@ const TITLES: Record<string, string> = {
   [ErrorCode.UNAUTHORIZED]: 'Missing or invalid API key',
   [ErrorCode.FORBIDDEN]: 'Not permitted for this agent',
   [ErrorCode.WRONG_CREDENTIAL]: 'Wrong kind of credential for this route',
+  [ErrorCode.RESULT_MISMATCH]: 'The result committed on chain is not the one delivered',
+  [ErrorCode.LIMIT_REACHED]: 'A limit was reached',
 };
 
 function titleFor(code: string): string {

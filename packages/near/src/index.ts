@@ -145,6 +145,8 @@ export interface TxOutcome {
   failure?: string;
   /** Every receipt the transaction produced, in the node's order. */
   receipts: ReceiptExecution[];
+  /** Who signed the transaction, when the node said (it always does once it knows the transaction). */
+  signerId?: string;
 }
 
 export interface NearClient {
@@ -261,7 +263,7 @@ export async function signFunctionCallWith(
 interface RawOutcome {
   status?: unknown;
   final_execution_status?: string;
-  transaction?: {hash?: string};
+  transaction?: {hash?: string; signer_id?: string};
   transaction_outcome?: {id?: string};
   receipts_outcome?: Array<{
     id: string;
@@ -289,6 +291,7 @@ export function parseOutcome(raw: RawOutcome, txHash: string): TxOutcome {
     ok: typeof r.outcome.status === 'object' && r.outcome.status !== null && !('Failure' in r.outcome.status),
   }));
   const status = raw.status;
+  const signer = typeof raw.transaction?.signer_id === 'string' ? {signerId: raw.transaction.signer_id} : {};
   if (typeof status === 'object' && status !== null) {
     if ('SuccessValue' in status) {
       return {
@@ -296,6 +299,7 @@ export function parseOutcome(raw: RawOutcome, txHash: string): TxOutcome {
         txHash,
         returnValue: decodeReturn(String((status as {SuccessValue: string}).SuccessValue)),
         receipts,
+        ...signer,
       };
     }
     if ('Failure' in status) {
@@ -304,6 +308,7 @@ export function parseOutcome(raw: RawOutcome, txHash: string): TxOutcome {
         txHash,
         failure: JSON.stringify(status.Failure),
         receipts,
+        ...signer,
       };
     }
   }

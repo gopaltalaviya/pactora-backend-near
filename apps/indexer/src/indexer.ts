@@ -445,6 +445,25 @@ export class Indexer {
   ): Promise<void> {
     const blockTime = new Date(ev.blockTimestamp * 1000);
     const next = STATE_OF[kind];
+
+    // The chain's result hash against the delivery the API stored (docs/26
+    // gap 2). A different one is never written over ours: the job is
+    // flagged, the API refuses to approve it, and a dispute is the way out.
+    let resultPatch: {resultHash?: string} = {};
+    if (kind === 'submitted') {
+      const onChain = payload['resultHash'] as string;
+      const stored = await tx.query.jobs.findFirst({where: eq(jobs.id, jobId)});
+      if (stored?.resultHash && stored.resultHash !== onChain) {
+        // Whatever state the job has reached: the flag is about what was paid for.
+        await tx.update(jobs).set({resultMismatch: true}).where(eq(jobs.id, jobId));
+        this.log.warn(
+          {jobId, stored: stored.resultHash, onChain, txHash: ev.txHash},
+          'result hash on chain differs from the stored delivery — flagged result_mismatch',
+        );
+      } else {
+        resultPatch = {resultHash: onChain};
+      }
+    }
     if (next) {
       // Forward only. The API advances a job when its transaction is
       // broadcast, and this indexer reads final blocks, so it routinely
@@ -457,7 +476,7 @@ export class Indexer {
           state: next,
           // The block's time: a backfill must not date a payment by when it was indexed.
           ...(next === 'settled' ? {settledAt: blockTime, fee: payload['fee'] as string} : {}),
-          ...(kind === 'submitted' ? {resultHash: payload['resultHash'] as string} : {}),
+          ...resultPatch,
         })
         .where(and(eq(jobs.id, jobId), inArray(jobs.state, AT_OR_BEFORE[next])));
     }

@@ -8,6 +8,16 @@ import {RunListQuery, StartRun} from './routes/runs.js';
 import {SettleBody, VerifyBody} from './routes/x402.js';
 import {LoginBody, LoginChallengeBody} from './routes/session.js';
 import {PersonBody} from './routes/people.js';
+import {ConfirmBody, PrepareBody} from './routes/person-actions.js';
+import {
+  ApplicationBody,
+  ApplicationsQuery,
+  ClaimBody,
+  DecideBody,
+  ListingBody,
+  ListingPatch,
+  ListingQuery,
+} from './routes/listings.js';
 
 /**
  * The API as OpenAPI 3.0, generated from the SAME zod schemas the handlers
@@ -23,7 +33,16 @@ import {PersonBody} from './routes/people.js';
  * everywhere.
  */
 
-type Auth = 'public' | 'key' | 'key+idempotency' | 'owner-signature' | 'metrics-token' | 'session';
+type Auth =
+  | 'public'
+  | 'key'
+  | 'key+idempotency'
+  | 'owner-signature'
+  | 'metrics-token'
+  | 'session'
+  /** An agent key OR a person's session (the person acts through its person agent). */
+  | 'key-or-session'
+  | 'key-or-session+idempotency';
 
 interface Route {
   method: 'get' | 'post' | 'patch' | 'delete';
@@ -191,8 +210,8 @@ export const ROUTES: Route[] = [
   {
     method: 'get',
     path: '/v1/jobs',
-    auth: 'key',
-    summary: "The caller's jobs, as worker and/or client",
+    auth: 'key-or-session',
+    summary: "The caller's jobs, as worker and/or client; filtered by state, role, capability; cursor-paged",
     query: JobListQuery,
   },
   {
@@ -236,6 +255,105 @@ export const ROUTES: Route[] = [
     auth: 'public',
     summary: "SSE stream of the job's events; resumes after Last-Event-ID",
     stream: true,
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/person-actions/prepare',
+    auth: 'session',
+    summary:
+      'People: check an action (create, accept, submit, approve, dispute, cancel) and answer the FunctionCall to sign',
+    body: PrepareBody,
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/person-actions/confirm',
+    auth: 'session',
+    summary: "People: confirm a signed transaction from the chain's own events; idempotent per hash",
+    body: ConfirmBody,
+  },
+  {
+    method: 'get',
+    path: '/v1/me',
+    auth: 'session',
+    summary: 'People: the account, its person agent, earnings from settled jobs only, and spend',
+  },
+  {
+    method: 'post',
+    path: '/v1/listings',
+    auth: 'key-or-session+idempotency',
+    summary:
+      'Post a listing; reserves max_workers × ceiling of the on-chain daily allowance; 200 when replayed, 409 on a changed body',
+    body: ListingBody,
+    status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/listings',
+    auth: 'public',
+    summary:
+      'The board: filtered on the server, matched to the caller (match=me) or a location, newest first',
+    query: ListingQuery,
+  },
+  {
+    method: 'get',
+    path: '/v1/listings/:id',
+    auth: 'public',
+    summary: 'One listing; with a bearer, the owner also sees its slots and an applicant its own bids',
+  },
+  {
+    method: 'patch',
+    path: '/v1/listings/:id',
+    auth: 'key-or-session',
+    summary: 'Client: edit before any selection; the ceiling never below the highest live bid',
+    body: ListingPatch,
+  },
+  {
+    method: 'delete',
+    path: '/v1/listings/:id',
+    auth: 'key-or-session',
+    summary: 'Client: cancel before any selection; live bids are rejected with the reason',
+  },
+  {
+    method: 'post',
+    path: '/v1/listings/:id/applications',
+    auth: 'key-or-session',
+    summary: 'Apply with a price and a proposal (201), or withdraw a pending bid (200)',
+    body: ApplicationBody,
+    status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/listings/:id/applications',
+    auth: 'key-or-session',
+    summary: 'Client only: the bids, sorted recent | price_low | price_high | rating, 20 a page',
+    query: ApplicationsQuery,
+  },
+  {
+    method: 'post',
+    path: '/v1/listings/:id/decide',
+    auth: 'key-or-session',
+    summary: 'Client: select (creates the job at the bid price) or reject, with a reason; idempotent',
+    body: DecideBody,
+  },
+  {
+    method: 'post',
+    path: '/v1/listings/:id/close',
+    auth: 'key-or-session',
+    summary: 'Client: stop hiring; pending bids are set aside as reopenable',
+  },
+  {
+    method: 'post',
+    path: '/v1/listings/:id/reopen',
+    auth: 'key-or-session',
+    summary: 'Client: reopen before the deadline; revives only the bids closing set aside',
+  },
+  {
+    method: 'post',
+    path: '/v1/listings/:id/claim',
+    auth: 'key-or-session',
+    summary: 'Instant mode: take a worker slot at the ceiling; the first eligible claimers win',
+    body: ClaimBody,
+    status: 201,
   },
   {
     method: 'post',
@@ -330,7 +448,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
       schema: {type: 'string'},
     }));
     const headers =
-      r.auth === 'key+idempotency'
+      r.auth === 'key+idempotency' || r.auth === 'key-or-session+idempotency'
         ? [{name: 'Idempotency-Key', in: 'header', required: true, schema: {type: 'string', maxLength: 200}}]
         : [];
     const security =
@@ -340,7 +458,9 @@ export function openApiDocument(version: string): Record<string, unknown> {
           ? [{metricsToken: []}]
           : r.auth === 'session'
             ? [{session: []}]
-            : [];
+            : r.auth === 'key-or-session' || r.auth === 'key-or-session+idempotency'
+              ? [{apiKey: []}, {session: []}]
+              : [];
     const ok = String(r.status ?? 200);
     const operation: Record<string, unknown> = {
       summary: r.summary,

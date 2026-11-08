@@ -190,6 +190,10 @@ export function contractCall(
     }
     return ctx.spend.toString();
   };
+  const windowOf = (key: string): number | undefined => {
+    const v = ctx.payload?.[key];
+    return typeof v === 'number' && Number.isSafeInteger(v) && v > 0 ? v : undefined;
+  };
   const specHash = (): string => {
     const h = hash('specHash');
     if (!h) throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, 'the hire carries no sha256 spec hash');
@@ -215,8 +219,9 @@ export function contractCall(
           worker_id: agent('workerChainAgentId'),
           amount: amount(),
           spec_hash: specHash(),
-          accept_window: ctx.chain.params.acceptWindowSeconds,
-          work_window: ctx.chain.params.workWindowSeconds,
+          // A listing's own windows (docs/26 F4), else the chain's defaults.
+          accept_window: windowOf('acceptWindowSeconds') ?? ctx.chain.params.acceptWindowSeconds,
+          work_window: windowOf('workWindowSeconds') ?? ctx.chain.params.workWindowSeconds,
         },
       };
     case 'accept':

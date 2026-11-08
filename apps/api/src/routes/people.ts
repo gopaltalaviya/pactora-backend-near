@@ -30,6 +30,12 @@ export const PersonBody = z.object({
   name: z.string().min(1).max(64),
   description: z.string().max(1_000).optional(),
   capabilities: z.array(Capability).max(16).optional(),
+  /** "City" or "City, Region"; listings match on it (docs/26 F18). Omitted: anywhere. */
+  location: z
+    .string()
+    .transform((s) => s.replace(/\s+/g, ' ').trim())
+    .pipe(z.string().max(120))
+    .optional(),
 });
 
 export interface PeopleRouteDeps {
@@ -122,7 +128,10 @@ export async function registerPeopleRoutes(app: FastifyInstance, deps: PeopleRou
           walletAddress: account,
           name: body.name,
           description: body.description ?? null,
+          location: body.location ?? '',
           pricePerTask: '0',
+          // Inactive for agent discovery and the agent hire path, which both
+          // require it: a person gets work through listings (docs/26 F4).
           active: false,
         })
         .returning();

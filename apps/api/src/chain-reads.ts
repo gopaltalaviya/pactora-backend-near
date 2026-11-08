@@ -195,53 +195,97 @@ export type PaymentReader = (args: {
   signerId: string;
 }) => Promise<PaymentReading>;
 
-interface PaidEventData {
-  client: number;
-  worker: number;
-  amount: string;
-  spec_hash: string;
+/**
+ * The Pactora job events a browser-signed transaction can emit, by the
+ * contract's names (events.rs). Everything else it logs is ignored here.
+ */
+export const JOB_TX_EVENTS = [
+  'job_created',
+  'job_accepted',
+  'result_submitted',
+  'job_disputed',
+  'job_settled',
+  'job_refunded',
+  'direct_paid',
+] as const;
+export type JobTxEventName = (typeof JOB_TX_EVENTS)[number];
+
+/** One event, as the contract logged it: `data[0]` of the NEP-297 line, keys and types untouched. */
+export interface JobTxEvent {
+  event: JobTxEventName;
+  data: Record<string, unknown>;
 }
 
+export type TxEventsReading =
+  | {status: 'pending'}
+  | {status: 'reverted'}
+  | {status: 'success'; signerId: string | null; events: JobTxEvent[]};
+
 /**
- * Real reader: the transaction's outcome, and the Pactora events in its
- * receipts.
- *
- * Only events logged by the configured Pactora contract count: anyone can log
- * a line that looks like ours from a contract of their own. A failed
- * transaction is `reverted`, whatever it logged before failing (NEAR rolls a
- * failed receipt's state back, so its logs record nothing that happened).
+ * A transaction someone else signed — a person, from the browser — and the
+ * Pactora job events its receipts carry (docs/26 "prepare → sign → confirm").
+ * Same arguments as `PaymentReader`: NEAR needs the signer to find the shard.
  */
-export function makePaymentReader(config: PactoraConfig, clientFor = clients(config)): PaymentReader {
+export type TxEventsReader = (args: {
+  chainId: string;
+  txHash: string;
+  signerId: string;
+}) => Promise<TxEventsReading>;
+
+/**
+ * Real reader.
+ *
+ * Only events logged by the configured Pactora contract, in receipts that
+ * succeeded, count: anyone can log a line that looks like ours from a
+ * contract of their own, and NEAR rolls a failed receipt's state back, so its
+ * logs record nothing that happened. A failed transaction is `reverted`.
+ */
+export function makeTxEventsReader(config: PactoraConfig, clientFor = clients(config)): TxEventsReader {
   return async ({chainId, txHash, signerId}) => {
     const pactora = config.chain(chainId).contracts.Pactora;
     const out = await clientFor(chainId).txOutcome(txHash, signerId);
     if (out.status === 'pending') return {status: 'pending'};
     if (out.status === 'failure') return {status: 'reverted'};
-
-    const directPaid: DirectPaidLog[] = [];
-    const jobCreated: JobCreatedLog[] = [];
+    const events: JobTxEvent[] = [];
     for (const r of out.receipts) {
       if (!r.ok || r.executorId !== pactora) continue;
       for (const line of r.logs) {
         const e = parseLine(line);
-        if (!e) continue;
-        const target = e.event === 'direct_paid' ? directPaid : e.event === 'job_created' ? jobCreated : null;
-        if (!target) continue;
+        if (!e || !(JOB_TX_EVENTS as readonly string[]).includes(e.event)) continue;
         for (const d of e.data) {
-          target.push({
-            clientAgentId: BigInt(d.client),
-            workerAgentId: BigInt(d.worker),
-            amount: BigInt(d.amount),
-            specHash: d.spec_hash,
-          });
+          if (typeof d === 'object' && d !== null && !Array.isArray(d)) {
+            events.push({event: e.event as JobTxEventName, data: d as Record<string, unknown>});
+          }
         }
       }
     }
-    return {status: 'success', directPaid, jobCreated};
+    return {status: 'success', signerId: out.signerId ?? null, events};
   };
 }
 
-function parseLine(line: string): {event: string; data: PaidEventData[]} | null {
+/**
+ * Real reader for x402: the payment events of a transaction, built on the
+ * general reader so the two can never disagree about which logs count.
+ */
+export function makePaymentReader(config: PactoraConfig, clientFor = clients(config)): PaymentReader {
+  const read = makeTxEventsReader(config, clientFor);
+  return async (args) => {
+    const r = await read(args);
+    if (r.status !== 'success') return r;
+    const paid = (event: JobTxEventName) =>
+      r.events
+        .filter((e) => e.event === event)
+        .map(({data: d}) => ({
+          clientAgentId: BigInt(d['client'] as number),
+          workerAgentId: BigInt(d['worker'] as number),
+          amount: BigInt(d['amount'] as string),
+          specHash: d['spec_hash'] as string,
+        }));
+    return {status: 'success', directPaid: paid('direct_paid'), jobCreated: paid('job_created')};
+  };
+}
+
+function parseLine(line: string): {event: string; data: unknown[]} | null {
   if (!line.startsWith('EVENT_JSON:')) return null;
   try {
     const v = JSON.parse(line.slice('EVENT_JSON:'.length)) as {
@@ -250,7 +294,7 @@ function parseLine(line: string): {event: string; data: PaidEventData[]} | null 
       data?: unknown;
     };
     if (v.standard !== 'pactora' || typeof v.event !== 'string' || !Array.isArray(v.data)) return null;
-    return {event: v.event, data: v.data as PaidEventData[]};
+    return {event: v.event, data: v.data as unknown[]};
   } catch {
     return null;
   }

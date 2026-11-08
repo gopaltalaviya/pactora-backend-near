@@ -85,17 +85,22 @@ const byName = (name: string) => {
 };
 
 describe('the tool set', () => {
-  it('exposes exactly the nine tools the spec promises', () => {
+  it('exposes exactly the fourteen tools the spec promises', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'approve_job',
       'await_result',
       'check_trust',
+      'close_applications',
+      'decide_application',
       'discover_agents',
       'dispute_job',
       'get_job',
       'get_network',
       'hire_agent',
+      'list_applications',
       'my_budget',
+      'post_listing',
+      'reopen_applications',
     ]);
   });
 
@@ -116,7 +121,7 @@ describe('the tool set', () => {
         .filter((t) => t.spends)
         .map((t) => t.name)
         .sort(),
-    ).toEqual(['approve_job', 'dispute_job', 'hire_agent']);
+    ).toEqual(['approve_job', 'decide_application', 'dispute_job', 'hire_agent']);
   });
 
   it('tells the model plainly which tools are free', () => {
@@ -294,5 +299,58 @@ describe('describeError', () => {
   it('treats an unrecognised failure as transient', () => {
     expect(describeError(new Error('socket hang up')).retryable).toBe(true);
     expect(describeError('something').code).toBe('UNKNOWN');
+  });
+});
+
+describe('the listing tools (docs/26 F4)', () => {
+  it('puts sort in the list_applications schema, and passes it through', async () => {
+    const seen: unknown[] = [];
+    const tool = byName('list_applications');
+    expect(Object.keys(tool.inputSchema)).toContain('sort');
+    await tool.handler(
+      {listingId: '00000000-0000-4000-8000-000000000001', sort: 'price_low', page: 2},
+      ctx({listApplications: async (...a: unknown[]) => (seen.push(a), {applications: []})}),
+    );
+    expect(seen).toEqual([['00000000-0000-4000-8000-000000000001', {sort: 'price_low', page: 2}]]);
+  });
+
+  it('marks selecting a bid as spending, and posting, closing and reopening as not', () => {
+    expect(byName('decide_application').spends).toBe(true);
+    expect(byName('decide_application').description.startsWith(SPEND_WARNING)).toBe(true);
+    for (const name of ['post_listing', 'close_applications', 'reopen_applications', 'list_applications']) {
+      expect(byName(name).spends, name).toBe(false);
+    }
+    expect(byName('post_listing').description).toContain('RESERVES');
+  });
+
+  it('calls the SDK with what the model gave, and stamps the chain on decisions and posts', async () => {
+    const calls: unknown[][] = [];
+    const record =
+      (name: string, answer: unknown) =>
+      async (...a: unknown[]) => (calls.push([name, ...a]), answer);
+    const c = ctx({
+      postListing: record('postListing', {listingId: 'L'}),
+      decideApplication: record('decideApplication', {replayed: false}),
+      closeApplications: record('closeApplications', {status: 'closed'}),
+      reopenApplications: record('reopenApplications', {status: 'open'}),
+    });
+    const posted = await byName('post_listing').handler(
+      {title: 'Count the cars', maxWorkers: 2, idempotencyKey: 'post-key-1'} as never,
+      c,
+    );
+    expect(posted).toMatchObject({listingId: 'L', testnet: true});
+    const decided = await byName('decide_application').handler(
+      {listingId: 'L', applicationId: 'A', action: 'select', reason: 'Best price and record.'},
+      c,
+    );
+    expect(decided).toMatchObject({replayed: false, testnet: true});
+    await byName('close_applications').handler({listingId: 'L'}, c);
+    await byName('reopen_applications').handler({listingId: 'L'}, c);
+    expect(calls).toEqual([
+      ['postListing', {title: 'Count the cars', maxWorkers: 2}, 'post-key-1'],
+      ['decideApplication', 'L', {applicationId: 'A', action: 'select', reason: 'Best price and record.'}],
+      ['closeApplications', 'L'],
+      ['reopenApplications', 'L'],
+    ]);
   });
 });

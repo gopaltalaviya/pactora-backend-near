@@ -11,6 +11,7 @@ import {
   makeDisputeBondReader,
   makeIdentityReader,
   makePaymentReader,
+  makeTxEventsReader,
 } from './chain-reads.js';
 import {DEFAULT_SIGN_RECIPIENT, makeOwnerVerifier} from './challenges.js';
 import {makeRunExecutor} from './run-executor.js';
@@ -112,6 +113,7 @@ const app = await buildApp({
   readBudget: makeBudgetReader(config),
   readIdentity: makeIdentityReader(config),
   readPayment: makePaymentReader(config),
+  readTxEvents: makeTxEventsReader(config),
   readDisputeBond: makeDisputeBondReader(config),
   verifyOwner: makeOwnerVerifier(config, cfg.PACTORA_SIGN_RECIPIENT),
   signRecipient: cfg.PACTORA_SIGN_RECIPIENT,
