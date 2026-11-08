@@ -258,6 +258,37 @@ describe('on a NEAR chain', () => {
     expect(Number(line!.split(' ').pop())).toBeGreaterThanOrEqual(30);
   });
 
+  it('a send that expires leaves the backlog aged, and the next sweep clears it to 0 (F29)', async () => {
+    const t = nowS();
+    onChain[1] = jobView('Created', {accept_deadline: t - 45});
+    let attempt = 0;
+    fake.state.onSend = () =>
+      ++attempt === 1 ? {kind: 'rejected', invalidTx: 'Expired'} : {kind: 'success', value: null};
+    const metrics = createMetrics('keeper-backlog-recovery-test');
+    const k = chainKeeper({
+      db: undefined as never,
+      chain,
+      near: nearClient(fake.url, {retries: 1}),
+      account: {accountId: KEEPER, key},
+      openJobs: async () => [1n],
+      metrics,
+    });
+    const age = async () => {
+      const line = (await metrics.registry.metrics())
+        .split('\n')
+        .find((l) => l.startsWith('keeper_backlog_age_seconds'));
+      return Number(line!.split(' ').pop());
+    };
+    const first = await k.sweep();
+    expect(first.sent).toEqual([]);
+    expect(first.failed.map((f) => f.exit)).toEqual(['expire_unaccepted']);
+    expect(await age()).toBeGreaterThanOrEqual(45);
+    const second = await k.sweep();
+    expect(second.failed).toEqual([]);
+    expect(second.sent.map((s) => s.exit)).toEqual(['expire_unaccepted']);
+    expect(await age()).toBe(0);
+  });
+
   it('never reuses a nonce when the node has not caught up', async () => {
     fake.state.advanceNonce = false;
     const t = nowS();

@@ -49,7 +49,7 @@ type Writer = Db | Tx;
  */
 export async function storeList(
   db: Db,
-  source: 'ofac' | 'un',
+  source: 'ofac' | 'un' | 'uk',
   rawText: string,
   entries: ListEntry[],
 ): Promise<RefreshDecision> {

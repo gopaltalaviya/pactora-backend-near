@@ -1,6 +1,13 @@
 # HTTPS for the API, certificate from Let's Encrypt, automatically.
 {$API_HOST} {
 	encode gzip
+
+	# Operator paths answer 404 at the edge (docs/26 F28). The API already keeps
+	# /metrics behind METRICS_TOKEN; the edge not serving it at all means a
+	# leaked or missing token exposes nothing. Scrape it on the compose network.
+	@internal path /metrics /metrics/*
+	respond @internal 404
+
 	reverse_proxy api:8080 {
 		# Live run traces are server-sent events: pass each one through at once.
 		flush_interval -1

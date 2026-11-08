@@ -5,6 +5,7 @@ import {
   matchNames,
   parseCsv,
   parseOfac,
+  parseUk,
   parseUn,
   refreshDecision,
   screenName,
@@ -40,6 +41,31 @@ const UN = `<?xml version="1.0" encoding="UTF-8"?>
   <ENTITY><DATAID>6908402</DATAID><FIRST_NAME>ADF</FIRST_NAME></ENTITY>
   <ENTITY><DATAID></DATAID><FIRST_NAME>NO ID</FIRST_NAME></ENTITY>
 </ENTITIES></CONSOLIDATED_LIST>`;
+
+// The UK Sanctions List (FCDO) XML as published 2026-11-03 (6,420
+// designations: 4,070 individuals, 1,667 entities, 683 ships), with its quirks:
+// leading spaces in name parts, "Primary name" / "ALias" casing, low-quality
+// aliases, entities named in Name6 only.
+const UK = `<?xml version="1.0" encoding="utf-8"?>
+<Designations><DateGenerated>03/11/2026</DateGenerated>
+  <Designation><UniqueID>AFG0007</UniqueID><Names>
+    <Name><Name1>Abdul Kabir</Name1><Name6>MOHAMMAD JAN</Name6><NameType>Primary Name</NameType></Name>
+    <Name><Name1> ABDUL</Name1><Name2>KABIR</Name2><Name6>JAN</Name6><NameType>Primary name variation</NameType></Name>
+    <Name><Name6>A Kabir</Name6><NameType>ALias</NameType><AliasStrength>Good quality a.k.a</AliasStrength></Name>
+    <Name><Name6>Mudir</Name6><NameType>Alias</NameType><AliasStrength>Low quality a.k.a</AliasStrength></Name>
+    <Name><Name1>Abdul Kabir</Name1><Name6>MOHAMMAD JAN</Name6><NameType>Alias</NameType></Name>
+  </Names><NonLatinNames><NonLatinName><NameNonLatinScript>عبدالکبیر</NameNonLatinScript></NonLatinName></NonLatinNames>
+  <IndividualEntityShip>Individual</IndividualEntityShip><DesignationSource>UN</DesignationSource></Designation>
+  <Designation><UniqueID>RUS0001</UniqueID><Names>
+    <Name><Name6>SMITH &amp; SONS TRADING</Name6><NameType>Primary name</NameType></Name>
+  </Names><IndividualEntityShip>Entity</IndividualEntityShip></Designation>
+  <Designation><UniqueID>RUS1500</UniqueID><Names>
+    <Name><Name6>SEA STAR</Name6><NameType>Primary Name</NameType></Name>
+  </Names><IndividualEntityShip>Ship</IndividualEntityShip></Designation>
+  <Designation><UniqueID></UniqueID><Names>
+    <Name><Name6>NO ID</Name6><NameType>Primary Name</NameType></Name>
+  </Names><IndividualEntityShip>Individual</IndividualEntityShip></Designation>
+</Designations>`;
 
 describe('foldName', () => {
   it('folds accents, case, punctuation and digits to plain words', () => {
@@ -148,6 +174,25 @@ describe('parseUn', () => {
     expect(list[0]).toEqual({source: 'un', ref: '6907993', kind: 'individual', names: ['ERIC BADEGE']});
     expect(list[1]!.names).toEqual(['FRANK KAKOLELE BWAMBALE', 'FRANK KAKORERE', "O'BRIEN & SONS"]);
     expect(list[2]).toMatchObject({kind: 'entity', names: ['ADF']});
+  });
+});
+
+describe('parseUk', () => {
+  const list = parseUk(UK);
+  it('joins Name1..Name6 (trimmed), primary first, drops low-quality and repeated aliases, maps ships to other', () => {
+    expect(list).toHaveLength(3);
+    expect(list[0]).toEqual({
+      source: 'uk',
+      ref: 'AFG0007',
+      kind: 'individual',
+      names: ['Abdul Kabir MOHAMMAD JAN', 'ABDUL KABIR JAN', 'A Kabir'],
+    });
+    expect(list[1]).toEqual({source: 'uk', ref: 'RUS0001', kind: 'entity', names: ['SMITH & SONS TRADING']});
+    expect(list[2]).toMatchObject({ref: 'RUS1500', kind: 'other', names: ['SEA STAR']});
+  });
+  it('a person on the UK list is found by the same screen as the others', () => {
+    expect(screenName('Abdul Kabir Mohammad Jan', list).map((h) => h.entry.ref)).toEqual(['AFG0007']);
+    expect(screenName('Mudir Ahmadi', list)).toEqual([]);
   });
 });
 

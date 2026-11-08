@@ -51,7 +51,10 @@ agentx-docs, `docs/13-deploy.md` §5.
 |---|---|
 | `bootstrap-ubuntu.sh` | firewall (22, 80, 443 only), Docker, 2 GB swap, automatic security updates |
 | `docker-compose.vps.yml` | Postgres and the API publish no port; Caddy alone listens on 80/443 |
-| `Caddyfile` | HTTPS for `API_HOST`, certificate from Let's Encrypt, live events unbuffered |
+| `Caddyfile` | HTTPS for `API_HOST`, certificate from Let's Encrypt, live events unbuffered, `/metrics` answers 404 at the edge |
+| `backup.sh` | daily: the database and the evidence bucket, encrypted, checked, copied off the host |
+| `restore-test.sh` | monthly: restores the newest backup into a scratch database and compares it with the live schema |
+| `alerts.sh` | every 5 minutes: readiness, status, signer gas, indexer lag, keeper backlog, failed webhooks, sanctions-list age, backup age |
 
 ```bash
 docker compose -f docker-compose.full.yml -f docker-compose.vps.yml --profile hosted up -d --no-build
@@ -61,25 +64,62 @@ The server's `.env` holds `SIGNER_TOKEN`, `API_HOST` (e.g. `api.1-2-3-4.sslip.io
 `CORS_ORIGINS` (the site's URL) and the hosted-run variables of §3b. It is
 never committed.
 
-## Backups
+## Backups, restore test and alerts (docs/26 F28)
 
-`backup.sh` dumps the database (`pg_dump -Fc`) to `~/agentx/backups/`, checks the
-dump can be listed, and keeps 7 days. Installed with cron, daily at 03:00 UTC:
+Once, on the server — the passphrase that encrypts every backup. **Keep a copy
+off this server** (a password manager): without it no backup can be read.
 
 ```bash
-0 3 * * * /root/agentx/backup.sh >> /root/agentx/backups/backup.log 2>&1
+openssl rand -base64 32 > ~/.pactora-backup-pass && chmod 600 ~/.pactora-backup-pass
 ```
+
+Cron (`crontab -e`), with the variables the scripts read:
+
+```bash
+BACKUP_REMOTE=backup@<another host>:pactora/   # off-host copy over scp (key-based); unset, each run warns
+ALERT_WEBHOOK_URL=https://hooks.slack.com/...  # or a Discord webhook; unset, alerts are only logged
+API_HOST=api.<ip-with-dashes>.sslip.io
+0 3 * * *   /root/agentx/backup.sh       >> /root/agentx/backups/backup.log 2>&1
+0 4 1 * *   /root/agentx/restore-test.sh >> /root/agentx/backups/restore-test.log 2>&1
+*/5 * * * * /root/agentx/alerts.sh       >> /root/agentx/backups/alerts.log 2>&1
+```
+
+- `backup.sh` writes `pactora-db-<stamp>.dump.enc` (`pg_dump -Fc`) and
+  `pactora-evidence-<stamp>.tar.enc` (the bucket via `mc mirror`), both
+  AES-256 with the passphrase (`openssl enc -pbkdf2`). It decrypts each back
+  and lists it — a dump that does not list is a failed run, not a backup —
+  copies both to `BACKUP_REMOTE`, and keeps 7 days locally.
+- `restore-test.sh` restores the newest dump into a scratch database, fails
+  if its table count differs from the live one or the dump is over 48 h old,
+  counts the rows that are not on chain (agents, API keys, jobs, runs,
+  evidence records, profiles) and the evidence objects, then drops the
+  scratch database.
+- `alerts.sh` posts only when the set of problems changes, and once more when
+  all is clear. `alerts.sh --dry-run` prints every check and posts nothing.
+
+Checked locally on 2026-11-08 against the dev Postgres and MinIO, a real API
+and indexer on a NEAR sandbox: a backup listed 51 tables and the 7 evidence
+objects, and restored with 51 tables. A wrong passphrase, a truncated dump, a
+truncated evidence archive, an empty directory, a missing passphrase file and
+an extra table in the live database each failed the run. Each alert fired on
+its condition and cleared after it: a job 2 h past its deadline (silent while
+its client was on hold), a 73 h-old sanctions list, a failed delivery, the
+signer down. The Caddyfile validated in `caddy:2-alpine`, and in front of the
+API it answered 404 to `/metrics` and 200 to `/health`. Not yet run on a server.
 
 Restore into a fresh database before the services start (the indexer keeps
 its cursor and catches up):
 
 ```bash
 docker compose -f docker-compose.full.yml -f docker-compose.vps.yml up -d postgres
-docker exec -i agentx-full-postgres-1 pg_restore -U agentx -d agentx --no-owner < backups/agentx-YYYYMMDD-HHMM.dump
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:$HOME/.pactora-backup-pass \
+  < backups/pactora-db-YYYYMMDD-HHMM.dump.enc \
+  | docker exec -i agentx-full-postgres-1 pg_restore -U agentx -d agentx --no-owner
+# evidence: decrypt the .tar.enc the same way, untar, then `mc mirror <dir> store/pactora-evidence`
 docker compose -f docker-compose.full.yml -f docker-compose.vps.yml --profile hosted up -d --no-build
 ```
 
-Rehearsed 2026-10-08: a dump restored into a throwaway container matched the
+Rehearsed 2026-10-08 (Monad, the older unencrypted script): a dump restored into a throwaway container matched the
 live database row for row (agents, jobs, runs, API keys).
 
 ## Switching to v3 (after judging, 2026-11-03)

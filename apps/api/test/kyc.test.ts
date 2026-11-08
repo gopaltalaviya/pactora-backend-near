@@ -138,6 +138,37 @@ describe('list refresh guards', () => {
     expect((await new SanctionsIndex(db).screen('Abu Abbas')).hits).toHaveLength(1);
   });
 
+  it('stores the UK list beside OFAC and screens both; a source nobody parses is refused by the schema', async () => {
+    await storeList(db, 'ofac', 'ofac-copy', ofacFixture([TARGET]));
+    const uk = Array.from({length: 3000}, (_, i) => ({
+      source: 'uk',
+      ref: `RUS${10000 + i}`,
+      kind: 'individual' as const,
+      names: [`Ukfiller${i} Qqxv${i}`],
+    }));
+    uk.push({source: 'uk', ref: 'RUS0251', kind: 'individual', names: ['Vladimir Vladimirovich PUTIN']});
+    expect((await storeList(db, 'uk', 'uk-copy', uk)).action).toBe('replace');
+    const active = await db
+      .select()
+      .from(sanctionsListVersions)
+      .where(eq(sanctionsListVersions.active, true));
+    expect(active.map((v) => v.source).sort()).toEqual(['ofac', 'uk']);
+    const index = new SanctionsIndex(db);
+    expect((await index.screen('Vladimir Vladimirovich Putin')).hits.map((h) => h.entry.ref)).toEqual([
+      'RUS0251',
+    ]);
+    expect((await index.screen('Abu Abbas')).hits.map((h) => h.entry.source)).toEqual(['ofac']);
+    const refused = await db
+      .execute(
+        sql`INSERT INTO sanctions_list_versions (source, sha256, entry_count) VALUES ('eu', ${'a'.repeat(64)}, 1)`,
+      )
+      .then(
+        () => 'stored',
+        (e: {cause?: {message?: string}}) => e.cause?.message ?? String(e),
+      );
+    expect(refused).toMatch(/source_known/);
+  });
+
   it('with screening on and no list loaded, nothing starts: an empty list is not a clean result', async () => {
     const p = await person(app, `k${++n}`);
     const r = await start(p.token, 'Priya Sharma');

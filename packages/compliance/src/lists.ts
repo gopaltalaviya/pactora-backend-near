@@ -9,8 +9,12 @@ import type {ListEntry} from './match.js';
  * and 274 entities). No network here: a refresh script fetches, these
  * functions only read text.
  *
- * Not covered yet, and said so: the UK and EU lists. Their files were not
- * inspected for this version, and a parser written blind is worse than
+ * The UK Sanctions List (FCDO) was added from its XML as published on
+ * 2026-11-03: 6,420 designations, 4,070 individuals, 1,667 entities and 683
+ * ships.
+ *
+ * Not covered yet, and said so: the EU list. Its file needs a token to
+ * download and was not inspected, and a parser written blind is worse than
  * none.
  */
 
@@ -131,10 +135,51 @@ export function parseUn(xml: string): ListEntry[] {
   return out;
 }
 
+/**
+ * UK Sanctions List XML (sanctionslist.fcdo.gov.uk): one <Designation> each,
+ * with <UniqueID>, <IndividualEntityShip> and <Names><Name> holding Name1 …
+ * Name6 (Name6 is the surname, or an entity's or ship's whole name) and a
+ * <NameType>, whose casing varies ("Primary name", "ALias"). Primary names
+ * come first. An alias marked "Low quality a.k.a" is dropped: those are bare
+ * titles and fragments ("Mudir"), which flag innocent people and that the
+ * regulators' own guidance does not require screening. Non-Latin names are
+ * not read, as for the other lists.
+ */
+export function parseUk(xml: string): ListEntry[] {
+  const kinds: Record<string, ListEntry['kind']> = {
+    individual: 'individual',
+    entity: 'entity',
+    ship: 'other',
+  };
+  const out: ListEntry[] = [];
+  for (const m of xml.matchAll(/<Designation>([\s\S]*?)<\/Designation>/g)) {
+    const b = m[1]!;
+    const ref = tag(b, 'UniqueID');
+    const kind = kinds[tag(b, 'IndividualEntityShip').toLowerCase()];
+    if (!ref || !kind) continue;
+    const primary: string[] = [];
+    const aliases: string[] = [];
+    for (const n of b.matchAll(/<Name>([\s\S]*?)<\/Name>/g)) {
+      const nb = n[1]!;
+      if (/low quality/i.test(tag(nb, 'AliasStrength'))) continue;
+      const name = ['Name1', 'Name2', 'Name3', 'Name4', 'Name5', 'Name6']
+        .map((t) => tag(nb, t))
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ');
+      if (!name) continue;
+      (/^primary name/i.test(tag(nb, 'NameType')) ? primary : aliases).push(name);
+    }
+    const names = [...new Set([...primary, ...aliases])];
+    if (names.length) out.push({source: 'uk', ref, kind, names});
+  }
+  return out;
+}
+
 export const sha256Text = (s: string) => createHash('sha256').update(s).digest('hex');
 
 /** The fewest entries a copy of each list may have before it is believed. */
-export const MIN_ENTRIES: Record<string, number> = {ofac: 5000, un: 500};
+export const MIN_ENTRIES: Record<string, number> = {ofac: 5000, un: 500, uk: 3000};
 /** A new copy smaller than this share of the active one is refused as truncated. */
 export const MIN_SHARE_OF_PREVIOUS = 0.7;
 
