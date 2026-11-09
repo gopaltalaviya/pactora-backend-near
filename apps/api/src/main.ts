@@ -62,6 +62,19 @@ const Env = z
       .default(5 * 60_000),
     /** How often open listings past their deadline are announced as expired; 0 = never. */
     LISTING_EXPIRY_SWEEP_MS: z.coerce.number().int().min(0).default(60_000),
+    /** Retention (docs/26 F27, 2026-11-09): days after settlement before each kind of data is purged. */
+    RETENTION_EVIDENCE_DAYS: env.positiveInt(180),
+    RETENTION_CHAT_DAYS: env.positiveInt(180),
+    RETENTION_DRAFTS_DAYS: env.positiveInt(90),
+    RETENTION_JOB_EVENTS_DAYS: env.positiveInt(365),
+    RETENTION_AGENT_EVENTS_READ_DAYS: env.positiveInt(90),
+    /** 1: the sweep only counts and logs what it would purge. */
+    RETENTION_DRY_RUN: env.flag(),
+    RETENTION_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(60 * 60_000),
     METRICS_TOKEN: z.string().optional(),
     LOG_LEVEL: env.logLevel(),
     DB_POOL_MAX: env.positiveInt(5),
@@ -316,6 +329,15 @@ const app = await buildApp({
   maxStreamsPerClient: cfg.SSE_MAX_STREAMS_PER_CLIENT,
   runsPerDay: cfg.RUNS_PER_DAY,
   maxAgentsPerOwner: cfg.MAX_AGENTS_PER_OWNER,
+  retention: {
+    evidenceDays: cfg.RETENTION_EVIDENCE_DAYS,
+    chatDays: cfg.RETENTION_CHAT_DAYS,
+    draftsDays: cfg.RETENTION_DRAFTS_DAYS,
+    jobEventsDays: cfg.RETENTION_JOB_EVENTS_DAYS,
+    agentEventsReadDays: cfg.RETENTION_AGENT_EVENTS_READ_DAYS,
+    dryRun: cfg.RETENTION_DRY_RUN,
+    intervalMs: cfg.RETENTION_INTERVAL_MS,
+  },
   requirePublicHttpsEndpoints: cfg.NODE_ENV === 'production',
   ...(runExecutor ? {runExecutor} : {}),
   submit: makeSignerSubmit({

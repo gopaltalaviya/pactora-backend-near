@@ -831,6 +831,11 @@ function rows(): Row[] {
       override: ADMIN_ANY,
     },
 
+    // account: export and deletion
+    {route: 'GET /v1/me/export', url: () => '/v1/me/export', base: rules.session},
+    {route: 'POST /v1/me/delete/challenge', url: () => '/v1/me/delete/challenge', base: rules.session},
+    {route: 'DELETE /v1/me', url: () => '/v1/me', body: () => ({}), base: rules.session},
+
     // reports and moderation
     {route: 'POST /v1/reports', url: () => '/v1/reports', body: () => ({}), base: rules.either},
     {

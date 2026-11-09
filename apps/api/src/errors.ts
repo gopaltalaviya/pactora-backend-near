@@ -17,10 +17,13 @@ export function registerErrorHandler(app: FastifyInstance): void {
     if (err instanceof PactoraError) {
       const problem = err.toProblem(titleFor(err.code));
       if (problem.retryAfter) reply.header('retry-after', String(problem.retryAfter));
+      // A route may attach structured detail a page can act on (`extra`,
+      // e.g. the open job ids a deletion is refused over); never secrets.
+      const extra = (err as {extra?: Record<string, unknown>}).extra ?? {};
       return reply
         .status(problem.status)
         .type('application/problem+json')
-        .send({...problem, traceId});
+        .send({...extra, ...problem, traceId});
     }
 
     // A malformed request is the caller's fault, not ours. Zod throws a

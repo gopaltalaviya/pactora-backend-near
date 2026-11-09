@@ -32,6 +32,8 @@ import {registerDraftRoutes} from './routes/drafts.js';
 import {registerMessageRoutes} from './routes/messages.js';
 import {registerDisputeRoutes} from './routes/dispute.js';
 import {registerReportRoutes} from './routes/reports.js';
+import {registerAccountRoutes} from './routes/account.js';
+import {purgeRetention, type RetentionConfig} from './retention.js';
 import {registerAgentEventRoutes} from './routes/agent-events.js';
 import {registerWebhookRoutes} from './routes/webhooks.js';
 import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
@@ -173,6 +175,11 @@ export interface AppDeps {
   emailChannel?: boolean;
   /** Called for every route as it is registered — the docs test lists them. */
   onRoute?: (route: {method: string | string[]; url: string}) => void;
+  /**
+   * Retention purge (2026-11-09): what is deleted or scrubbed after how long.
+   * Omitted: the documented defaults; `intervalMs: 0` never runs it (tests).
+   */
+  retention?: Partial<RetentionConfig> & {intervalMs?: number};
 }
 
 /** Liveness and readiness: what a load balancer reads. Exempt from the rate limit. */
@@ -406,6 +413,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await registerDraftRoutes(app, {db: deps.db, chains: deps.chains, bus});
   await registerMessageRoutes(app, {db: deps.db, chains: deps.chains, bus});
   await registerDisputeRoutes(app, {db: deps.db, chains: deps.chains, bus});
+  await registerAccountRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    ...(deps.objectStore ? {objectStore: deps.objectStore} : {}),
+  });
   await registerReportRoutes(app, {
     db: deps.db,
     reviewers: () => deps.complianceReviewers ?? [],
@@ -504,6 +516,36 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   app.addHook('onClose', async () => {
     clearTimeout(settleTimer);
     settleTimer = undefined;
+  });
+
+  // Retention (2026-11-09): evidence, chat, drafts and old events are purged
+  // on a schedule, counted in a metric; a dry run only counts.
+  const retentionEvery = deps.retention?.intervalMs ?? 60 * 60_000;
+  const purged = deps.metrics?.counter(
+    'retention_purged_total',
+    'Rows purged by the retention sweep, by kind',
+    ['kind'],
+  );
+  let retentionTimer: NodeJS.Timeout | undefined;
+  const retentionSweep = () => {
+    retentionTimer = setTimeout(() => {
+      purgeRetention(deps.db, deps.objectStore, deps.retention ?? {})
+        .then((r) => {
+          for (const [kind, n] of Object.entries(r.counts))
+            if (n > 0 && !r.dryRun) purged?.labels(kind).inc(n);
+          if (Object.values(r.counts).some((n) => n > 0)) app.log.info(r, 'retention sweep');
+        })
+        .catch((err: unknown) => app.log.warn({err}, 'retention sweep failed'))
+        .finally(() => {
+          if (retentionTimer) retentionSweep();
+        });
+    }, retentionEvery);
+    retentionTimer.unref();
+  };
+  if (retentionEvery > 0) retentionSweep();
+  app.addHook('onClose', async () => {
+    clearTimeout(retentionTimer);
+    retentionTimer = undefined;
   });
 
   // Sessions of an account whose full-access keys changed end (0025): a

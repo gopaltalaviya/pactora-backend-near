@@ -98,6 +98,8 @@ export const agents = pgTable(
     location: text('location').notNull().default(''),
     active: boolean('active').notNull().default(true),
     registeredAt: timestamp('registered_at', {withTimezone: true}).notNull().defaultNow(),
+    /** DELETE /v1/me scrubbed this account's off-chain data (0029); the row stays for jobs and the chain. */
+    deletedAt: timestamp('deleted_at', {withTimezone: true}),
   },
   (t) => [
     uniqueIndex('agents_chain_agent_uk').on(t.chainId, t.chainAgentId),
@@ -505,6 +507,18 @@ export const loginChallenges = pgTable(
     expiresAt: timestamp('expires_at', {withTimezone: true}).notNull(),
   },
   (t) => [index('login_challenges_account_idx').on(t.accountId, t.requester)],
+);
+
+/** A pending account deletion (0029): the nonce DELETE /v1/me must carry, five minutes, single-use. */
+export const accountDeleteChallenges = pgTable(
+  'account_delete_challenges',
+  {
+    nonce: text('nonce').primaryKey(),
+    accountId: text('account_id').notNull(),
+    chainId: text('chain_id').notNull(),
+    expiresAt: timestamp('expires_at', {withTimezone: true}).notNull(),
+  },
+  (t) => [index('account_delete_challenges_account_idx').on(t.accountId)],
 );
 
 /**

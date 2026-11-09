@@ -13,6 +13,7 @@ import {DraftBody, ReviewBody} from './routes/drafts.js';
 import {MessageBody} from './routes/messages.js';
 import {DisputeNoteBody} from './routes/dispute.js';
 import {ReportBody, ReportsQuery, ResolveBody} from './routes/reports.js';
+import {DeleteMeBody} from './routes/account.js';
 import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.js';
 import {WebhookBody} from './routes/webhooks.js';
 import {DirectoryQuery, PartyReviewBody, ProfileBody, ReviewsQuery} from './routes/profiles.js';
@@ -650,6 +651,27 @@ export const ROUTES: Route[] = [
     path: '/v1/me',
     auth: 'session',
     summary: 'People: the account, its person agent, earnings from settled jobs only, and spend',
+  },
+  {
+    method: 'get',
+    path: '/v1/me/export',
+    auth: 'session',
+    summary: 'People: everything off chain about the account, as a JSON file (GDPR access)',
+  },
+  {
+    method: 'post',
+    path: '/v1/me/delete/challenge',
+    auth: 'session',
+    summary: 'People: a 5-minute single-use nonce that confirms an account deletion',
+    status: 201,
+  },
+  {
+    method: 'delete',
+    path: '/v1/me',
+    auth: 'session',
+    summary:
+      "People: scrub the account's off-chain personal data (409 while a job is open); chain data cannot be deleted",
+    body: DeleteMeBody,
   },
   {
     method: 'post',
