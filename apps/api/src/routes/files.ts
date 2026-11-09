@@ -2,6 +2,7 @@ import {randomUUID, createHash} from 'node:crypto';
 import type {FastifyInstance} from 'fastify';
 import multipart from '@fastify/multipart';
 import {and, asc, count, eq, isNull} from 'drizzle-orm';
+import type {FastifyRequest, FastifyReply} from 'fastify';
 import {jobFiles, jobs, type Db} from '@pactora/db';
 import {ErrorCode, PactoraError} from '@pactora/shared';
 import type {ChainConfig} from '@pactora/config';
@@ -28,6 +29,20 @@ export const UPLOAD_BODY_LIMIT = 9 * 1024 * 1024;
 export const MAX_ACTIVE_FILES = 10;
 /** Withdrawn files count: storage cannot grow without limit by upload-and-withdraw. */
 export const MAX_TOTAL_FILES = 30;
+/** The client's dispute photos per job (0027). */
+export const MAX_DISPUTE_FILES = 10;
+
+/** The states a client may attach dispute evidence in: delivered, or already disputed. */
+export const DISPUTE_EVIDENCE_STATES = new Set<Job['state']>(['submitted', 'disputed']);
+
+export function refuseNotDisputable(job: Job): void {
+  if (!DISPUTE_EVIDENCE_STATES.has(job.state)) {
+    throw new PactoraError(
+      ErrorCode.INVALID_STATE,
+      `job is "${job.state}"; dispute evidence is attached while it is submitted or disputed`,
+    );
+  }
+}
 
 /**
  * At most `limit` uploads in flight across this process; the rest wait, and
@@ -85,23 +100,25 @@ export interface FileRouteDeps {
 }
 
 /** A job's files as the API shows them. */
-function fileView(f: typeof jobFiles.$inferSelect) {
+export function fileView(f: typeof jobFiles.$inferSelect) {
   return {
     fileId: f.publicId,
     sha256: f.sha256,
     mime: f.mime,
     size: f.size,
+    purpose: f.purpose,
     createdAt: f.createdAt,
     withdrawnAt: f.withdrawnAt,
     url: `/v1/files/${f.publicId}`,
   };
 }
 
+/** The worker's evidence photos only: dispute photos have their own cap. */
 async function counts(db: Reader, jobId: number): Promise<{active: number; total: number}> {
   const [row] = await db
     .select({total: count(), withdrawn: count(jobFiles.withdrawnAt)})
     .from(jobFiles)
-    .where(eq(jobFiles.jobId, jobId));
+    .where(and(eq(jobFiles.jobId, jobId), eq(jobFiles.purpose, 'evidence')));
   const total = Number(row?.total ?? 0);
   // count(withdrawn_at) counts only the non-null ones: the withdrawn files.
   return {total, active: total - Number(row?.withdrawn ?? 0)};
@@ -124,6 +141,20 @@ async function refuseClosed(db: Reader, job: Job, what: string): Promise<void> {
         ? 'the client accepted a draft; its evidence is fixed — submit it'
         : 'the client intends to dispute; no more evidence is taken',
     );
+  }
+}
+
+async function disputeCount(db: Reader, jobId: number): Promise<number> {
+  const [row] = await db
+    .select({n: count()})
+    .from(jobFiles)
+    .where(and(eq(jobFiles.jobId, jobId), eq(jobFiles.purpose, 'dispute')));
+  return Number(row?.n ?? 0);
+}
+
+function refuseOverDisputeCap(n: number): void {
+  if (n >= MAX_DISPUTE_FILES) {
+    throw new PactoraError(ErrorCode.LIMIT_REACHED, `at most ${MAX_DISPUTE_FILES} dispute photos per job`);
   }
 }
 
@@ -161,13 +192,21 @@ export async function registerFileRoutes(app: FastifyInstance, deps: FileRouteDe
       limits: {fileSize: MAX_FILE_BYTES, files: 1, fields: 0, headerPairs: 50},
     });
 
-    scope.post('/v1/jobs/:id/files', {bodyLimit: UPLOAD_BODY_LIMIT}, async (request, reply) => {
+    /**
+     * One pipeline for both uploads. `check(reader, job)` is what makes a
+     * request refusable (the state, the caps), run cheaply first and again
+     * under the row lock; `purpose` is what the row is for.
+     */
+    async function storeUpload(
+      request: FastifyRequest,
+      reply: FastifyReply,
+      p: Awaited<ReturnType<typeof partyOf>>,
+      purpose: 'evidence' | 'dispute',
+      check: (reader: Reader, job: Job) => Promise<void>,
+    ) {
       const objectStore = store();
-      const p = await partyOf(db, chains, request, (request.params as {id: string}).id);
-      requireRole(p, 'worker', 'upload evidence');
       // 1. Cheap checks first: nothing is read for a request that would be refused.
-      await refuseClosed(db, p.job, 'an upload');
-      refuseOverCap(await counts(db, p.job.id));
+      await check(db, p.job);
       if (!request.isMultipart()) {
         throw new PactoraError(
           ErrorCode.SCHEMA_MISMATCH,
@@ -187,7 +226,7 @@ export async function registerFileRoutes(app: FastifyInstance, deps: FileRouteDe
         const clean = cleanImage(raw);
         const sha256 = createHash('sha256').update(clean.bytes).digest('hex');
         const fileId = randomUUID();
-        key = `evidence/${p.job.publicId}/${fileId}.${clean.ext}`;
+        key = `${purpose}/${p.job.publicId}/${fileId}.${clean.ext}`;
         await objectStore.put(key, clean.bytes, clean.mime).catch((err: unknown) => {
           request.log.error({err}, 'object store put failed');
           key = null;
@@ -198,8 +237,7 @@ export async function registerFileRoutes(app: FastifyInstance, deps: FileRouteDe
         // the caps may have changed while the file was read.
         const row = await db.transaction(async (tx) => {
           const job = await lockJob(tx, p.job.id);
-          await refuseClosed(tx, job, 'an upload');
-          refuseOverCap(await counts(tx, job.id));
+          await check(tx, job);
           const [inserted] = await tx
             .insert(jobFiles)
             .values({
@@ -210,6 +248,7 @@ export async function registerFileRoutes(app: FastifyInstance, deps: FileRouteDe
               sha256,
               mime: clean.mime,
               size: clean.bytes.length,
+              purpose,
             })
             .returning();
           return inserted!;
@@ -218,11 +257,14 @@ export async function registerFileRoutes(app: FastifyInstance, deps: FileRouteDe
         if (clean.removed.length > 0) {
           request.log.info({fileId, removed: clean.removed}, 'evidence metadata removed');
         }
-        await recordEvent(db, bus, p.job.id, p.job.chainId, 'job.file.added', {
-          jobId: p.job.publicId,
-          fileId,
-          sha256,
-        });
+        await recordEvent(
+          db,
+          bus,
+          p.job.id,
+          p.job.chainId,
+          purpose === 'dispute' ? 'job.dispute.file.added' : 'job.file.added',
+          {jobId: p.job.publicId, fileId, sha256},
+        );
         return reply
           .status(201)
           .send({jobId: p.job.publicId, ...fileView(row), metadataRemoved: clean.removed});
@@ -236,6 +278,25 @@ export async function registerFileRoutes(app: FastifyInstance, deps: FileRouteDe
             .catch((err: unknown) => request.log.error({err, key: orphan}, 'orphan evidence not deleted'));
         }
       }
+    }
+
+    scope.post('/v1/jobs/:id/files', {bodyLimit: UPLOAD_BODY_LIMIT}, async (request, reply) => {
+      const p = await partyOf(db, chains, request, (request.params as {id: string}).id);
+      requireRole(p, 'worker', 'upload evidence');
+      return storeUpload(request, reply, p, 'evidence', async (reader, job) => {
+        await refuseClosed(reader, job, 'an upload');
+        refuseOverCap(await counts(reader, job.id));
+      });
+    });
+
+    /** The client's dispute photos (0027): while submitted or disputed, at most 10, same pipeline. */
+    scope.post('/v1/jobs/:id/dispute/files', {bodyLimit: UPLOAD_BODY_LIMIT}, async (request, reply) => {
+      const p = await partyOf(db, chains, request, (request.params as {id: string}).id);
+      requireRole(p, 'client', 'attach dispute evidence');
+      return storeUpload(request, reply, p, 'dispute', async (reader, job) => {
+        refuseNotDisputable(job);
+        refuseOverDisputeCap(await disputeCount(reader, job.id));
+      });
     });
   });
 
@@ -246,12 +307,19 @@ export async function registerFileRoutes(app: FastifyInstance, deps: FileRouteDe
       .from(jobFiles)
       .where(eq(jobFiles.jobId, p.job.id))
       .orderBy(asc(jobFiles.id));
-    const active = rows.filter((f) => f.withdrawnAt === null).length;
+    const evidence = rows.filter((f) => f.purpose === 'evidence');
+    const active = evidence.filter((f) => f.withdrawnAt === null).length;
     return {
       jobId: p.job.publicId,
       active,
-      total: rows.length,
-      limits: {maxActive: MAX_ACTIVE_FILES, maxTotal: MAX_TOTAL_FILES, maxBytes: MAX_FILE_BYTES},
+      total: evidence.length,
+      disputeFiles: rows.length - evidence.length,
+      limits: {
+        maxActive: MAX_ACTIVE_FILES,
+        maxTotal: MAX_TOTAL_FILES,
+        maxBytes: MAX_FILE_BYTES,
+        maxDisputeFiles: MAX_DISPUTE_FILES,
+      },
       files: rows.map(fileView),
     };
   });
@@ -267,6 +335,9 @@ export async function registerFileRoutes(app: FastifyInstance, deps: FileRouteDe
         })
       : undefined;
     if (!file) throw new PactoraError(ErrorCode.NOT_FOUND, `no file ${fileId} on this job`);
+    if (file.purpose !== 'evidence') {
+      throw new PactoraError(ErrorCode.INVALID_STATE, 'dispute evidence is not withdrawn once attached');
+    }
     if (file.withdrawnAt) return {jobId: p.job.publicId, ...fileView(file), replayed: true};
     await refuseClosed(db, p.job, 'a withdrawal');
     const [row] = await db

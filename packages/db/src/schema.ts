@@ -734,6 +734,8 @@ export const jobFiles = pgTable(
     /** Detected from the bytes, never the client's Content-Type. */
     mime: text('mime').notNull(),
     size: integer('size').notNull(),
+    /** `evidence`: the worker's, named by drafts. `dispute`: the client's, for the desk (0027). */
+    purpose: text('purpose').notNull().default('evidence'),
     createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
     withdrawnAt: timestamp('withdrawn_at', {withTimezone: true}),
   },
@@ -741,6 +743,27 @@ export const jobFiles = pgTable(
     uniqueIndex('job_files_public_id_uk').on(t.publicId),
     uniqueIndex('job_files_object_key_uk').on(t.objectKey),
     index('job_files_job_idx').on(t.jobId, t.id),
+  ],
+);
+
+/** A client's written dispute evidence (0027): off chain, in the desk's bundle and hash. */
+export const disputeNotes = pgTable(
+  'dispute_notes',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    authorAgentId: bigint('author_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    body: text('body').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('dispute_notes_public_id_uk').on(t.publicId),
+    index('dispute_notes_job_idx').on(t.jobId, t.id),
   ],
 );
 

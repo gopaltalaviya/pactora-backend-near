@@ -4,6 +4,7 @@ import {z} from 'zod';
 import {sha256Hex} from '@pactora/near';
 import {
   agents,
+  disputeNotes,
   jobDrafts,
   jobEvents,
   jobFiles,
@@ -213,7 +214,7 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
 
   /** Everything the desk shows about a job, and the hash a ruling is bound to. */
   async function evidenceOf(job: typeof jobs.$inferSelect) {
-    const [drafts, files, messages, events, dispute] = await Promise.all([
+    const [drafts, allFiles, messages, events, dispute, notes] = await Promise.all([
       db.select().from(jobDrafts).where(eq(jobDrafts.jobId, job.id)).orderBy(asc(jobDrafts.round)),
       db.select().from(jobFiles).where(eq(jobFiles.jobId, job.id)).orderBy(asc(jobFiles.id)),
       db.select().from(jobMessages).where(eq(jobMessages.jobId, job.id)).orderBy(asc(jobMessages.id)),
@@ -221,16 +222,21 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
       db.query.jobEvents.findFirst({
         where: and(eq(jobEvents.jobId, job.id), eq(jobEvents.kind, 'job.disputed')),
       }),
+      db.select().from(disputeNotes).where(eq(disputeNotes.jobId, job.id)).orderBy(asc(disputeNotes.id)),
     ]);
+    const files = allFiles.filter((f) => f.purpose === 'evidence');
+    const disputeFiles = allFiles.filter((f) => f.purpose === 'dispute');
     const parties = await db
       .select()
       .from(agents)
       .where(inArray(agents.id, [job.clientAgentId, job.workerAgentId]));
     const name = (id: number) => parties.find((p) => p.id === id)?.name ?? null;
     const reason = (dispute?.payload as {reason?: string} | undefined)?.reason ?? null;
+    // v2 (0027): the client's notes and photos are in the hash, so a note
+    // attached after a member loaded the desk makes their proposal stale.
     const evidenceHash = sha256Hex(
       canonicalize({
-        v: 1,
+        v: 2,
         jobId: job.publicId,
         chainJobId: job.chainJobId,
         state: job.state,
@@ -239,6 +245,8 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
         drafts: drafts.map((d) => d.snapshotHash),
         files: files.map((f) => [f.sha256, f.withdrawnAt !== null]),
         messages: messages.map((m) => m.publicId),
+        disputeNotes: notes.map((n) => sha256Hex(n.body)),
+        disputeFiles: disputeFiles.map((f) => f.sha256),
       }),
     );
     return {
@@ -267,6 +275,15 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
         from: m.authorAgentId === job.workerAgentId ? 'worker' : 'client',
         body: m.body,
         at: m.createdAt,
+      })),
+      /** The client's side (0027): written notes and photos attached while submitted or disputed. */
+      disputeNotes: notes.map((n) => ({noteId: n.publicId, text: n.body, at: n.createdAt})),
+      disputeFiles: disputeFiles.map((f) => ({
+        fileId: f.publicId,
+        sha256: f.sha256,
+        mime: f.mime,
+        size: f.size,
+        url: `/v1/admin/files/${f.publicId}`,
       })),
       timeline: events.map((e) => ({kind: e.kind, txHash: e.txHash, at: e.occurredAt})),
       evidenceHash,

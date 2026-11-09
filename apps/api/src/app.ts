@@ -30,6 +30,7 @@ import {registerSessionRoutes} from './routes/session.js';
 import {registerFileRoutes} from './routes/files.js';
 import {registerDraftRoutes} from './routes/drafts.js';
 import {registerMessageRoutes} from './routes/messages.js';
+import {registerDisputeRoutes} from './routes/dispute.js';
 import {registerAgentEventRoutes} from './routes/agent-events.js';
 import {registerWebhookRoutes} from './routes/webhooks.js';
 import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
@@ -403,6 +404,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
   await registerDraftRoutes(app, {db: deps.db, chains: deps.chains, bus});
   await registerMessageRoutes(app, {db: deps.db, chains: deps.chains, bus});
+  await registerDisputeRoutes(app, {db: deps.db, chains: deps.chains, bus});
   await registerAgentEventRoutes(app, {
     db: deps.db,
     ...(deps.eventsPollMs ? {pollMs: deps.eventsPollMs} : {}),

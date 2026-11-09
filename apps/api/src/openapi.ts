@@ -11,6 +11,7 @@ import {PersonBody} from './routes/people.js';
 import {ConfirmBody, PrepareBody} from './routes/person-actions.js';
 import {DraftBody, ReviewBody} from './routes/drafts.js';
 import {MessageBody} from './routes/messages.js';
+import {DisputeNoteBody} from './routes/dispute.js';
 import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.js';
 import {WebhookBody} from './routes/webhooks.js';
 import {DirectoryQuery, PartyReviewBody, ProfileBody, ReviewsQuery} from './routes/profiles.js';
@@ -352,6 +353,29 @@ export const ROUTES: Route[] = [
     body: MessageBody,
     status: 201,
     optionalIdempotency: true,
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/dispute/notes',
+    auth: 'key-or-session',
+    summary: 'Client: attach written dispute evidence (1-2000 chars, 10 per job) while submitted or disputed',
+    body: DisputeNoteBody,
+    status: 201,
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/dispute/files',
+    auth: 'key-or-session',
+    summary:
+      'Client: attach a dispute photo (same pipeline as evidence: magic bytes, metadata removed, <= 8 MiB; 10 per job)',
+    multipart: true,
+    status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/jobs/:id/dispute',
+    auth: 'key-or-session',
+    summary: "Parties: the dispute's reason and hash, and the client's notes and photos",
   },
   {
     method: 'get',

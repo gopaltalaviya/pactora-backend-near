@@ -215,10 +215,11 @@ export async function buildSnapshot(
   text: string,
   output: Record<string, unknown> | null,
 ): Promise<Snapshot> {
+  // The worker's evidence; the client's dispute photos (0027) are the desk's, not the delivery's.
   const files = await tx
     .select()
     .from(jobFiles)
-    .where(and(eq(jobFiles.jobId, job.id), isNull(jobFiles.withdrawnAt)))
+    .where(and(eq(jobFiles.jobId, job.id), isNull(jobFiles.withdrawnAt), eq(jobFiles.purpose, 'evidence')))
     .orderBy(asc(jobFiles.id));
   const messages = await messagesOf(tx, job);
   return {

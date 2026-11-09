@@ -645,6 +645,31 @@ function rows(): Row[] {
         only: [client, worker],
       },
       {
+        route: 'POST /v1/jobs/:id/dispute/notes',
+        note,
+        url: job(id, '/dispute/notes'),
+        body: () => ({}),
+        base: rules.either,
+        only: [client],
+      },
+      {
+        route: 'POST /v1/jobs/:id/dispute/files',
+        note,
+        url: job(id, '/dispute/files'),
+        body: () => ({}),
+        base: rules.either,
+        only: [client],
+      },
+      {
+        route: 'GET /v1/jobs/:id/dispute',
+        note,
+        url: job(id, '/dispute'),
+        base: rules.either,
+        only: [client, worker],
+        // A job nobody disputed: 404 once past the party check.
+        override: {[client]: '404', [worker]: '404'},
+      },
+      {
         route: 'POST /v1/jobs/:id/messages',
         note,
         url: job(id, '/messages'),
