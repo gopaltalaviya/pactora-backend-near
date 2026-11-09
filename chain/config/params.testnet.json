@@ -1,5 +1,5 @@
 {
-  "_comment": "onchain is passed to Pactora's new(params) byte for byte and must equal get_params after deploy (scripts/deploy.mjs). offchain is read only by the backend. Values carried over from AgentX v3 params.10143.json; max windows are 10x the defaults, as v3's Deploy.s.sol set them. dispute_timeout is 7 days, the arbiter DAO's proposal_period (scripts/lib/dao.mjs), and dispute_grace 24 h more before anyone may expire an unruled dispute (audit 2026-11-09).",
+  "_comment": "onchain is passed to Pactora's new(params) byte for byte and must equal get_params after deploy (scripts/deploy.mjs). offchain is read only by the backend. Max windows are 10x the defaults. dispute_timeout is 7 days, the arbiter DAO's proposal_period (scripts/lib/dao.mjs), and dispute_grace 24 h more before anyone may expire an unruled dispute (audit 2026-11-09).",
   "onchain": {
     "protocol_fee_bps": 100,
     "min_fee": "100",
