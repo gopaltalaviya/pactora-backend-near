@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import type {JudgeAttestation} from '@pactora/shared';
 import {
   BrainInvalidOutput,
   BrainUnavailable,
@@ -38,6 +39,8 @@ export abstract class JsonHttpBrain implements Brain {
 
     const jsonSchema = z.toJSONSchema(req.schema, {target: 'draft-7'}) as object;
     const {url, headers, body} = this.buildRequest(req, jsonSchema);
+    // The exact bytes sent: what a provider's response signature covers.
+    const requestBody = JSON.stringify(body);
 
     // Transient answers are retried before the provider is declared down.
     // Gemini says "high demand … usually temporary" with a 503, and a hosted
@@ -49,7 +52,7 @@ export abstract class JsonHttpBrain implements Brain {
         res = await fetch(url, {
           method: 'POST',
           headers: {'content-type': 'application/json', ...headers},
-          body: JSON.stringify(body),
+          body: requestBody,
           signal: AbortSignal.timeout(req.timeoutMs ?? 60_000),
         });
       } catch (err) {
@@ -77,9 +80,11 @@ export abstract class JsonHttpBrain implements Brain {
 
     // A 200 whose body is not JSON (a proxy's error page, a cut connection)
     // is the provider failing to answer, not a bad answer: the chain moves on.
+    // The exact bytes received (the other half of what a signature covers), then parsed.
+    const responseBody = await res.text().catch(() => '');
     let payload: unknown;
     try {
-      payload = await res.json();
+      payload = JSON.parse(responseBody);
     } catch {
       throw new BrainUnavailable(this.name, 'outage', `${res.status} with a body that is not JSON`);
     }
@@ -108,11 +113,32 @@ export abstract class JsonHttpBrain implements Brain {
       );
     }
 
-    return {value: parsed.data, provider: this.name, model: this.model, cached: false};
+    const attestation = await this.attest(requestBody, responseBody, payload, parsed.data);
+    return {
+      value: parsed.data,
+      provider: this.name,
+      model: this.model,
+      cached: false,
+      ...(attestation ? {attestation} : {}),
+    };
   }
 
   async available(): Promise<boolean> {
     return this.endpoint() !== null;
+  }
+
+  /**
+   * A provider that signs its responses checks the signature here, given the
+   * exact bytes exchanged, and answers the attestation to carry with the
+   * result. Most providers sign nothing: undefined.
+   */
+  protected async attest(
+    _requestBody: string,
+    _responseBody: string,
+    _payload: unknown,
+    _value: unknown,
+  ): Promise<JudgeAttestation | undefined> {
+    return undefined;
   }
 
   /** The wait before retry `attempt`: the server's retry-after if sane, else backoff with jitter. */

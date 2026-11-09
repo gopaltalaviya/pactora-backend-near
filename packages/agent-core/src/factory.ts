@@ -7,7 +7,7 @@ import {GeminiBrain} from './providers/gemini.js';
 import {GroqBrain} from './providers/groq.js';
 import {OllamaBrain} from './providers/ollama.js';
 import {NearAiBrain} from './providers/near-ai.js';
-import {parseJudgeEnv} from '@pactora/shared';
+import {parseJudgeEnv, requireAttestation} from '@pactora/shared';
 
 export {ClaudeBrain, GeminiBrain, GroqBrain, OllamaBrain, NearAiBrain};
 
@@ -97,7 +97,12 @@ export function buildJudgeBrain(opts: BuildJudgeBrainOptions = {}): Brain | unde
 
   const cacheDir = opts.cacheDir ?? env['AGENT_CACHE_DIR'] ?? join(process.cwd(), '.agent-cache');
   const cachePath = join(cacheDir, 'orchestrator.json');
-  const nearAi = new NearAiBrain(judge.NEAR_AI_MODEL, judge.NEAR_AI_API_KEY, judge.NEAR_AI_BASE_URL);
+  const nearAi = new NearAiBrain(
+    judge.NEAR_AI_MODEL,
+    judge.NEAR_AI_API_KEY,
+    judge.NEAR_AI_BASE_URL,
+    requireAttestation(judge),
+  );
   const withBackstop = new FallbackBrain(
     [nearAi, new CachedBrain(cachePath, {maxReplayMs: replayCap(env)})],
     opts,

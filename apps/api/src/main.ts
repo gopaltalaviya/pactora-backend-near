@@ -145,6 +145,8 @@ const Env = z
     NEAR_AI_API_KEY: JudgeEnv.shape.NEAR_AI_API_KEY,
     NEAR_AI_MODEL: JudgeEnv.shape.NEAR_AI_MODEL,
     NEAR_AI_BASE_URL: JudgeEnv.shape.NEAR_AI_BASE_URL,
+    /** A NEAR AI verdict needs a verified response signature unless 0 (docs/24 §4). */
+    JUDGE_REQUIRE_ATTESTATION: JudgeEnv.shape.JUDGE_REQUIRE_ATTESTATION,
   })
   // A judge that is chosen but cannot authenticate is refused at boot, not at the first run.
   .refine(judgeKeyRule.check, {message: judgeKeyRule.message, path: judgeKeyRule.path})

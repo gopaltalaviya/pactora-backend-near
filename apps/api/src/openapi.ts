@@ -1,7 +1,7 @@
 import {z, type ZodType} from 'zod';
 import {ErrorCode, HireRequest, JobResult} from '@pactora/shared';
 import {DiscoverQuery, RegisterBody, RegisterChallengeBody, UpdateAgentBody} from './routes/agents.js';
-import {DeclineBody, DisputeBody, JobListQuery} from './routes/jobs.js';
+import {ApproveBody, DeclineBody, DisputeBody, JobListQuery} from './routes/jobs.js';
 import {NetworkResponse} from './routes/meta.js';
 import {ReissueBody} from './routes/keys.js';
 import {RunListQuery, StartRun} from './routes/runs.js';
@@ -252,7 +252,14 @@ export const ROUTES: Route[] = [
     summary: "Worker: deliver a result (validated against the spec's outputSchema)",
     body: JobResult,
   },
-  {method: 'post', path: '/v1/jobs/:id/approve', auth: 'key', summary: 'Client: approve and release payment'},
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/approve',
+    auth: 'key',
+    summary:
+      "Client: approve and release payment; may carry the judge's attestation (stored with the settlement)",
+    body: ApproveBody,
+  },
   {
     method: 'post',
     path: '/v1/jobs/:id/dispute',

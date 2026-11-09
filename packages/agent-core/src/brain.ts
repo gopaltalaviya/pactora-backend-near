@@ -1,4 +1,5 @@
 import type {ZodType} from 'zod';
+import type {JudgeAttestation} from '@pactora/shared';
 
 /**
  * A `Brain` turns a prompt into a schema-valid object. That is the whole
@@ -53,6 +54,8 @@ export interface CompletionResult<T> {
   usage?: {inputTokens?: number; outputTokens?: number};
   /** True when replayed from cache rather than generated. */
   cached: boolean;
+  /** A verified signature over this very response (NEAR AI Cloud); absent for providers that sign nothing. */
+  attestation?: JudgeAttestation;
 }
 
 /**
@@ -84,6 +87,20 @@ export class BrainInvalidOutput extends Error {
   ) {
     super(`${provider} returned output failing its schema: ${issues}`);
     this.name = 'BrainInvalidOutput';
+  }
+}
+
+/**
+ * A judge's response could not be shown to come from the model it claims
+ * (no signature, or one that does not verify). A BrainInvalidOutput, so the
+ * fallback chain stops here: a recording or another provider cannot stand
+ * in for a signed ruling.
+ */
+export class JudgeAttestationFailed extends BrainInvalidOutput {
+  constructor(provider: string, why: string) {
+    super(provider, why);
+    this.name = 'JudgeAttestationFailed';
+    this.message = `${provider}: judge attestation failed: ${why}`;
   }
 }
 

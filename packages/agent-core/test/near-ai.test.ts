@@ -30,9 +30,12 @@ const reply = (name: string, status = 200, headers: Record<string, string> = {})
 /** Looks like a key, is not one. Every test checks it never leaks. */
 const KEY = 'sk-nearai-TEST-ONLY-0123456789abcdef';
 
-/** No real waiting between retries. */
+/** No real waiting between retries; attestation off (its own tests are in attestation.test.ts). */
 class FastNearAi extends NearAiBrain {
   waits: number[] = [];
+  constructor(model?: string, apiKey?: string, baseUrl?: string, requireAttestation = false) {
+    super(model, apiKey, baseUrl, requireAttestation);
+  }
   protected override sleep(ms: number) {
     this.waits.push(ms);
     return Promise.resolve();

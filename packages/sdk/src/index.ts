@@ -13,6 +13,7 @@ import {
   type Capability,
   type JobSpec,
   type JobState,
+  type JudgeAttestation,
 } from '@pactora/shared';
 
 /**
@@ -549,12 +550,17 @@ export class PactoraClient {
     });
   }
 
-  approve(jobId: string): Promise<ActionReceipt> {
-    return this.request<ActionReceipt>('POST', `/v1/jobs/${jobId}/approve`, {});
+  /** `judge`: the judge's verified response signature (NEAR AI), stored with the settlement. */
+  approve(jobId: string, opts: {judge?: JudgeAttestation} = {}): Promise<ActionReceipt> {
+    return this.request<ActionReceipt>('POST', `/v1/jobs/${jobId}/approve`, {
+      body: opts.judge ? {judge: opts.judge} : {},
+    });
   }
 
-  dispute(jobId: string, reason: string): Promise<ActionReceipt> {
-    return this.request<ActionReceipt>('POST', `/v1/jobs/${jobId}/dispute`, {body: {reason}});
+  dispute(jobId: string, reason: string, opts: {judge?: JudgeAttestation} = {}): Promise<ActionReceipt> {
+    return this.request<ActionReceipt>('POST', `/v1/jobs/${jobId}/dispute`, {
+      body: {reason, ...(opts.judge ? {judge: opts.judge} : {})},
+    });
   }
 
   cancel(jobId: string): Promise<ActionReceipt> {

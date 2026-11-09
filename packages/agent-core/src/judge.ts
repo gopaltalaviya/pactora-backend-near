@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import type {JudgeAttestation} from '@pactora/shared';
 import type {Brain} from './brain.js';
 import {JUDGE_SYSTEM, wrapUntrusted} from './prompts.js';
 
@@ -77,7 +78,9 @@ export interface JudgeInput {
 export class Judge {
   constructor(private readonly brain: Brain) {}
 
-  async evaluate(input: JudgeInput): Promise<Verdict & {quality: number; provider: string; cached: boolean}> {
+  async evaluate(
+    input: JudgeInput,
+  ): Promise<Verdict & {quality: number; provider: string; cached: boolean; attestation?: JudgeAttestation}> {
     const prompt = [
       `Capability commissioned: ${input.capability}`,
       '',
@@ -90,7 +93,7 @@ export class Judge {
       'Has this work earned its payment?',
     ].join('\n');
 
-    const {value, provider, cached} = await this.brain.complete({
+    const {value, provider, cached, attestation} = await this.brain.complete({
       schema: Verdict,
       schemaName: 'Verdict',
       system: JUDGE_SYSTEM,
@@ -112,7 +115,14 @@ export class Judge {
     // A number as well, because ranking and the trace want one — derived
     // here, deterministically, rather than asked of a model that has no
     // stable idea what scale it is on.
-    return {...value, accept, quality: QUALITY[value.rating], provider, cached};
+    return {
+      ...value,
+      accept,
+      quality: QUALITY[value.rating],
+      provider,
+      cached,
+      ...(attestation ? {attestation} : {}),
+    };
   }
 }
 

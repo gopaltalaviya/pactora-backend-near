@@ -34,7 +34,22 @@ export const JudgeEnv = z.object({
     .url()
     .regex(/^https:\/\//, 'NEAR_AI_BASE_URL must be an https URL')
     .optional(),
+  /**
+   * Refuse a NEAR AI verdict whose response signature is missing or does not
+   * verify (docs/24 §4). Default on when the provider is near-ai; `0` lets an
+   * unsigned verdict through (development against a provider without the
+   * signature endpoint).
+   */
+  JUDGE_REQUIRE_ATTESTATION: z
+    .enum(['0', '1', 'true', 'false'], {message: 'JUDGE_REQUIRE_ATTESTATION must be 0 or 1'})
+    .optional(),
 });
+
+/** Whether a NEAR AI verdict needs a verified signature: on unless set to 0/false. */
+export function requireAttestation(env: Pick<JudgeEnv, 'JUDGE_REQUIRE_ATTESTATION'>): boolean {
+  const v = env.JUDGE_REQUIRE_ATTESTATION;
+  return v === undefined || v === '1' || v === 'true';
+}
 export type JudgeEnv = z.infer<typeof JudgeEnv>;
 
 /** The rule a shape cannot say: the provider needs its key. */

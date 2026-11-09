@@ -75,6 +75,17 @@ const CASES = [
   ],
   [
     'api',
+    'an attestation flag that is neither 0 nor 1',
+    {
+      DATABASE_URL: CLOSED_DB,
+      JUDGE_PROVIDER: 'near-ai',
+      NEAR_AI_API_KEY: 'test-only-not-a-real-key',
+      JUDGE_REQUIRE_ATTESTATION: 'maybe',
+    },
+    /JUDGE_REQUIRE_ATTESTATION must be 0 or 1/,
+  ],
+  [
+    'api',
     'a NEAR AI base URL that is not https (the key must not be printed)',
     {
       DATABASE_URL: CLOSED_DB,

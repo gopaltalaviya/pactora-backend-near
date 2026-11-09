@@ -4,3 +4,4 @@ export * from './shape.js';
 export * from './x402.js';
 export * from './legacy-env.js';
 export * from './judge-env.js';
+export * from './attestation.js';

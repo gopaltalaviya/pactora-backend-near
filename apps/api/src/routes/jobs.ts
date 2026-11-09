@@ -10,6 +10,7 @@ import {
   ErrorCode,
   HireRequest,
   JobResult,
+  JudgeAttestation,
   type JobSpec,
   JobState,
   canonicalize,
@@ -259,6 +260,8 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       })),
       declined: declinedOf(events),
       dispute: disputeOf(events),
+      /** The judge's verified attestation of the verdict that settled or disputed it (NEAR AI), if any. */
+      judge: judgeOf(events),
     };
   });
 
@@ -526,6 +529,12 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     // spec hash — so every dispute committed to what was ASKED FOR — and the
     // reason itself was stored nowhere. Required, like a decline's.
     const disputeReason = kind === 'dispute' ? DisputeBody.parse(request.body ?? {}).reason : undefined;
+    // The judge's attestation (NEAR AI, docs/24 §4) on an approve or dispute:
+    // stored with the event, never sent to the signer.
+    const judge =
+      kind === 'approve' || kind === 'dispute' ? JudgeBody.parse(request.body ?? {}).judge : undefined;
+    const {judge: _judgeField, ...bodyForSigner} = (request.body ?? {}) as Record<string, unknown>;
+    void _judgeField;
     const reasonHash =
       disputeReason !== undefined ? await sha256Of(canonicalize({reason: disputeReason})) : undefined;
 
@@ -562,7 +571,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
           idempotencyKey,
           traceId: request.id,
           payload: {
-            ...((request.body ?? {}) as Record<string, unknown>),
+            ...bodyForSigner,
             // Without this the encoder falls back to the SPEC hash, so the chain
             // would commit to what was ASKED FOR rather than to what was
             // delivered — and T4's "the result hash is committed on-chain before
@@ -604,6 +613,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       jobId: job.publicId,
       txHash: result.txHash,
       ...(disputeReason !== undefined ? {reason: disputeReason, reasonHash} : {}),
+      ...(judge ? {judge} : {}),
     });
 
     return {
@@ -986,7 +996,22 @@ export const DisputeBody = z.object({
     .trim()
     .min(1, 'a dispute needs a reason')
     .max(1000, 'a reason is at most 1000 characters'),
+  /** The judge's verified attestation of the verdict behind this dispute (NEAR AI), if any. */
+  judge: JudgeAttestation.optional(),
 });
+
+/** An approve or dispute may carry the judge's attestation (docs/24 §4). */
+export const JudgeBody = z.object({judge: JudgeAttestation.optional()});
+export const ApproveBody = JudgeBody;
+
+/** The attestation stored with the ruling that settled or disputed the job. */
+function judgeOf(events: {kind: string; payload: unknown}[]): JudgeAttestation | null {
+  const e = events.find(
+    (x) => (x.kind === 'job.settled' || x.kind === 'job.disputed') && (x.payload as {judge?: unknown}).judge,
+  );
+  const parsed = e ? JudgeAttestation.safeParse((e.payload as {judge?: unknown}).judge) : null;
+  return parsed?.success ? parsed.data : null;
+}
 
 export const DeclineBody = z.object({
   reason: z.string().trim().min(1, 'a decline needs a reason').max(500, 'a reason is at most 500 characters'),

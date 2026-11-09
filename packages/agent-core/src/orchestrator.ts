@@ -1,6 +1,6 @@
 import {createHash, randomUUID} from 'node:crypto';
 import {z} from 'zod';
-import {PactoraError, ErrorCode, type JobSpec} from '@pactora/shared';
+import {PactoraError, ErrorCode, type JobSpec, type JudgeAttestation} from '@pactora/shared';
 import {NotAccepted, type AgentSummary, type PactoraClient} from '@pactora/sdk';
 import {explainModelFailure, type Brain} from './brain.js';
 import {Judge, validateShape, type Verdict} from './judge.js';
@@ -124,6 +124,8 @@ export interface StepOutcome {
   amount?: string;
   explorerUrl?: string;
   verdict?: Verdict;
+  /** The judge's verified response signature (NEAR AI Cloud), when the judge signs. */
+  judge?: JudgeAttestation;
   result?: Record<string, unknown>;
   /** Set when this outcome came from a second worker: why the first one did not deliver. */
   retriedAfter?: string;
@@ -149,7 +151,15 @@ export type OrchestratorEvent =
   /** v3: left out of the pool by the trust check, before the model chose. */
   | {kind: 'excluded'; capability: string; agentId: number; verdict: string; reason: string}
   | {kind: 'hired'; capability: string; jobId: string; amount: string; explorerUrl: string}
-  | {kind: 'judged'; jobId: string; accept: boolean; quality: number; injectionAttempted: boolean}
+  | {
+      kind: 'judged';
+      jobId: string;
+      accept: boolean;
+      quality: number;
+      injectionAttempted: boolean;
+      /** Who signed the verdict, when it was signed and verified. */
+      attestedBy?: string;
+    }
   | {kind: 'settled'; jobId: string; explorerUrl: string}
   | {kind: 'disputed'; jobId: string; reason: string}
   | {kind: 'retrying'; capability: string; jobId: string; reason: string}
@@ -618,12 +628,14 @@ export class Orchestrator {
       });
     }
 
+    const judge = verdict.attestation;
     this.emit({
       kind: 'judged',
       jobId: receipt.jobId,
       accept: verdict.accept,
       quality: verdict.quality,
       injectionAttempted: verdict.injectionAttempted,
+      ...(judge ? {attestedBy: `${judge.provider} ${judge.signingAlgo} ${judge.signingAddress}`} : {}),
     });
 
     if (!verdict.accept) {
@@ -650,13 +662,14 @@ export class Orchestrator {
           result: job.result,
         });
       }
-      return this.dispute({...common, verdict}, verdict.reason);
+      return this.dispute({...common, verdict, ...(judge ? {judge} : {})}, verdict.reason);
     }
 
     // The fast path already settled on hire; approving it would revert.
     if (job.state !== 'settled') {
       try {
-        const settled = await this.opts.client.approve(receipt.jobId);
+        // The attestation travels with the approval: the API stores it with the settlement.
+        const settled = await this.opts.client.approve(receipt.jobId, judge ? {judge} : {});
         this.emit({kind: 'settled', jobId: receipt.jobId, explorerUrl: settled.explorerUrl});
       } catch (err) {
         return this.skip({...common, status: 'failed', detail: `approve failed: ${message(err)}`});
@@ -665,7 +678,14 @@ export class Orchestrator {
       this.emit({kind: 'settled', jobId: receipt.jobId, explorerUrl: receipt.explorerUrl});
     }
 
-    return {...common, status: 'settled', detail: verdict.reason, verdict, result: job.result};
+    return {
+      ...common,
+      status: 'settled',
+      detail: verdict.reason,
+      verdict,
+      ...(judge ? {judge} : {}),
+      result: job.result,
+    };
   }
 
   // ── model calls ────────────────────────────────────────────────────────
@@ -822,7 +842,7 @@ export class Orchestrator {
     reason: string,
   ): Promise<StepOutcome> {
     try {
-      await this.opts.client.dispute(common.jobId!, reason);
+      await this.opts.client.dispute(common.jobId!, reason, common.judge ? {judge: common.judge} : {});
       this.emit({kind: 'disputed', jobId: common.jobId!, reason});
     } catch (err) {
       return {...common, status: 'failed', detail: `dispute failed: ${message(err)}`};
