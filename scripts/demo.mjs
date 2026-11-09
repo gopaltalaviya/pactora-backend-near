@@ -43,6 +43,7 @@ import {
   buildJudgeBrain,
   describeBrain,
   confidence,
+  serveX402,
 } from '@pactora/agent-core';
 import {Indexer} from '../apps/indexer/dist/indexer.js';
 import {openSource} from '../apps/indexer/dist/source.js';
@@ -801,7 +802,7 @@ try {
     feed.every((e, i) => e.seq === i + 1)
       ? ok(`the orchestrator's feed: ${feed.length} events, numbered 1…${feed.length} with no gap`)
       : fail(`feed seqs: ${feed.map((e) => e.seq).join(',')}`);
-    const fromChain = feed.filter((e) => !e.kind.startsWith('job.'));
+    const fromChain = feed.filter((e) => !e.kind.includes('.')); // the indexer's kinds have no dot
     fromChain.length > 0
       ? ok(
           `the indexer's chain events are in the same feed (${[...new Set(fromChain.map((e) => e.kind))].join(', ')})`,
@@ -1164,6 +1165,169 @@ try {
       : fail(`after clearing: job ${paidOut.state}, worker gained ${gain}, expected ${expected}`);
   }
 
+  // ── 8i. x402: one HTTP call paid through a refundable escrow ──────────
+  // A worker sells one request at a URL. The client's SDK gets a 402 quote
+  // that offers `pactora-escrow`, pays it (the facilitator's settle is a
+  // create_job on chain), and retries with X-PAYMENT; the worker redeems
+  // the payment, does the work, then accepts and submits on chain. The
+  // client approves: settled, the worker paid. A second call whose work
+  // fails is refunded in full: the worker declined and never accepted, so
+  // the client's cancel returns everything. Every check is read from the
+  // contract.
+  {
+    const xOwner = await createPerson(root, `${run}-x402`, '3', {save: keep});
+    await mintTo(root, TOKEN, xOwner, 20_000_000);
+    const xAgent = await registerAgent(xOwner, {
+      name: 'Paid Research',
+      capability: 'paid-research',
+      price: '40000',
+    });
+    await deposit(xOwner, TOKEN, PACTORA, BigInt(params.min_stake) + 1_000_000n, {
+      Stake: {agent_id: Number(xAgent.chainAgentId)},
+    });
+    const xsdk = new PactoraClient({baseUrl: base, apiKey: xAgent.apiKey, chainId: CHAIN_ID});
+    // A scripted brain: the chain flow is what this step checks, not a model's prose.
+    const Output = z.object({summary: z.string().min(20), confidence: z.number().min(0).max(1)});
+    const scripted = {
+      name: 'scripted',
+      available: async () => true,
+      complete: async (req) => {
+        if (/"fail":\s*true/.test(req.prompt)) throw new Error('the scripted worker was asked to fail');
+        return {
+          value: {
+            summary: 'Liquidity is deepest on the two largest pools; spreads tighten after 14:00 UTC.',
+            confidence: 0.8,
+          },
+          provider: 'scripted',
+          model: 'scripted',
+          cached: false,
+        };
+      },
+    };
+    const xWorker = new Worker({
+      client: xsdk,
+      brain: scripted,
+      capability: 'paid-research',
+      role: 'a paid research endpoint',
+      output: Output,
+    });
+    const net = await client.network();
+    const x402 = await serveX402({
+      worker: xWorker,
+      client: xsdk,
+      port: 0,
+      agentId: Number(xAgent.agentId),
+      price: '40000',
+      payTo: xAgent.wallet,
+      asset: net.paymentToken.accountId,
+      network: CHAIN_ID,
+      schemes: ['pactora-escrow'],
+      confirmWaitMs: 30_000,
+      log: (e) => console.log(`    [x402] ${e.kind}${e.reason ? `: ${e.reason}` : ''}`),
+    });
+    try {
+      const quote = await (
+        await fetch(x402.url, {
+          method: 'POST',
+          headers: {'content-type': 'application/json'},
+          body: '{"input":{"q":"depth"}}',
+        })
+      ).json();
+      quote.accepts?.some((a) => a.scheme === 'pactora-escrow' && a.maxAmountRequired === '40000')
+        ? ok(
+            `x402: the endpoint quotes 402 with the refundable pactora-escrow scheme at ${chain.formatToken(40_000n)}`,
+          )
+        : fail(`x402 quote: ${JSON.stringify(quote)}`);
+      const xPurseBefore = BigInt((await purse(xAgent)).balance);
+      const clientPurseBefore = await purse(orchestratorAgent);
+      const paid = await client.payX402(x402.url, {
+        maxAmount: '40000',
+        body: {input: {q: 'Where is ETH/USDC liquidity deepest on NEAR?'}},
+        idempotencyKey: `${run}-x402-ok`,
+        scheme: 'pactora-escrow',
+      });
+      const answer = await paid.response.json();
+      paid.response.status === 200 && answer.output?.summary && paid.settlement?.jobId
+        ? ok(
+            `x402: paid ${chain.formatToken(40_000n)} into escrow (create_job, ${txLink(paid.settlement.transaction)}), the worker answered over HTTP`,
+          )
+        : fail(
+            `x402 pay: ${paid.response.status} ${JSON.stringify(answer)} settlement ${JSON.stringify(paid.settlement)}`,
+          );
+      const xJobId = paid.settlement.jobId;
+      for (let i = 0; i < 60 && (await client.getJob(xJobId)).state !== 'submitted'; i++) await sleep(500);
+      const xJob = await client.getJob(xJobId);
+      const xChain = await view(root.provider, PACTORA, 'get_job', {job_id: Number(xJob.chainJobId)});
+      xChain.state === 'Submitted' && xJob.path === 'escrow'
+        ? ok(
+            `x402: on chain the job is Submitted (the worker accepted and committed result_hash ${String(xChain.result_hash).replace(/^0x/, '').slice(0, 12)}…), still in escrow`,
+          )
+        : fail(`x402 job on chain: ${JSON.stringify(xChain)} api ${xJob.state}/${xJob.path}`);
+      await client.approve(xJobId);
+      for (let i = 0; i < 60; i++) {
+        if (
+          (await view(root.provider, PACTORA, 'get_job', {job_id: Number(xJob.chainJobId)})).state ===
+          'Settled'
+        )
+          break;
+        await sleep(500);
+      }
+      const settledX = await view(root.provider, PACTORA, 'get_job', {job_id: Number(xJob.chainJobId)});
+      const xGain = BigInt((await purse(xAgent)).balance) - xPurseBefore;
+      const xFee = (() => {
+        const bps = (40_000n * BigInt(params.protocol_fee_bps)) / 10_000n;
+        return bps > BigInt(params.min_fee) ? bps : BigInt(params.min_fee);
+      })();
+      settledX.state === 'Settled' && xGain === 40_000n - xFee
+        ? ok(
+            `x402: the client approved; settled on chain, the worker's purse rose by ${chain.formatToken(xGain)} (price less fee)`,
+          )
+        : fail(`x402 settle: ${settledX.state}, worker gained ${xGain}, expected ${40_000n - xFee}`);
+
+      // The refund path: the work fails, the worker declines, the client's cancel returns everything.
+      const beforeFail = await purse(orchestratorAgent);
+      const failed = await client.payX402(x402.url, {
+        maxAmount: '40000',
+        body: {input: {q: 'anything', fail: true}},
+        idempotencyKey: `${run}-x402-fail`,
+        scheme: 'pactora-escrow',
+      });
+      failed.response.status === 502 && failed.refunded
+        ? ok(
+            `x402: a request whose work failed answered 502 and the SDK cancelled the escrow job for a full refund (${txLink(failed.refundTx)})`,
+          )
+        : fail(
+            `x402 failed call: ${failed.response.status} refunded=${failed.refunded} ${failed.refundError ?? ''}`,
+          );
+      const failedJob = await client.getJob(failed.settlement.jobId);
+      for (let i = 0; i < 60; i++) {
+        if (
+          (await view(root.provider, PACTORA, 'get_job', {job_id: Number(failedJob.chainJobId)})).state ===
+          'Refunded'
+        )
+          break;
+        await sleep(500);
+      }
+      const refundedX = await view(root.provider, PACTORA, 'get_job', {job_id: Number(failedJob.chainJobId)});
+      const afterFail = await purse(orchestratorAgent);
+      refundedX.state === 'Refunded' && afterFail.balance === beforeFail.balance
+        ? ok(
+            `x402: on chain the failed job is Refunded and the client's purse is back where it was (${chain.formatToken(BigInt(afterFail.balance))})`,
+          )
+        : fail(`x402 refund: ${refundedX.state}, purse ${beforeFail.balance} → ${afterFail.balance}`);
+      void clientPurseBefore;
+      const tX = await view(root.provider, PACTORA, 'get_totals');
+      const heldX = await view(root.provider, TOKEN, 'ft_balance_of', {account_id: PACTORA});
+      tX.sum === heldX
+        ? ok(
+            `I1 holds after x402: the contract holds exactly what it owes (${chain.formatToken(BigInt(heldX))})`,
+          )
+        : fail(`I1 after x402: owes ${tX.sum}, holds ${heldX}`);
+    } finally {
+      await x402.close();
+    }
+  }
+
   // ── 9. the attack (DEMO_ATTACK=0 skips it) ────────────────────────────
   // No model is asked anything here: the point is that no defence below
   // depends on a model saying no. We ASSUME the injection worked.
@@ -1369,7 +1533,7 @@ function describeEvent(e) {
     case 'judged':
       return `judge     job ${e.jobId}: ${e.accept ? 'accept' : 'reject'} (quality ${e.quality})${
         e.injectionAttempted ? '  ⚠ INJECTION ATTEMPT IN RESULT' : ''
-      }`;
+      }${e.attestedBy ? `\n            verdict signed by ${e.attestedBy}` : ''}`;
     case 'settled':
       return `settle    job ${e.jobId} paid\n            ${txLink(e.explorerUrl)}`;
     case 'disputed':
