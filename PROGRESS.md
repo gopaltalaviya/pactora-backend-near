@@ -4,17 +4,18 @@
 > terminal: the current state, how to resume, what blocks, what was decided,
 > and a dated log of the NEAR work, newest first.
 
-- Last updated: **2026-11-09, evening** (branch `human-work`).
+- Last updated: **2026-11-09, night** (branch `human-work`).
 - Event: **NEAR Hackathon**, deadline **2026-11-14 23:59 UTC**.
   Track: **Agent Economy** (primary); AI Security & Defense alongside.
   Plan and status: `pactora-docs-near/docs/24-near-hackathon.md` §1.5 and §5.
 - Wire contract between the services and the chain: `docs/NEAR-PORT.md`.
 - Current state: the whole stack runs end to end on a local NEAR sandbox
   (`pnpm demo:local`: agents, people's listings, evidence and review, the
-  DAO desk, a held payout, x402, the attack refused). Testnet deployment
-  waits on the owner's funded account.
-- Numbers (2026-11-09 evening): `pnpm check` 1333 passed, 10 skipped, 1 failed (`status.test`: `pactora-docs-near` docs/15 lacks the 14 new routes); `test:startup`
-  all 42 refused; `demo:local` "Demo passed.", 71 checks; contracts `verify-near` 26/28 (the two
+  DAO desk, a held payout, x402, the attack refused), and `pnpm swarm:local`
+  runs a 25-agent market on the same sandbox. Testnet deployment waits on
+  the owner's funded account.
+- Numbers (2026-11-09 night): `pnpm check` 1350 passed, 10 skipped, 0 failed; `test:startup`
+  all 42 refused; `demo:local` "Demo passed.", 71 checks; `swarm:local` "Swarm passed."; contracts `verify-near` 26/28 (the two
   DAO checks need `--dao`).
 
 ## Cold start (local, no keys)
@@ -22,6 +23,7 @@
 ```bash
 # Docker Desktop running (Postgres :5443, MinIO :9110, NEAR sandbox :3030); contracts repo cloned beside this one
 pnpm install && pnpm demo:local      # → "Demo passed."
+pnpm swarm:local                     # sandbox still up → "Swarm passed." (own DB pactora_near_swarm)
 DEMO_HOLD=1 pnpm demo:local          # then the interface: NEXT_PUBLIC_API_URL=http://127.0.0.1:8098 pnpm dev
 export DATABASE_URL=postgres://pactora:pactora@127.0.0.1:5443/pactora_near
 pnpm db:migrate && pnpm check        # NOT while a held demo uses the DB (tests TRUNCATE)
@@ -90,6 +92,58 @@ On Windows: `corepack` does not run from Git Bash; use PowerShell for
 ---
 
 ## Log
+
+### 2026-11-09 (night, branch human-work): round 3 — history, audit export, indexer stall, the swarm
+
+Every item has a test that failed on the old source first (source stashed or
+moved aside, the new test run, the source restored). One line each:
+
+| Feature | Commit | Red-first test, and what it showed on the old code |
+|---|---|---|
+| `GET /v1/agents/:id/history`, `GET /v1/profiles/:id/history` (52 weeks, amount buckets, shown ratings; no counterparty; unpublished person 404) | c2b6bc1 | `history.test.ts`: both routes 404 (`expected 404 to be 200`) |
+| `GET /v1/admin/audit-log.csv` (reviewers; cases, decisions, standing, reports; no names or notes; 6 a minute; audited) | d10e6c4 | `audit-log.test.ts`: all 4 failed, every call 404 |
+| Indexer: a start block the RPC has garbage-collected → `stalled: start block pruned` on /health and /v1/status, one error naming the fix, longest backoff | 9d579fd | `apps/indexer/test/pruned.test.ts`: 5 of 6 failed (`TypeError` not `StartBlockPrunedError`; loop waits `[2000, 4000, 8000, 16000]` not 60000 each; no state row); `status.test`: `expected 'unknown' to be 'down'` |
+| Roles matrix rows for the three routes | 6e0df16 | `roles.test`: `routes with no row: [ 'GET /v1/admin/audit-log.csv', …(2) ]` (found by the gate) |
+| CORS exposes `content-disposition` (interface ask: download file names) | 35a8cac | `cors.test`: `expected 'x-trace-id, retry-after' to contain 'content-disposition'` |
+| `pnpm swarm:local` (AI Swarms track) | 6da95fb | first live run: 429 on `POST /v1/agents/wallet-key` (10/min per address); second: `INVALID_STATE job is "submitted"` (an SDK retry of a step that landed); third: `Swarm passed.` |
+
+- Routes for the interface are in the live2 `api-contract.md` "Round 3"
+  section (with a CHANGED list: an API key on the export is 401, the
+  `note` column carries only fixed-list values, `components.indexer` is
+  `down` with `chains[].indexer.state`/`fix`). docs/15 rows: pactora-docs-near
+  0e3aedc.
+- Migration 0032 `indexer_state`: one row per chain while stalled; the
+  indexer deletes it on its next good tick. `blockRpc` now tells a pruned
+  height (below `sync_info.earliest_block_height`) from a skipped one and
+  throws `BlockPrunedError` instead of reading it as empty. Note: the local
+  sandbox garbage-collects too (earliest 6501 at head 8842), which is why a
+  fresh sandbox needs `INDEXER_START_AT_HEAD=1`.
+- The swarm runs on its own database `pactora_near_swarm` (created and
+  migrated by the script) and ports 8099/7099, so it never truncates the
+  database a held demo or the live UI stack uses; it does not recreate the
+  sandbox. `TRUST_PROXY=1` with an `x-forwarded-for` per agent, so the
+  per-address registration limits count per agent.
+- **Found by the swarm, not fixed:** under 20 concurrent jobs the API's
+  `recordEvent` (job.created, job.submitted) and `notifyApplicants`
+  (`pactora_agent_event`) hit Postgres `deadlock detected` against the
+  indexer's batch transaction, which takes `agent_event_seq` row locks in
+  event order, not agent order (migration 0018 fan-out). The request 500s
+  and the SDK's retry recovers, so the swarm passes; a fix is to pre-lock
+  the batch's parties in agent-id order at the start of the indexer's
+  transaction (and sort applicants in `notifyApplicants`). Needs a
+  deterministic two-connection test first.
+- Swarm, final run (fresh sandbox, after the demo): 20 listings, 76 bids,
+  20 fills, median 36000 base units (range 21000-60000), 20 settled on
+  chain; Atlas 8 wins (score 62), Cobalt 12 (score 70), Birch, Dune and
+  Ember none (50); caps kept; buyers paid 0.795 mUSDC = sellers 0.78705 +
+  fees 0.00795; I1 holds; 162 s; `Swarm passed.` In both runs the cheapest
+  bids also came from the sellers with the better record, so reputation
+  never overturned a price win: the rule is there, the run does not show
+  it biting.
+- Gate: `pnpm check` 1350 passed, 10 skipped, 0 failed (typecheck, lint,
+  format clean; status.test passes with the docs/15 rows); `test:startup`
+  all 42 refused; `check-no-secrets` clean (428 files); `demo:local` "Demo
+  passed.", 71 checks; `swarm:local` "Swarm passed."; `pnpm build` current.
 
 ### 2026-11-09 (evening, branch human-work): people, trust and remote agents
 

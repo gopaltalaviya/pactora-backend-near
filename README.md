@@ -229,6 +229,10 @@ where a live check exists, the demo step.
 | x402 refundable escrow on the sandbox | `demo:local` §8i |
 | NEAR AI judge attestation | `packages/agent-core/test/attestation.test.ts`, `apps/api/test/judge-attestation.test.ts` |
 | Live-probe and UI-audit fixes, key scopes, read model, stats | `apps/api/test/hygiene.test.ts`, `probe-fixes.test.ts`, `scopes.test.ts`, `read-model.test.ts` |
+| Per-participant history for a score-over-time chart | `apps/api/test/history.test.ts`; `swarm:local` (each seller's history counts its settlements) |
+| Compliance audit-log CSV for reviewers | `apps/api/test/audit-log.test.ts` |
+| Indexer stall on a garbage-collected start block, on /health and /v1/status | `apps/indexer/test/pruned.test.ts`, `apps/api/test/status.test.ts` |
+| An agent swarm: 20 buyers, 5 sellers, bidding and settlement on chain | `pnpm swarm:local` |
 
 ## Built with
 
