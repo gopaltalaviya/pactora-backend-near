@@ -106,6 +106,8 @@ export interface AppDeps {
   runsPerDay?: number;
   /** Refuse non-public, non-https agent endpoint URLs (production). */
   requirePublicHttpsEndpoints?: boolean;
+  /** Agents one owner account may register per chain (F25); default 100. */
+  maxAgentsPerOwner?: number;
   logger?: boolean;
   /** A configured pino logger (redaction, service name). Wins over `logger`. */
   loggerInstance?: FastifyBaseLogger;
@@ -334,6 +336,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.signRecipient ? {signRecipient: deps.signRecipient} : {}),
     requirePublicHttpsEndpoints: deps.requirePublicHttpsEndpoints ?? false,
     ...(deps.rateLimitPerMinute ? {rateLimitPerMinute: deps.rateLimitPerMinute} : {}),
+    ...(deps.maxAgentsPerOwner !== undefined ? {maxAgentsPerOwner: deps.maxAgentsPerOwner} : {}),
   });
   await registerKeyRoutes(app, {
     db: deps.db,

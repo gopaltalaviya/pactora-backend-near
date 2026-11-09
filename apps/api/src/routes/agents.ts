@@ -110,7 +110,11 @@ export interface RouteDeps {
   requirePublicHttpsEndpoints?: boolean;
   /** The app-wide per-minute limit; wallet-key creation never allows more than it. */
   rateLimitPerMinute?: number;
+  /** Agents one owner account may register per chain (docs/26 F25); default 100. */
+  maxAgentsPerOwner?: number;
 }
+
+export const DEFAULT_MAX_AGENTS_PER_OWNER = 100;
 
 /**
  * Wallet keys created per client per minute (audit M1). The route needs no
@@ -435,6 +439,20 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
       throw new PactoraError(
         ErrorCode.UNAUTHORIZED,
         `the signature is not a full-access key of ${body.ownerAddress} over this registration's challenge`,
+      );
+    }
+
+    // The per-owner cap (docs/26 F25): registration is open, and a cap is
+    // what keeps one account from filling the directory. Counted before the
+    // signer is asked to accept a wallet for an agent that will be refused.
+    const cap = deps.maxAgentsPerOwner ?? DEFAULT_MAX_AGENTS_PER_OWNER;
+    const [{n: owned} = {n: 0}] = (await db.execute(
+      sql`SELECT count(*)::int AS n FROM agents WHERE chain_id = ${chainId} AND owner_address = ${body.ownerAddress}`,
+    )) as unknown as [{n: number}?];
+    if (Number(owned) >= cap) {
+      throw new PactoraError(
+        ErrorCode.LIMIT_REACHED,
+        `${body.ownerAddress} already owns ${owned} agents on ${chainId}, the most one account may register (${cap})`,
       );
     }
 

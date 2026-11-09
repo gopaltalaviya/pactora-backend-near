@@ -194,6 +194,21 @@ export async function requireClear(db: Db, agentId: number, what: string): Promi
   }
 }
 
+/**
+ * A payout to a held or blocked worker is refused by Pactora's own services
+ * (the signer, the keeper): the API says so before anything is signed. Soft:
+ * the contract's permissionless `auto_approve` pays regardless (docs/26 F13).
+ */
+export async function requireWorkerPayable(db: Db, workerAgentId: number): Promise<void> {
+  const s = await standingOf(db, workerAgentId);
+  if (s !== 'clear') {
+    throw new PactoraError(
+      ErrorCode.FORBIDDEN,
+      `the worker's payout is held: their account is ${s === 'blocked' ? 'blocked after a compliance review' : 'on hold while a compliance review is open'}; the review window's auto_approve still pays on chain`,
+    );
+  }
+}
+
 /** Open one case per hit; a strong hit holds the account. Returns whether it was held. */
 export async function openCases(
   tx: Writer,

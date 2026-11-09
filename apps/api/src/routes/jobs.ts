@@ -21,7 +21,8 @@ import {personAgentOf} from '../actor.js';
 import {Cursor, page} from '../cursor.js';
 import {lastEventIdOf, streamEventOf, streamEvents, type EventBus} from '../events.js';
 import {acceptedDraftOf, draftDeliveryOf, settleAcceptedDraft, type DraftDelivery} from '../evidence.js';
-import {requireClear} from '../compliance.js';
+import {requireClear, requireWorkerPayable} from '../compliance.js';
+import {releaseDeclinedSlot} from '../listing-slots.js';
 
 /** Query for `GET /v1/jobs`. Coerced, because query strings are strings. */
 /** States a job is still moving through, and the ones it has finished in. */
@@ -266,10 +267,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     '/v1/jobs/:id/accept',
     async (request) =>
       (
-        await transition(request, 'accept', 'created', 'accepted', async (job, caller) => {
-          if (job.workerAgentId !== caller.agentId) {
-            throw new PactoraError(ErrorCode.FORBIDDEN, 'only the assigned worker may accept');
-          }
+        await transition(request, 'accept', 'worker', 'created', 'accepted', async (_job, caller) => {
           // docs/26 F14: a soft gate; the chain does not know about holds.
           await requireClear(db, caller.agentId, 'accept work');
         })
@@ -295,12 +293,10 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     const out = await transition(
       request,
       'submitResult',
+      'worker',
       ['accepted', 'settled'],
       'submitted',
-      async (job, caller, body) => {
-        if (job.workerAgentId !== caller.agentId) {
-          throw new PactoraError(ErrorCode.FORBIDDEN, 'only the assigned worker may submit a result');
-        }
+      async (job, _caller, body) => {
         // A job with an accepted draft (every listing job needs one) delivers
         // THAT snapshot: its hash is what the chain commits to, and the body's
         // output is not read (docs/26 F6, F7).
@@ -355,11 +351,11 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     '/v1/jobs/:id/approve',
     async (request) =>
       (
-        await transition(request, 'approve', 'submitted', 'settled', async (job, caller) => {
-          if (job.clientAgentId !== caller.agentId) {
-            throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may approve');
-          }
+        await transition(request, 'approve', 'client', 'submitted', 'settled', async (job) => {
           refuseMismatched(job);
+          // A held worker is not paid by Pactora's services (docs/26 F14): the
+          // signer refuses too; said here first, in the API's own words.
+          await requireWorkerPayable(db, job.workerAgentId);
           // An approval of an accepted draft carries its review's hash on chain.
           const accepted = await acceptedDraftOf(db, job.id);
           return accepted && accepted.draft.snapshotHash === job.resultHash
@@ -372,13 +368,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
   app.post(
     '/v1/jobs/:id/dispute',
     async (request) =>
-      (
-        await transition(request, 'dispute', 'submitted', 'disputed', (job, caller) => {
-          if (job.clientAgentId !== caller.agentId) {
-            throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may dispute');
-          }
-        })
-      ).receipt,
+      (await transition(request, 'dispute', 'client', 'submitted', 'disputed', () => undefined)).receipt,
   );
 
   /**
@@ -396,39 +386,19 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     if (job.chainId !== caller.chainId) {
       throw new PactoraError(ErrorCode.CHAIN_MISMATCH, `job is on chain ${job.chainId}`);
     }
-    if (job.workerAgentId !== caller.agentId) {
-      throw new PactoraError(ErrorCode.FORBIDDEN, 'only the assigned worker may decline');
-    }
+    requireParty(job, caller.agentId, 'worker', 'decline');
     const parsed = DeclineBody.safeParse(request.body ?? {});
     if (!parsed.success) {
       throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, parsed.error.issues.map((i) => i.message).join('; '));
     }
-
-    // Answered once. A second call returns the first answer rather than a
-    // second event: a retried request must not read as two refusals.
-    const events = await db.select().from(jobEvents).where(eq(jobEvents.jobId, job.id));
-    const already = declinedOf(events);
-    if (already) return {jobId: job.publicId, declined: already};
-
-    if (job.state !== 'created') {
-      throw new PactoraError(ErrorCode.INVALID_STATE, `job is "${job.state}", a decline needs "created"`);
-    }
-
-    const declined = {reason: parsed.data.reason, at: new Date().toISOString()};
-    await recordEvent(db, bus, job.id, job.chainId, 'job.declined', declined);
+    const declined = await declineJob(db, bus, job, parsed.data.reason);
     return {jobId: job.publicId, declined};
   });
 
   app.post(
     '/v1/jobs/:id/cancel',
     async (request) =>
-      (
-        await transition(request, 'cancel', 'created', 'refunded', (job, caller) => {
-          if (job.clientAgentId !== caller.agentId) {
-            throw new PactoraError(ErrorCode.FORBIDDEN, 'only the client may cancel');
-          }
-        })
-      ).receipt,
+      (await transition(request, 'cancel', 'client', 'created', 'refunded', () => undefined)).receipt,
   );
 
   /** Live job feed. Replays history first so a late subscriber sees it all. */
@@ -476,6 +446,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
   async function transition(
     request: FastifyRequest,
     kind: 'accept' | 'submitResult' | 'approve' | 'dispute' | 'cancel',
+    party: 'client' | 'worker',
     from: string | string[],
     to: string,
     check: (
@@ -490,6 +461,9 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     if (job.chainId !== caller.chainId) {
       throw new PactoraError(ErrorCode.CHAIN_MISMATCH, `job is on chain ${job.chainId}`);
     }
+    // Who before what: a stranger is refused (403) whatever the job's state,
+    // so the state answer (409) tells only a party something about the job.
+    requireParty(job, caller.agentId, party, kind);
     const allowed = Array.isArray(from) ? from : [from];
     if (!allowed.includes(job.state)) {
       throw new PactoraError(
@@ -1017,6 +991,49 @@ export const DisputeBody = z.object({
 export const DeclineBody = z.object({
   reason: z.string().trim().min(1, 'a decline needs a reason').max(500, 'a reason is at most 500 characters'),
 });
+
+/** The job's `party` must be `agentId`: 403 otherwise, named by the action. */
+export function requireParty(
+  job: {clientAgentId: number; workerAgentId: number},
+  agentId: number,
+  party: 'client' | 'worker',
+  action: string,
+): void {
+  const who = party === 'client' ? job.clientAgentId : job.workerAgentId;
+  if (who !== agentId) {
+    const verb = action === 'submitResult' ? 'submit a result' : action;
+    throw new PactoraError(
+      ErrorCode.FORBIDDEN,
+      party === 'worker' ? `only the assigned worker may ${verb}` : `only the client may ${verb}`,
+    );
+  }
+}
+
+/**
+ * The hired worker's off-chain "no" (an agent by key, a person by session).
+ *
+ * Answered once: a second call returns the first answer rather than a
+ * second event, so a retried request never reads as two refusals. The job
+ * stays `created` on chain and the client cancels for its refund; a listing
+ * job gives its worker slot back (listing-slots.ts). Needs `created`.
+ */
+export async function declineJob(
+  db: Db,
+  bus: EventBus,
+  job: typeof jobs.$inferSelect,
+  reason: string,
+): Promise<{reason: string; at: string}> {
+  const events = await db.select().from(jobEvents).where(eq(jobEvents.jobId, job.id));
+  const already = declinedOf(events);
+  if (already) return already;
+  if (job.state !== 'created') {
+    throw new PactoraError(ErrorCode.INVALID_STATE, `job is "${job.state}", a decline needs "created"`);
+  }
+  const declined = {reason, at: new Date().toISOString()};
+  await recordEvent(db, bus, job.id, job.chainId, 'job.declined', declined);
+  await releaseDeclinedSlot(db, job.id);
+  return declined;
+}
 
 /** The worker's off-chain "no", if it gave one. */
 function declinedOf(

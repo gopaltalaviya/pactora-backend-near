@@ -4,7 +4,10 @@ import {faucetClaims, type Db} from '@pactora/db';
 import type {ChainConfig} from '@pactora/config';
 import {ErrorCode, PactoraError} from '@pactora/shared';
 import {authenticatePerson} from '../auth.js';
+import {personAgentOf} from '../actor.js';
+import {requireClear} from '../compliance.js';
 import type {FaucetSend} from '../submit.js';
+import {standingOf} from '@pactora/db';
 
 /**
  * Test tokens for people trying Pactora on testnet (docs/26 F23).
@@ -70,8 +73,11 @@ export async function registerFaucetRoutes(app: FastifyInstance, deps: FaucetRou
     const chain = deps.chains[person.chainId];
     const day = utcDay(now());
     const u = await usage(person.chainId, day, person.account, request.ip);
+    const me = await personAgentOf(db, person.account, person.chainId);
     return {
       available: Boolean(chain?.testnet && deps.send),
+      /** A held or blocked account cannot claim (docs/26 F14). */
+      standing: me ? await standingOf(db, me.id) : 'clear',
       testnet: Boolean(chain?.testnet),
       amount: config.amount.toString(),
       claimedToday: u.mine > 0,
@@ -91,6 +97,10 @@ export async function registerFaucetRoutes(app: FastifyInstance, deps: FaucetRou
     }
     if (!deps.send)
       throw new PactoraError(ErrorCode.UPSTREAM_UNAVAILABLE, 'no faucet is configured on this server');
+    // Standing gates the faucet like every other hand-out (docs/26 F14): a
+    // held or blocked person is not given tokens to try again with.
+    const me = await personAgentOf(db, person.account, person.chainId);
+    if (me) await requireClear(db, me.id, 'claim from the faucet');
     const day = utcDay(now());
     const ip = request.ip;
 

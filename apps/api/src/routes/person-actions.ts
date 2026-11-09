@@ -7,12 +7,20 @@ import {ErrorCode, JobResult, type JobSpec, PactoraError, canonicalize, validate
 import type {ChainConfig} from '@pactora/config';
 import {authenticatePerson} from '../auth.js';
 import {personAgentOf, type AgentRow} from '../actor.js';
-import {requireClear} from '../compliance.js';
+import {requireClear, requireWorkerPayable} from '../compliance.js';
 import type {TxEventsReader, JobTxEvent, JobTxEventName} from '../chain-reads.js';
 import type {EventBus} from '../events.js';
 import {contractCall} from '../submit.js';
 import {acceptedDraftOf, draftDeliveryOf, settleAcceptedDraft, type SettleOutcome} from '../evidence.js';
-import {DisputeBody, isPublicId, recordEvent, refuseMismatched, type JobRouteDeps} from './jobs.js';
+import {
+  DeclineBody,
+  DisputeBody,
+  declineJob,
+  isPublicId,
+  recordEvent,
+  refuseMismatched,
+  type JobRouteDeps,
+} from './jobs.js';
 
 /**
  * People act on jobs by signing in their own wallet (docs/26 "prepare →
@@ -33,7 +41,15 @@ import {DisputeBody, isPublicId, recordEvent, refuseMismatched, type JobRouteDep
  * and agrees, whichever writes first.
  */
 
-export const PERSON_ACTIONS = ['create', 'accept', 'submit', 'approve', 'dispute', 'cancel'] as const;
+export const PERSON_ACTIONS = [
+  'create',
+  'accept',
+  'submit',
+  'approve',
+  'dispute',
+  'cancel',
+  'decline',
+] as const;
 export type PersonAction = (typeof PERSON_ACTIONS)[number];
 
 /** What `prepare` takes: the action and, for a delivery or a dispute, its words. */
@@ -46,6 +62,8 @@ export const PrepareBody = z.discriminatedUnion('action', [
   z.object({action: z.literal('approve')}),
   DisputeBody.extend({action: z.literal('dispute')}),
   z.object({action: z.literal('cancel')}),
+  // Off chain: no FunctionCall comes back, the decline is recorded at once.
+  DeclineBody.extend({action: z.literal('decline')}),
 ]);
 
 export const ConfirmBody = z.object({
@@ -65,10 +83,14 @@ export interface FunctionCallPayload {
   deposit: string;
 }
 
-/** Per action: the party who signs, the states it starts from, where it ends, and the event that proves it. */
+/**
+ * Per action: the party who signs, the states it starts from, where it ends,
+ * and the event that proves it. `event: null` is an off-chain action: nothing
+ * is signed, so there is nothing to confirm.
+ */
 const RULES: Record<
   PersonAction,
-  {party: 'client' | 'worker'; from: string[]; to: string; event: JobTxEventName; kind: string}
+  {party: 'client' | 'worker'; from: string[]; to: string; event: JobTxEventName | null; kind: string}
 > = {
   create: {party: 'client', from: ['created'], to: 'created', event: 'job_created', kind: 'job.created'},
   accept: {party: 'worker', from: ['created'], to: 'accepted', event: 'job_accepted', kind: 'job.accepted'},
@@ -88,9 +110,10 @@ const RULES: Record<
     kind: 'job.disputed',
   },
   cancel: {party: 'client', from: ['created'], to: 'refunded', event: 'job_refunded', kind: 'job.refunded'},
+  decline: {party: 'worker', from: ['created'], to: 'created', event: null, kind: 'job.declined'},
 };
 
-const KIND: Record<PersonAction, Parameters<typeof contractCall>[0]> = {
+const KIND: Record<Exclude<PersonAction, 'decline'>, Parameters<typeof contractCall>[0]> = {
   create: 'createJob',
   accept: 'accept',
   submit: 'submitResult',
@@ -123,7 +146,7 @@ async function functionCall(
   db: Db,
   chain: ChainConfig,
   job: Job,
-  action: PersonAction,
+  action: Exclude<PersonAction, 'decline'>,
   hashes: {resultHash?: string; reasonHash?: string; reviewHash?: string},
 ): Promise<FunctionCallPayload> {
   const payload: Record<string, unknown> = {...hashes};
@@ -211,6 +234,17 @@ export async function registerPersonActionRoutes(
     checkParty(job, person, action);
     if (action === 'accept') await requireClear(db, person.id, 'accept work');
     if (action === 'create') await requireClear(db, person.id, 'fund work');
+    // The worker's standing gates the payout (docs/26 F14), not the client's.
+    if (action === 'approve') await requireWorkerPayable(db, job.workerAgentId);
+
+    // A decline is off chain: recorded now, nothing to sign (the same as the
+    // agent route; declineJob answers a replay with the first decline).
+    if (body.action === 'decline') {
+      const declined = await declineJob(db, bus, job, body.reason);
+      return {jobId: job.publicId, action, offChain: true, declined};
+    }
+    // Narrowed: every action from here on signs something.
+    const signed = action as Exclude<PersonAction, 'decline'>;
 
     const rule = RULES[action];
     if (!rule.from.includes(job.state)) {
@@ -276,7 +310,7 @@ export async function registerPersonActionRoutes(
       words['reasonHash'] = hashes.reasonHash;
     }
 
-    const call = await functionCall(db, chain, job, action, hashes);
+    const call = await functionCall(db, chain, job, signed, hashes);
     await db.insert(personActions).values({jobId: job.id, agentId: person.id, action, call, payload: words});
     return {
       jobId: job.publicId,
@@ -293,6 +327,9 @@ export async function registerPersonActionRoutes(
     const body = ConfirmBody.parse(request.body);
     const {action, txHash} = body;
     checkParty(job, person, action);
+    if (action === 'decline') {
+      throw new PactoraError(ErrorCode.INVALID_STATE, 'a decline is off chain: nothing to confirm');
+    }
 
     const answer = (
       state: string,

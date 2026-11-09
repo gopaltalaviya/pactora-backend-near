@@ -51,6 +51,8 @@ const Env = z
     SSE_MAX_STREAMS_PER_CLIENT: env.positiveInt(20),
     /** Runs one orchestrator may start per rolling 24 h. 0 = no cap. Hosted: 30. */
     RUNS_PER_DAY: z.coerce.number().int().min(0).default(0),
+    /** Agents one owner account may register per chain (docs/26 F25). */
+    MAX_AGENTS_PER_OWNER: env.positiveInt(100),
     METRICS_TOKEN: z.string().optional(),
     LOG_LEVEL: env.logLevel(),
     DB_POOL_MAX: env.positiveInt(5),
@@ -301,6 +303,7 @@ const app = await buildApp({
   maxStreams: cfg.SSE_MAX_STREAMS,
   maxStreamsPerClient: cfg.SSE_MAX_STREAMS_PER_CLIENT,
   runsPerDay: cfg.RUNS_PER_DAY,
+  maxAgentsPerOwner: cfg.MAX_AGENTS_PER_OWNER,
   requirePublicHttpsEndpoints: cfg.NODE_ENV === 'production',
   ...(runExecutor ? {runExecutor} : {}),
   submit: makeSignerSubmit({

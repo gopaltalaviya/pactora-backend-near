@@ -17,6 +17,7 @@ import {BaseUnits, ChainId, ErrorCode, PactoraError, canonicalize, type JobSpec}
 import type {ChainConfig} from '@pactora/config';
 import {actorOf, optionalActorOf, type Actor, type AgentRow} from '../actor.js';
 import {applicantSummary, recordAgentEvent} from '../agent-events.js';
+import {notifyApplicants, reviveSetAsideBids} from '../listing-slots.js';
 import {requireClear} from '../compliance.js';
 import type {BudgetReader} from '../chain-reads.js';
 import {Cursor, page} from '../cursor.js';
@@ -999,32 +1000,6 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
   }
 
   /**
-   * One feed event per applicant about their bid: set aside by a close or a
-   * fill, revived by a reopen, dropped by a cancel. The dedupe suffix tells
-   * one close from a later one; the application id alone would let a listing
-   * closed, reopened and closed again notify its bidders once.
-   */
-  async function notifyApplicants(
-    tx: Pick<Db, 'execute'>,
-    listing: Pick<Listing, 'id' | 'publicId'>,
-    rows: {publicId: string; applicantAgentId: number}[],
-    kind: 'listing.closed' | 'listing.reopened' | 'listing.cancelled' | 'listing.expired',
-    dedupeSuffix: string,
-    extra: Record<string, unknown> = {},
-  ) {
-    for (const r of rows) {
-      await recordAgentEvent(tx, {
-        agentId: r.applicantAgentId,
-        role: 'applicant',
-        kind,
-        payload: {listingId: listing.publicId, applicationId: r.publicId, ...extra},
-        listingId: listing.id,
-        dedupeKey: `${kind}:${r.publicId}${dedupeSuffix}`,
-      });
-    }
-  }
-
-  /**
    * The job for a selected application: an agent client's through `hire()`
    * (the signer sends create_job at the bid price); a person client's row is
    * written and the create_job call handed back to sign. Idempotent on the
@@ -1360,28 +1335,6 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
     });
     return view((await db.query.listings.findFirst({where: eq(listings.id, listing.id)}))!);
   });
-}
-
-/**
- * Put back exactly the bids a close or a fill set aside — by the flag, never
- * by the reason text — skipping an applicant who has made a live bid since.
- * Answers the revived rows, so their applicants can be told.
- */
-export async function reviveSetAsideBids(
-  tx: Pick<Db, 'execute'>,
-  listingId: number,
-): Promise<{publicId: string; applicantAgentId: number}[]> {
-  const rows = (await tx.execute(sql`
-    UPDATE applications a SET status = 'pending', reopenable = false, reason = NULL, decided_at = NULL
-     WHERE a.listing_id = ${listingId} AND a.reopenable AND a.status = 'rejected'
-       AND NOT EXISTS (SELECT 1 FROM applications b
-                        WHERE b.listing_id = a.listing_id AND b.applicant_agent_id = a.applicant_agent_id
-                          AND b.status IN ('pending', 'selected'))
-       AND a.id = (SELECT max(c.id) FROM applications c
-                    WHERE c.listing_id = a.listing_id AND c.applicant_agent_id = a.applicant_agent_id AND c.reopenable)
-     RETURNING a.public_id, a.applicant_agent_id
-  `)) as unknown as {public_id: string; applicant_agent_id: string | number}[];
-  return rows.map((r) => ({publicId: r.public_id, applicantAgentId: Number(r.applicant_agent_id)}));
 }
 
 /**
