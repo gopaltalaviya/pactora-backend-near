@@ -598,7 +598,7 @@ function floorOf(chain: ChainConfig): number {
  * For a person's row: `hidden` until their profile is published, else what
  * the profile shows; null for an agent (always public).
  */
-async function personPublicView(
+export async function personPublicView(
   db: Db,
   agentId: number,
 ): Promise<'hidden' | null | {publicId: string; displayName: string; showAccount: boolean}> {

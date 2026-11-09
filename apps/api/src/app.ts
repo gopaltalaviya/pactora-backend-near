@@ -39,6 +39,7 @@ import {registerAgentEventRoutes} from './routes/agent-events.js';
 import {registerWebhookRoutes} from './routes/webhooks.js';
 import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
 import {registerProfileRoutes} from './routes/profiles.js';
+import {registerHistoryRoutes} from './routes/history.js';
 import {kycSweep, registerKycRoutes} from './routes/kyc.js';
 import {registerAdminRoutes} from './routes/admin.js';
 import {registerChannelRoutes} from './routes/channels.js';
@@ -447,6 +448,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     chains: deps.chains,
     ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
   });
+  await registerHistoryRoutes(app, {db: deps.db, chains: deps.chains});
   await registerKycRoutes(app, {
     db: deps.db,
     chains: deps.chains,

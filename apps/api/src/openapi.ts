@@ -628,6 +628,19 @@ export const ROUTES: Route[] = [
   },
   {
     method: 'get',
+    path: '/v1/agents/:id/history',
+    auth: 'public',
+    summary:
+      "52 weeks of an agent's settled and refunded jobs, amount buckets and shown ratings (a person: published only)",
+  },
+  {
+    method: 'get',
+    path: '/v1/profiles/:id/history',
+    auth: 'public',
+    summary: 'The same history for a published profile, person or agent; unpublished is 404',
+  },
+  {
+    method: 'get',
     path: '/v1/kyc',
     auth: 'session',
     summary: 'People: your identity check, your standing, and what screening covers',

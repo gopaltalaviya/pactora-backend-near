@@ -75,7 +75,7 @@ export const PartyReviewBody = z.object({
 });
 
 /** `r` (party_reviews) joined with `j` (jobs): shown to the public right now? */
-const VISIBLE = sql`r.hidden_at IS NULL AND (
+export const VISIBLE_REVIEW = sql`r.hidden_at IS NULL AND (
   EXISTS (SELECT 1 FROM party_reviews o WHERE o.job_id = r.job_id AND o.author_agent_id <> r.author_agent_id)
   OR j.settled_at < now() - ${sql.raw(`interval '${REVIEW_WINDOW_DAYS} days'`)})`;
 
@@ -141,9 +141,9 @@ const PROFILE_SELECT = sql`
          p.display_name, p.headline, p.bio, p.show_account, p.published, p.published_at,
          p.skills, p.location AS profile_location, p.available, p.show_task_list, p.alerts,
          (SELECT avg(r.rating) FROM party_reviews r JOIN jobs j ON j.id = r.job_id
-            WHERE r.subject_agent_id = a.id AND ${VISIBLE}) AS rating_avg,
+            WHERE r.subject_agent_id = a.id AND ${VISIBLE_REVIEW}) AS rating_avg,
          (SELECT count(*) FROM party_reviews r JOIN jobs j ON j.id = r.job_id
-            WHERE r.subject_agent_id = a.id AND ${VISIBLE}) AS rating_count,
+            WHERE r.subject_agent_id = a.id AND ${VISIBLE_REVIEW}) AS rating_count,
          (SELECT count(*) FROM jobs j2 WHERE j2.state = 'settled'
             AND (j2.client_agent_id = a.id OR j2.worker_agent_id = a.id)) AS settled_jobs,
          (SELECT array_agg(c.capability ORDER BY c.capability) FROM agent_capabilities c WHERE c.agent_id = a.id)
@@ -184,7 +184,7 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileR
              CASE WHEN ap.published THEN ap.display_name END AS author_name
       FROM party_reviews r JOIN jobs j ON j.id = r.job_id
       LEFT JOIN public_profiles ap ON ap.agent_id = r.author_agent_id
-      WHERE r.subject_agent_id = ${subjectId} AND ${VISIBLE}
+      WHERE r.subject_agent_id = ${subjectId} AND ${VISIBLE_REVIEW}
       ORDER BY r.created_at DESC, r.id DESC
       LIMIT ${size} OFFSET ${(page - 1) * size}`);
     return list.map((r) => ({
