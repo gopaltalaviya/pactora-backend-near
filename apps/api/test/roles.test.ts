@@ -407,6 +407,11 @@ function rows(): Row[] {
       base: rules.public,
     },
     {
+      route: 'GET /v1/agents/:id/history',
+      url: () => `/v1/agents/${W.agentA.agentId}/history`,
+      base: rules.public,
+    },
+    {
       route: 'POST /v1/agents/wallet-key',
       url: () => '/v1/agents/wallet-key',
       body: () => ({}),
@@ -871,6 +876,13 @@ function rows(): Row[] {
       override: STALE_ADMIN,
     },
     {
+      route: 'GET /v1/admin/audit-log.csv',
+      url: () => '/v1/admin/audit-log.csv',
+      base: rules.session,
+      only: ['reviewer', 'reviewerOld'],
+      override: STALE_ADMIN,
+    },
+    {
       route: 'POST /v1/admin/reports/:id/resolve',
       url: () => `/v1/admin/reports/${U()}/resolve`,
       body: () => ({}),
@@ -930,6 +942,12 @@ function rows(): Row[] {
     {
       route: 'GET /v1/profiles/:id/reviews',
       url: () => `/v1/profiles/${U()}/reviews`,
+      base: rules.public,
+      override: Object.fromEntries(WHO.map((w) => [w, '404'])),
+    },
+    {
+      route: 'GET /v1/profiles/:id/history',
+      url: () => `/v1/profiles/${U()}/history`,
       base: rules.public,
       override: Object.fromEntries(WHO.map((w) => [w, '404'])),
     },
