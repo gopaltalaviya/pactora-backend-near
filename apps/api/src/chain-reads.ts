@@ -251,6 +251,14 @@ export type TxEventsReader = (args: {
   signerId: string;
 }) => Promise<TxEventsReading>;
 
+/** nearcore's and near-api-js's ways of saying "I do not know this transaction". */
+function isUnknownTx(err: unknown): boolean {
+  const text = `${(err as {name?: string}).name ?? ''} ${(err as {type?: string}).type ?? ''} ${(err as Error).message ?? ''}`;
+  return /UNKNOWN_TRANSACTION|UnknownTransaction|RpcRequestParseError|TransactionInfo|does not exist|doesn't exist|parse/i.test(
+    text,
+  );
+}
+
 /**
  * Real reader.
  *
@@ -262,7 +270,17 @@ export type TxEventsReader = (args: {
 export function makeTxEventsReader(config: PactoraConfig, clientFor = clients(config)): TxEventsReader {
   return async ({chainId, txHash, signerId}) => {
     const pactora = config.chain(chainId).contracts.Pactora;
-    const out = await clientFor(chainId).txOutcome(txHash, signerId);
+    let out: Awaited<ReturnType<NearClient['txOutcome']>>;
+    try {
+      out = await clientFor(chainId).txOutcome(txHash, signerId);
+    } catch (err) {
+      // A hash the node has never seen can come back as a parse error of the
+      // RPC's answer (RpcRequestParseError on the TransactionInfo variant)
+      // rather than UNKNOWN_TRANSACTION. Either way the node does not know
+      // it yet: pending, which the route answers 409 with retryAfter.
+      if (isUnknownTx(err)) return {status: 'pending'};
+      throw err;
+    }
     if (out.status === 'pending') return {status: 'pending'};
     if (out.status === 'failure') return {status: 'reverted'};
     const events: JobTxEvent[] = [];

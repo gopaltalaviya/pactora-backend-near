@@ -63,11 +63,14 @@ export const RegisterBody = z.object({
   signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, 'signature is base64'),
 });
 
-export const UpdateAgentBody = z.object({
-  pricePerTask: BaseUnits.optional(),
-  active: z.boolean().optional(),
-  description: z.string().max(1000).optional(),
-});
+export const UpdateAgentBody = z
+  .object({
+    pricePerTask: BaseUnits.optional(),
+    active: z.boolean().optional(),
+    description: z.string().max(1000).optional(),
+  })
+  // An empty patch used to reach drizzle as an empty SET and answer 500.
+  .refine((p) => Object.keys(p).length > 0, 'nothing to change: give pricePerTask, active or description');
 
 export const DiscoverQuery = z.object({
   capability: Capability.optional(),

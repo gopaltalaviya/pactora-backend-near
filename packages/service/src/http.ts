@@ -16,8 +16,16 @@ export function serviceOptions(
   opts: {trustProxy?: boolean | number; bodyLimit?: number} = {},
 ): FastifyServerOptions {
   return {
-    requestIdHeader: 'x-request-id',
-    genReqId: () => randomUUID(),
+    // An incoming x-request-id is honoured only when it is a plain token
+    // (≤ 64 of [A-Za-z0-9_-]); anything else is replaced. It was echoed into
+    // x-trace-id and every problem body unbounded (live probe: 5 KB of
+    // markup came straight back).
+    requestIdHeader: false,
+    genReqId: (req) => {
+      const given = req.headers['x-request-id'];
+      const one = Array.isArray(given) ? given[0] : given;
+      return one && /^[A-Za-z0-9_-]{1,64}$/.test(one) ? one : randomUUID();
+    },
     // Behind Railway's proxy `req.ip` is the proxy unless this is set — which
     // makes an IP rate limit one bucket shared by every client. A number
     // trusts that many hops and no more, so a client's own X-Forwarded-For

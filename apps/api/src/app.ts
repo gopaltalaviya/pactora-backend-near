@@ -13,7 +13,8 @@ import rateLimit from '@fastify/rate-limit';
 import {postgresRateLimitStore} from './rate-store.js';
 import type {ChainConfig} from '@pactora/config';
 import type {Db} from '@pactora/db';
-import {registerErrorHandler} from './errors.js';
+import {hasNul, registerErrorHandler} from './errors.js';
+import {ErrorCode, PactoraError} from '@pactora/shared';
 import {openApiDocument} from './openapi.js';
 import {EventBus} from './events.js';
 import {listenForEvents} from './live.js';
@@ -246,7 +247,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     allowList: (req) => PROBE_PATHS.has(req.url.split('?')[0] ?? ''),
   });
 
-  registerErrorHandler(app);
+  registerErrorHandler(app, {notFoundPreHandler: app.rateLimit()});
+
+  // A NUL byte in any text field is refused before a handler sees it: no
+  // Postgres text column can hold one, and the 500 it caused leaked nothing
+  // but told the caller nothing either (live probe).
+  app.addHook('preValidation', async (request) => {
+    if (hasNul(request.body) || hasNul(request.query)) {
+      throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, 'text fields may not contain a NUL byte (\\u0000)');
+    }
+  });
 
   // Security headers. This is a JSON API, so the content policy is "nothing":
   // no script, no frame, no inline anything — a response rendered as a page

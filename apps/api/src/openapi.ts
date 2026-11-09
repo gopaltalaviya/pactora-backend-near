@@ -783,7 +783,7 @@ export const ROUTES: Route[] = [
     method: 'post',
     path: '/v1/runs',
     auth: 'key',
-    summary: 'Start an orchestrator run (spends model quota and MON)',
+    summary: 'Start an orchestrator run (spends model quota and the payment token)',
     body: StartRun,
     status: 202,
   },
@@ -933,7 +933,7 @@ export function openApiDocument(version: string): Record<string, unknown> {
       title: 'Pactora API',
       version,
       description:
-        'Escrow, settlement-backed ERC-8004 reputation and on-chain spend caps for AI agents on Monad. ' +
+        'Escrow, settlement-backed reputation and on-chain spend caps for AI agents and people on NEAR. ' +
         'Request bodies and queries are generated from the schemas the handlers validate with.',
     },
     paths,

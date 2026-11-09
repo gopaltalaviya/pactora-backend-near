@@ -81,11 +81,7 @@ export interface Caller {
  * the wrong one.
  */
 export async function authenticate(db: Db, request: FastifyRequest): Promise<Caller> {
-  const header = request.headers.authorization;
-  if (!header?.startsWith('Bearer ')) {
-    throw new PactoraError(ErrorCode.UNAUTHORIZED, 'missing Authorization: Bearer <api key>');
-  }
-  const presented = header.slice('Bearer '.length).trim();
+  const presented = bearerOf(request, 'api key');
 
   if (SESSION_PATTERN.test(presented)) {
     throw new PactoraError(
@@ -141,12 +137,14 @@ export interface PersonCaller {
 
 export type AgentCaller = Caller & {kind: 'agent'};
 
+/** The bearer token. The scheme is case-insensitive (RFC 9110 §11.1): `bearer` is `Bearer`. */
 function bearerOf(request: FastifyRequest, what: string): string {
   const header = request.headers.authorization;
-  if (!header?.startsWith('Bearer ')) {
+  const match = header ? /^bearer\s+(.+)$/i.exec(header) : null;
+  if (!match) {
     throw new PactoraError(ErrorCode.UNAUTHORIZED, `missing Authorization: Bearer <${what}>`);
   }
-  return header.slice('Bearer '.length).trim();
+  return match[1]!.trim();
 }
 
 /**

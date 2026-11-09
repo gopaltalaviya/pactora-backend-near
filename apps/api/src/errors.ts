@@ -1,4 +1,4 @@
-import type {FastifyInstance, FastifyReply, FastifyRequest} from 'fastify';
+import type {FastifyInstance, FastifyReply, FastifyRequest, RouteShorthandOptions} from 'fastify';
 import {ZodError} from 'zod';
 import {PactoraError, ErrorCode, ERROR_STATUS} from '@pactora/shared';
 
@@ -9,7 +9,12 @@ import {PactoraError, ErrorCode, ERROR_STATUS} from '@pactora/shared';
  * is for the logs; a stable machine code is what lets an orchestrator decide
  * between "try another candidate" and "stop, the budget is gone".
  */
-export function registerErrorHandler(app: FastifyInstance): void {
+export interface ErrorHandlerOptions {
+  /** Runs before the 404 answer — the rate limiter, so unmatched routes are limited like every other. */
+  notFoundPreHandler?: RouteShorthandOptions['preHandler'];
+}
+
+export function registerErrorHandler(app: FastifyInstance, opts: ErrorHandlerOptions = {}): void {
   app.setErrorHandler((error: unknown, request: FastifyRequest, reply: FastifyReply) => {
     const err = error as Error & {validation?: unknown; statusCode?: number};
     const traceId = request.id;
@@ -90,6 +95,20 @@ export function registerErrorHandler(app: FastifyInstance): void {
       });
     }
 
+    // Postgres 22021 (a NUL byte in text) and 22P05 (a \u0000 escape in
+    // JSON): the caller sent bytes a text column cannot hold. A request
+    // fault, said as one; the API's own NUL check (app.ts) catches it first.
+    if (pg.code === '22021' || pg.code === '22P05') {
+      return reply.status(422).type('application/problem+json').send({
+        type: 'https://pactoragents.com/errors/schema-mismatch',
+        title: 'Request failed validation',
+        status: 422,
+        code: ErrorCode.SCHEMA_MISMATCH,
+        detail: 'text fields may not contain a NUL byte (\\u0000)',
+        traceId,
+      });
+    }
+
     // The database (or another dependency) is unreachable. Not our bug and
     // not the caller's: 503 + retry-after, so clients back off and retry
     // instead of reading a 500 as "broken, give up". The driver's message
@@ -127,7 +146,11 @@ export function registerErrorHandler(app: FastifyInstance): void {
     // 500 and hunted for in the signer and on chain for a day.
     const status = (err as {statusCode?: number}).statusCode;
     if (typeof status === 'number' && status >= 400 && status < 500) {
-      request.log.warn({err, traceId}, 'client error');
+      // The caller's fault: a line at info with the code, never a stack.
+      request.log.info(
+        {traceId, status, code: (err as {code?: string}).code ?? 'BAD_REQUEST'},
+        'client error',
+      );
       return reply
         .status(status)
         .type('application/problem+json')
@@ -143,7 +166,10 @@ export function registerErrorHandler(app: FastifyInstance): void {
         });
     }
 
-    request.log.error({err, traceId}, 'unhandled error');
+    // Logged without the statement's parameters: drizzle's DrizzleQueryError
+    // carries `query` and `params`, and params are the caller's data (names,
+    // messages). The code and constraint are what debugging needs.
+    request.log.error({err: scrubDbError(err), traceId}, 'unhandled error');
     // Never leak an internal message to a caller; the traceId is how support
     // connects this response to the log line that has the detail.
     return reply.status(500).type('application/problem+json').send({
@@ -155,19 +181,57 @@ export function registerErrorHandler(app: FastifyInstance): void {
     });
   });
 
-  app.setNotFoundHandler((request, reply) =>
-    reply
-      .status(404)
-      .type('application/problem+json')
-      .send({
-        type: 'https://pactoragents.com/errors/not-found',
-        title: 'Not found',
-        status: 404,
-        code: 'NOT_FOUND',
-        detail: `${request.method} ${request.url}`,
-        traceId: request.id,
-      }),
+  // Unmatched routes go through the rate limiter too (live probe): without
+  // it `GET /v1/nope` was free, so a flood of them cost nothing.
+  app.setNotFoundHandler(
+    opts.notFoundPreHandler ? {preHandler: opts.notFoundPreHandler} : {},
+    (request: FastifyRequest, reply: FastifyReply) =>
+      reply
+        .status(404)
+        .type('application/problem+json')
+        .send({
+          type: 'https://pactoragents.com/errors/not-found',
+          title: 'Not found',
+          status: 404,
+          code: 'NOT_FOUND',
+          detail: `${request.method} ${request.url}`,
+          traceId: request.id,
+        }),
   );
+}
+
+/** The error without the statement's parameters (the caller's data), keeping what identifies it. */
+export function scrubDbError(err: unknown): unknown {
+  if (!(err instanceof Error)) return err;
+  const e = err as Error & {query?: unknown; params?: unknown; parameters?: unknown; cause?: unknown};
+  if (e.query === undefined && e.params === undefined && e.parameters === undefined && e.cause === undefined)
+    return err;
+  const cause = e.cause as
+    {code?: string; constraint_name?: string; constraint?: string; message?: string} | undefined;
+  return {
+    name: e.name,
+    message: e.message.split('\n')[0],
+    stack: e.stack?.split('\n').slice(0, 6).join('\n'),
+    ...(cause && typeof cause === 'object'
+      ? {
+          cause: {
+            code: cause.code,
+            constraint: cause.constraint_name ?? cause.constraint,
+            message: cause.message,
+          },
+        }
+      : {}),
+  };
+}
+
+/** Any string in the body or query that carries a NUL byte, which no text column can hold. */
+export function hasNul(value: unknown, depth = 0): boolean {
+  if (depth > 12) return false;
+  if (typeof value === 'string') return value.includes('\u0000');
+  if (Array.isArray(value)) return value.some((v) => hasNul(v, depth + 1));
+  if (value && typeof value === 'object')
+    return Object.values(value as Record<string, unknown>).some((v) => hasNul(v, depth + 1));
+  return false;
 }
 
 const TITLES: Record<string, string> = {
