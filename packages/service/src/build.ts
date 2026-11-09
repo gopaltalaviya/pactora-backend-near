@@ -7,7 +7,7 @@ import {readFileSync} from 'node:fs';
  * "Which code is live?" had no answer short of reading Railway's dashboard.
  * The image now records it at build time (`/app/build-info.json`, written by
  * the Dockerfile from `GIT_SHA`, which defaults to Railway's
- * `RAILWAY_GIT_COMMIT_SHA`), and every service reports it on `/health`.
+ * `GIT_COMMIT_SHA`), and every service reports it on `/health`.
  *
  * Every field is safe to publish: a commit of a public repository, a version
  * number and a timestamp. Anything that does not look like one is reported as
@@ -47,7 +47,7 @@ export function buildInfo(opts: {
   const pkg = opts.packageJsonUrl ? read(opts.packageJsonUrl) : {};
   const baked = opts.packageJsonUrl ? read(new URL('build-info.json', opts.packageJsonUrl)) : {};
 
-  const commit = [baked['commit'], env['GIT_SHA'], env['RAILWAY_GIT_COMMIT_SHA']].find(
+  const commit = [baked['commit'], env['GIT_SHA'], env['GIT_COMMIT_SHA']].find(
     (c): c is string => typeof c === 'string' && SHA.test(c),
   );
   const builtAt = [baked['builtAt'], env['BUILD_TIME']].find(

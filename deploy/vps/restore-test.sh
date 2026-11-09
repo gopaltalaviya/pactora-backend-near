@@ -5,17 +5,17 @@
 # the tables that cannot be rebuilt from the chain, unpacks the newest
 # evidence archive and counts its objects, then drops the scratch database.
 # Exits non-zero on any mismatch. Installed by cron (see README.md):
-#   0 4 1 * * /root/agentx/restore-test.sh >> /root/agentx/backups/restore-test.log 2>&1
+#   0 4 1 * * /root/pactora/restore-test.sh >> /root/pactora/backups/restore-test.log 2>&1
 #
 # Reads the same BACKUP_DIR, BACKUP_PASSFILE, PG_CONTAINER, PG_USER and PG_DB
 # as backup.sh. Never touches the live database's data: it reads its schema.
 set -euo pipefail
 
-DIR="${BACKUP_DIR:-$HOME/agentx/backups}"
+DIR="${BACKUP_DIR:-$HOME/pactora/backups}"
 PASSFILE="${BACKUP_PASSFILE:-$HOME/.pactora-backup-pass}"
-PG_CONTAINER="${PG_CONTAINER:-agentx-full-postgres-1}"
-PG_USER="${PG_USER:-agentx}"
-PG_DB="${PG_DB:-agentx}"
+PG_CONTAINER="${PG_CONTAINER:-pactora-full-postgres-1}"
+PG_USER="${PG_USER:-pactora}"
+PG_DB="${PG_DB:-pactora}"
 SCRATCH="restore_test_$(date -u +%Y%m%d%H%M%S)"
 
 # decrypt, and verify_hmac (audit I1): backup-lib.sh.

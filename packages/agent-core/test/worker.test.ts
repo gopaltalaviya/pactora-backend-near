@@ -628,13 +628,17 @@ describe('telling the client', () => {
 
 /**
  * Which refusals are allowed is policy, enforced in code — like the spending
- * caps. Live, a model declined "research ETH/USDC on Monad" three times over
- * because Monad postdates its training; no prompt wording stopped it.
+ * caps. Live, a model declined "research NEAR Intents liquidity" three times
+ * over because the product postdates its training; no prompt wording stopped it.
  */
 describe('the decline policy', () => {
   it('accepts anyway when the model declines over missing knowledge', async () => {
     const brain = new FakeBrain({
-      triage: {accept: false, reason: 'Monad is newer than my knowledge', blocker: 'missing_knowledge'},
+      triage: {
+        accept: false,
+        reason: 'NEAR Intents is newer than my knowledge',
+        blocker: 'missing_knowledge',
+      },
     });
     const {worker, calls} = build([offer()], brain);
     const [outcome] = await worker.tick();

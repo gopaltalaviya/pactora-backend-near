@@ -889,7 +889,7 @@ export class PactoraClient {
    * it is refused before anything is paid.
    *
    * `scheme` picks how to pay when the server offers more than one. v3's
-   * `agentx-escrow` is refundable: if the worker answers 502 (it could not
+   * `pactora-escrow` is refundable: if the worker answers 502 (it could not
    * deliver), the job is cancelled and the money comes back — `refunded` says
    * so. A preferred scheme the server does not offer falls back to the other.
    */

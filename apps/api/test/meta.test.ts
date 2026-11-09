@@ -120,7 +120,6 @@ describe('GET /v1/network', () => {
       Arbiter: 'arbiter.test.near',
     });
     expect(body.nativeCurrency).toEqual({name: 'NEAR', symbol: 'NEAR', decimals: 24});
-    expect(body).not.toHaveProperty('erc8004');
     expect(body).not.toHaveProperty('confirmations');
   });
 

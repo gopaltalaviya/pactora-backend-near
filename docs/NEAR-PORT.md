@@ -1,8 +1,9 @@
-# The NEAR port — wire contract
+# Wire contract: the backend and the NEAR contract
 
-What changes when the backend, SDK, MCP server and interface move from Monad
-(EVM) to NEAR. This is the agreement every package is built against. If code
-and this file disagree, one of them is a bug.
+How the backend, SDK, MCP server and interface talk to Pactora on NEAR:
+network keys, identifiers, chain facts, sign-in, the signer API and events.
+This is the agreement every package is built against. If code and this file
+disagree, one of them is a bug.
 
 The contract itself is `../pactora-contracts-near/contracts/pactora` (one
 contract: registry, escrow, bonds, caps, reputation). Its method names and
@@ -10,37 +11,37 @@ JSON argument names are quoted here exactly.
 
 ## 1. Network key: CAIP-2 strings
 
-| Before | After |
+| What | Form |
 |---|---|
-| `chainId: number` (`10143`, `31337`) | `chainId: string` — `"near:testnet"`, `"near:sandbox"` (local), later `"near:mainnet"` |
-| `ENABLED_CHAIN_IDS=10143` | `ENABLED_CHAINS=near:testnet` |
-| `DEFAULT_CHAIN_ID` | `DEFAULT_CHAIN` |
-| `RPC_URL_<chainId>` | `RPC_URL_<SLUG>` — `RPC_URL_TESTNET`, `RPC_URL_SANDBOX` |
-| DB `chain_id bigint` | DB `chain_id text` (migration 0011) |
-| x402 `eip155:10143` | x402 `near:testnet` (the key itself) |
+| Network id (`chainId`) | a string: `"near:testnet"`, `"near:sandbox"` (local), later `"near:mainnet"` |
+| Enabled networks | `ENABLED_CHAINS=near:testnet` (comma list) |
+| Default network | `DEFAULT_CHAIN` |
+| RPC override | `RPC_URL_<SLUG>` — `RPC_URL_TESTNET`, `RPC_URL_SANDBOX` |
+| Database | `chain_id text` on every chain-derived table |
+| x402 `network` | the CAIP-2 id itself, `near:testnet` |
 
 The field keeps the name `chainId`: CAIP-2 calls this string a "chain ID".
 `near:<network>` is the form NEAR x402 code uses (`r402-near`); the
 ChainAgnostic registry has no NEAR profile yet, so this is a convention, not a
-registered standard. A service that still sees `ENABLED_CHAIN_IDS`,
-`DEFAULT_CHAIN_ID` or `RPC_URL_<digits>` refuses to start and names the
-replacement.
+registered standard. A service that sees a numeric-network variable
+(`ENABLED_CHAIN_IDS`, `DEFAULT_CHAIN_ID`, `RPC_URL_<digits>`) refuses to start
+and names the variable to use.
 
 Each network also has a **slug** (`testnet`, `sandbox`), used in file names
 because `:` is not allowed in Windows paths.
 
 ## 2. Identifiers
 
-| Thing | EVM | NEAR |
-|---|---|---|
-| Owner, wallet, token, contract | `0x` + 40 hex | NEAR account id, 2–64 chars, `^(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$` (nearcore's rule). Field names stay `ownerAddress` / `walletAddress` |
-| Agent id (`chainAgentId`) | ERC-8004 uint256 | contract `AgentId` = u64, decimal string |
-| Job id (`chainJobId`) | uint256 | contract `JobId` = u64, decimal string |
-| `specHash`, `resultHash`, `reasonHash`, `reviewHash` | keccak256, `0x`+64 hex | **sha256, 64 lowercase hex, no `0x`** (the contract's `check_hash` rejects anything else) |
-| Tx hash | `0x`+64 hex | base58 (32 bytes), 43–44 chars |
-| Token amounts | base units, decimal string | unchanged (mUSDC, 6 decimals) |
+| Thing | Form |
+|---|---|
+| Owner, wallet, token, contract | NEAR account id, 2–64 chars, `^(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$` (nearcore's rule). Field names are `ownerAddress` / `walletAddress` |
+| Agent id (`chainAgentId`) | contract `AgentId` = u64, decimal string |
+| Job id (`chainJobId`) | contract `JobId` = u64, decimal string |
+| `specHash`, `resultHash`, `reasonHash`, `reviewHash` | **sha256, 64 lowercase hex, no prefix** (the contract's `check_hash` rejects anything else) |
+| Tx hash | base58 (32 bytes), 43–44 chars |
+| Token amounts | base units, decimal string (mUSDC, 6 decimals) |
 
-Hash inputs are unchanged: `specHash = sha256(canonicalJson(spec) + ':' + publicId)`,
+Hash inputs: `specHash = sha256(canonicalJson(spec) + ':' + publicId)`,
 `reasonHash = sha256(canonicalize({reason}))`.
 
 ## 3. Chain facts (`chain/`, synced from the contracts repo)
@@ -71,12 +72,12 @@ A network entry:
 ```
 
 `nearNetworkId` is what RPC `status.chain_id` must answer; every service checks
-it at start, the way the EVM build checked `eth_chainId`. Finality is always
+it at start. Finality is always
 `final`, so there is no `confirmations` setting.
 
 ## 4. `GET /v1/network`
 
-Removed: `erc8004`, `confirmations`, `rpcUrls` overrides. Changed and added:
+The response:
 
 ```ts
 {
@@ -97,7 +98,7 @@ Explorer links: `${explorer}/txns/<hash>` and `${explorer}/address/<account>`.
 
 ## 5. Sign-in and registration (NEP-413)
 
-The owner proves control with a NEP-413 signed message, not EIP-191. Four
+The owner proves control with a NEP-413 signed message. Four
 steps, in this order, because the wallet's key must exist before the wallet
 account does, and the agent id exists only after `register_agent`:
 
@@ -184,15 +185,19 @@ Replay: the same `(agentId, idempotencyKey)` with the same
 `replayed: true`; a different call under the key is `IDEMPOTENCY_CONFLICT`. A
 call that failed on chain answers every retry of its key with the same error.
 
-Two more endpoints:
+More endpoints:
 - `POST /keys` `{walletAddress, chainId?}` → `{publicKey}`. It creates the key if missing and is idempotent.
 - `POST /keys/accept` `{chainId, walletAddress, chainAgentId}` (`chainAgentId` a decimal string) →
   `{txHash, alreadyAccepted}`. Registration step (d): `accept_wallet` for a wallet that has no agent
   row yet. `alreadyAccepted: true` and `txHash: ''` when `get_agent(chainAgentId).wallet` already is
   the wallet; nothing is sent.
+- `POST /faucet` `{receiverId, amount}` (`amount` a positive base-unit integer) → `{txHash, registered, from}`.
+  Testnet and sandbox only, and only when the signer has `FAUCET_ACCOUNT_ID`: sends the payment token from the
+  faucet's own account (registering the receiver with the token first when needed, `registered: true`), never
+  more than `FAUCET_MAX_PER_SEND`. The api's `POST /v1/faucet` is its only caller.
 - `GET /health` reports each signing account's NEAR balance in yocto (`wallets.wallets[].balanceYocto`).
 
-All three POSTs need `Authorization: Bearer <SIGNER_TOKEN>` when the signer has one. Refusals are RFC 7807
+All four POSTs need `Authorization: Bearer <SIGNER_TOKEN>` when the signer has one. Refusals are RFC 7807
 with `code`:
 
 | `code` (HTTP) | When |
@@ -229,17 +234,3 @@ The indexer reads `EVENT_JSON:` logs from receipts whose executor is the Pactora
 | `direct_paid` | `direct_paid` |
 
 The funding graph uses the token contract's `nep141` `ft_transfer` events, kept only when either side is a known wallet or owner. The cursor stores `{last_block, last_block_hash}`, meaning the height and hash of the last final block read.
-
-## 8. What is gone, and why
-
-| Removed | Reason |
-|---|---|
-| `renewer` (session-key renewal) | Function-call keys don't expire. The caps live in the contract. |
-| `accounts.ts` (bytecode classification) and EIP-7702 | NEAR has no code-at-address wallets. Wallet trust is `get_agent().wallet` plus the access key's scope. |
-| The EOA calldata allowlist | The signer only calls the allowed methods above, on `Pactora`. |
-| AgentAccount `execute` wrapping | The agent signs directly with its own scoped key. |
-| keccak / EIP-191 / ABIs | Replaced by sha256, NEP-413 and JSON arguments. |
-| AWS KMS `ECC_SECG_P256K1` | NEAR keys are ed25519. KMS signs them: `ECC_NIST_EDWARDS25519`, `ED25519_SHA_512`, `MessageType: RAW` (AWS KMS developer guide, key spec reference; checked 2026-11-05). `SIGNER_KMS_KEYS` maps wallet account → key id. |
-| The geth keystore (`SIGNER_KEYSTORE_JSON`) | Keys the signer generates (`POST /keys`) are stored encrypted in `signer_keys` under `SIGNER_KEY_PASSPHRASE`; testnet dev keys come as near-cli credential JSON (`SIGNER_DEV_CREDENTIALS`). |
-| `spend_policies` reservation in the signer | The contract's purse caps bound every wallet; the signer reads `purse_of` under the wallet lock after the previous call is FINAL. |
-| The EVM scripts (`verify-v3`, `verify-indexer`, `verify-farm`, `verify-funding-graph`, `verify-validation`, `verify-delegate`, `verify-audit`, `verify-pause`, `spike-7702`, `e2e`, `dispute-expiry`, `keeper-sweep`, `reindex`, `seed-hosted`, `slow-rpc`, `check-deployment`, `lib/agents`, `lib/chain`) and `viem` | Each spoke to Monad through viem and would fail on NEAR. Their live checks now live in `../pactora-contracts-near/scripts/verify-near.mjs` (every contract flow, the DAO arbiter) and `scripts/demo.mjs` (the whole stack, the farm detection and the attack). |

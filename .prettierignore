@@ -8,5 +8,5 @@ docs/
 artifacts/
 *.md
 
-# A byte-exact copy of agentx-contracts; scripts/sync-chain-facts.mjs is its only writer.
+# A byte-exact copy of pactora-contracts-near; scripts/sync-chain-facts.mjs is its only writer.
 chain/

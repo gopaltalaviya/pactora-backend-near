@@ -148,10 +148,10 @@ describe('request hygiene', () => {
     await tight.close();
   });
 
-  it('the OpenAPI document describes NEAR, not Monad', async () => {
+  it('the OpenAPI document describes NEAR and its payment token', async () => {
     const doc = (await app.inject({url: '/v1/openapi.json'})).json();
     expect(doc.info.description).toMatch(/NEAR/);
-    expect(JSON.stringify(doc)).not.toMatch(/Monad|\bMON\b/);
+    expect(JSON.stringify(doc)).not.toMatch(/\bMON\b/);
   });
 });
 

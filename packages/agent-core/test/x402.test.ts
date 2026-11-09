@@ -233,7 +233,7 @@ describe('the job loop, beside the paid endpoint', () => {
  * work is done BEFORE anything is committed on chain, so a failure never
  * becomes a seized bond for an honest worker.
  */
-describe('the escrow-backed scheme (agentx-escrow)', () => {
+describe('the escrow-backed scheme (pactora-escrow)', () => {
   const ESCROW_HEADER = encodePaymentHeader({
     x402Version: 1,
     scheme: 'pactora-escrow',

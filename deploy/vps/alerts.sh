@@ -2,7 +2,7 @@
 # Health alerts on the VPS (docs/26 F28). Checks what would otherwise fail
 # quietly and posts what is wrong to a chat webhook. Installed by cron (see
 # README.md), every 5 minutes:
-#   */5 * * * * /root/agentx/alerts.sh >> /root/agentx/backups/alerts.log 2>&1
+#   */5 * * * * /root/pactora/alerts.sh >> /root/pactora/backups/alerts.log 2>&1
 #
 #   1. readiness        GET /ready answers 200
 #   2. status           /v1/status is `operational`; names each component that is not up
@@ -30,10 +30,10 @@ DRY=0
 
 API_URL="${API_URL:-${API_HOST:+https://$API_HOST}}"
 API_URL="${API_URL:-http://127.0.0.1:8080}"
-PG_CONTAINER="${PG_CONTAINER:-agentx-full-postgres-1}"
-PG_USER="${PG_USER:-agentx}"
-PG_DB="${PG_DB:-agentx}"
-DIR="${BACKUP_DIR:-$HOME/agentx/backups}"
+PG_CONTAINER="${PG_CONTAINER:-pactora-full-postgres-1}"
+PG_USER="${PG_USER:-pactora}"
+PG_DB="${PG_DB:-pactora}"
+DIR="${BACKUP_DIR:-$HOME/pactora/backups}"
 PYTHON="${PYTHON:-python3}"
 STATE="${ALERT_STATE_FILE:-$DIR/.alerts-last}"
 INDEXER_STALE_S="${INDEXER_STALE_S:-600}"

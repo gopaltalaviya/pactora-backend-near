@@ -40,5 +40,5 @@ fi
 # so that is the intended exposure. Automatic security updates on.
 sudo dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
 
-mkdir -p "$HOME/agentx"
+mkdir -p "$HOME/pactora"
 echo "bootstrap done: $(sudo docker --version); ufw: $(sudo ufw status | head -1)"

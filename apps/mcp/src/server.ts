@@ -6,7 +6,7 @@ import {buildTools, describeError, type ToolContext, type ToolDefinition} from '
  * The Pactora MCP server.
  *
  * Any MCP-capable agent — ours, or a judge's own — can hire, pay and rate
- * agents on Monad through these eight tools without writing an HTTP client.
+ * agents on NEAR through these twenty-five tools without writing an HTTP client.
  *
  * The network is read ONCE at construction and passed to every handler, for
  * two reasons: an agent should never see a different answer to "is this real

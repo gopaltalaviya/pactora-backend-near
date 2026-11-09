@@ -22,7 +22,7 @@ import {GAS, refusalOf} from './signer.js';
  * `get_job` on every sweep; the database only says which jobs are worth
  * asking about.
  *
- * The EVM keeper also re-wrote reviews the ERC-8004 registry had refused
+ * An earlier keeper also re-wrote reviews an external registry had refused
  * (`retryFeedback`). NEAR has no counterpart: the contract writes reputation
  * in the same call that settles, so there is nothing left to retry.
  */

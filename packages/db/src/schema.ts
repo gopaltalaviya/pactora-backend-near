@@ -70,7 +70,7 @@ export const agents = pgTable(
     publicId: uuid('public_id').notNull().defaultRandom(),
     kind: agentKind('kind').notNull().default('agent'),
     chainId: text('chain_id').notNull(),
-    /** ERC-8004 ERC-721 token id. NULL until the indexer sees Registered. */
+    /** The contract's agent id (u64). NULL until the agent is confirmed on chain. */
     chainAgentId: chainUint('chain_agent_id'),
     ownerAddress: text('owner_address').notNull(),
     /** The AgentAccount. Per-chain unique, never globally unique. */
@@ -128,7 +128,7 @@ export const agentCapabilities = pgTable(
   ],
 );
 
-// ─────────────────── reputation (projection of ERC-8004) ───────────────────
+// ─────────────────── reputation (projection of the contract's reviews) ───────────────────
 
 /**
  * Derived from indexed `NewFeedback` events, NOT from a live `getSummary()`
@@ -260,7 +260,7 @@ export const payments = pgTable(
 /**
  * Payment-token transfers that touch a known agent's wallet or owner (v3).
  *
- * The funding graph a reputation needs: prooflines measured on Monad that
+ * The funding graph a reputation needs: prooflines measured on an earlier chain that
  * paid reviews are farmable by an owner who funds the raters' wallets
  * seconds before they pay. A transfer from the worker's side to a client
  * before that client hires is the signature of it. Recorded by the indexer
@@ -474,7 +474,7 @@ export const keyChallenges = pgTable(
  *
  * Registration used to check only that the owner and wallet named matched
  * public chain data — which anyone can read. A front-runner registered the
- * victim's ERC-8004 agent and received its only API key. Now the owner signs
+ * victim's on-chain agent and received its only API key. Now the owner signs
  * a message carrying this nonce, and the details being registered; the nonce
  * is consumed by the registration it was issued for.
  */

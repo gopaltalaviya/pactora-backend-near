@@ -2,16 +2,16 @@ import {fileURLToPath} from 'node:url';
 import {describe, expect, it} from 'vitest';
 import {loadConfig} from '../src/index.js';
 
-// The env vars were renamed AGENTX_* → PACTORA_* on 2026-11-01. A hosted
-// `.env` that still says AGENTX_CONTRACTS_ROOT would otherwise boot on the
-// default path and fail somewhere else, later, with a confusing error.
+// An unsupported variable in a `.env` (such as AGENTX_CONTRACTS_ROOT) would
+// otherwise boot on the default path and fail somewhere else, later, with a
+// confusing error.
 const contractsRoot = fileURLToPath(new URL('../../../chain', import.meta.url));
 const base = {ENABLED_CHAINS: 'near:sandbox'};
 
-describe('a pre-rename AGENTX_* variable refuses to start', () => {
+describe('an unsupported variable refuses to start', () => {
   it('names the PACTORA_* replacement', () => {
     expect(() => loadConfig({contractsRoot, env: {...base, AGENTX_CONTRACTS_ROOT: contractsRoot}})).toThrow(
-      /AGENTX_CONTRACTS_ROOT.*renamed.*PACTORA_CONTRACTS_ROOT/,
+      /AGENTX_CONTRACTS_ROOT.*unsupported.*PACTORA_CONTRACTS_ROOT/,
     );
   });
 

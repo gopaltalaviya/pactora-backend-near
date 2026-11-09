@@ -7,14 +7,10 @@ test stablecoin. Neither this backend nor the NEAR contract has had an
 external audit; one is required before mainnet. The NEAR port was reviewed
 internally on 2026-11-07 (fixes listed in `PROGRESS.md`).
 
-Before the port, the Monad baseline had an **internal pre-launch audit of v3 on
-2026-10-26** (agentx-docs `docs/22-security-audit.md`) covering the contracts
-and this backend — the signer (keys, KMS, policy), the API (auth, idempotency,
-x402, SSE), the indexer, the agents and MCP, and the deploy files. Of its
-backend findings, all three Highs and all three Mediums are fixed, each with a
-test that fails on the code before the fix; the lower ones are fixed or
-accepted there with reasons. What is left for the external audit is its §5.
-None of it replaces an audit.
+An internal security audit of the backend on 2026-11-09 (findings H1, M1,
+M2, L1–L5, I1–I3) is fixed, each with a test that fails on the code before
+the fix; the evidence is in `PROGRESS.md`. None of it replaces an external
+audit.
 
 ## Reporting a vulnerability
 
@@ -31,7 +27,7 @@ the repository settings — docs/21 §0.)
 |---|---|
 | **Only the signer holds a key.** The API encodes a transaction and hands it over private networking; a compromised API can propose, never sign. | `apps/signer`, `apps/api/src/submit.ts` |
 | **The signer is not public.** Without `SIGNER_TOKEN` it binds to loopback and refuses to listen wider; with one, every request must present it (constant-time compare). | `apps/signer/src/auth.ts` |
-| **Spending caps hold even if the signer is compromised**, for every demo agent: they live in the agent's `AgentAccount` on chain — per task and a **rolling 24 h** daily cap. For a plain-EOA agent the signer enforces them off-chain (atomic reserve under a per-agent lock). | `agentx-contracts/src/AgentAccount.sol`, `apps/signer/src/signer.ts` |
+| **Spending caps hold even if the signer is compromised**: they live in the Pactora contract, per agent — per task and a **rolling 24 h** daily cap — and an agent's wallet key is a function-call key scoped to Pactora, which cannot attach a deposit, so it can never withdraw. | `pactora-contracts-near/contracts/pactora`, `apps/signer/src/signer.ts` |
 | **API keys:** `ax_<keyId>_<secret>`, 192 random bits; only a SHA-256 of the key is stored; one indexed lookup per request (no work amplification); shown once. | `apps/api/src/auth.ts` |
 | **Rate limited per client IP before authentication**, so garbage keys cannot buy fresh buckets. | `apps/api/src/app.ts` |
 | **Unguessable public ids** for jobs and runs; a serial id names nothing (404). | migration `0005` |
@@ -57,9 +53,8 @@ The full threat model is `docs/04-how-it-works.md` §9.
   accepted): results meant to be private should not go through a public
   marketplace.
 - Keys: raw keys are for testnet only and refused on any other chain. Off
-  testnet the signer signs with **AWS KMS** keys that never leave AWS (agents'
-  session keys, the keeper, the session manager); an encrypted keystore is
-  still accepted there only one per agent, never one shared by every agent
-  (`apps/signer/src/keysource.ts`, docs/21 §2). The KMS path was checked live
-  against a stand-in that answers as KMS does, not yet a real AWS key
-  (docs/22 §5).
+  testnet the signer signs with **AWS KMS** ed25519 keys that never leave
+  AWS (the agents' wallet keys and the keeper's), or with keys it generated
+  and keeps encrypted under `SIGNER_KEY_PASSPHRASE`
+  (`apps/signer/src/keysource.ts`). The KMS path is tested against a
+  stand-in that answers as KMS does, not yet a real AWS key.

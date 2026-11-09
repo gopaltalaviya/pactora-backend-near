@@ -16,7 +16,7 @@ import {
  * The trust check (v3). The score proves every review cost a payment; this
  * asks whether the payments came from many hands or one — and whether the
  * worker's side funded the client just before it paid, which is how
- * prooflines found Monad's ERC-8004 ratings were farmed.
+ * prooflines found on-chain agent ratings on an EVM chain were farmed.
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
 const CHAIN = 'near:testnet';

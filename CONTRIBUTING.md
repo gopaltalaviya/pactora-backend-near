@@ -11,8 +11,10 @@ pnpm -r build
 ```
 
 The contracts repository must be checked out next to this one
-(`../pactora-contracts-near`): chain facts, parameters, addresses and ABIs are read
-from it, never copied here.
+(`../pactora-contracts-near`). Its chain facts — network config, parameters
+and deployment addresses — are copied into `chain/` by
+`node scripts/sync-chain-facts.mjs` (`--check` compares them); `chain/` is
+never edited by hand.
 
 ## Before you push
 
@@ -30,7 +32,7 @@ files. Do not bypass it.
   code before the fix and see it fail; a test that passes either way proves
   nothing. Say so in the commit.
 - **A mock that agrees with your assumptions proves nothing.** Anything that
-  touches the chain gets a live check on testnet (`scripts/`), not only a unit
+  touches the chain gets a live check on the local sandbox (`pnpm demo:local`) or testnet, not only a unit
   test.
 - **Never swallow an error.** `.catch(() => {})` is how failures vanished here
   before. Log it with context, or let it fail.

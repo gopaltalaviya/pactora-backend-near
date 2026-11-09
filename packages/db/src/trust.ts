@@ -8,7 +8,7 @@ import {reputationScoreSql} from './reputation.js';
  * The score counts settled jobs, and only the escrow can write one, so every
  * review cost a real payment. That stops free reviews; it does not stop an
  * owner paying itself through wallets it controls. prooflines measured that
- * on Monad: 7,665 ratings of one agent, every rater funded by the agent's own
+ * on an EVM chain: 7,665 ratings of one agent, every rater funded by the agent's own
  * owner seconds before it paid. So the trust check asks what the score cannot:
  *
  *   - how many DIFFERENT owners paid this worker, and how much of its record

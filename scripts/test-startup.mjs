@@ -243,7 +243,7 @@ const CASES = [
     'api',
     'a pre-rename variable',
     {DATABASE_URL: CLOSED_DB, AGENTX_API_URL: 'x'},
-    /AGENTX_API_URL was renamed/,
+    /AGENTX_API_URL is an unsupported variable/,
   ],
   [
     'api',

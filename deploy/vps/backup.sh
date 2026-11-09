@@ -3,7 +3,7 @@
 # each encrypted, HMAC'd (`<file>.hmac`, verified by restore-test.sh before
 # anything is decrypted), checked, kept for 7 days, and copied off the host.
 # Installed by cron (see README.md):
-#   0 3 * * * /root/agentx/backup.sh >> /root/agentx/backups/backup.log 2>&1
+#   0 3 * * * /root/pactora/backup.sh >> /root/pactora/backups/backup.log 2>&1
 #
 # What a backup is worth: agents, API keys (hashed), jobs, runs, evidence and
 # their history. Reputation and money are on chain and can be re-indexed;
@@ -14,22 +14,22 @@
 #                     one with `openssl rand -base64 32 > ~/.pactora-backup-pass`
 #                     and keep a copy somewhere that is NOT this server: without
 #                     it no backup can be read.
-#   BACKUP_DIR        where backups go (default ~/agentx/backups)
+#   BACKUP_DIR        where backups go (default ~/pactora/backups)
 #   BACKUP_REMOTE     off-host copy target for scp, e.g. backup@host:pactora/
 #                     Unset: the run warns, because a backup on the same disk
 #                     dies with the disk.
-#   PG_CONTAINER, PG_USER, PG_DB          default agentx-full-postgres-1, agentx, agentx
-#   MINIO_CONTAINER, OBJECT_STORE_BUCKET  default agentx-full-minio-1, pactora-evidence
+#   PG_CONTAINER, PG_USER, PG_DB          default pactora-full-postgres-1, pactora, pactora
+#   MINIO_CONTAINER, OBJECT_STORE_BUCKET  default pactora-full-minio-1, pactora-evidence
 #                     MINIO_CONTAINER=none skips the bucket.
 #   KEEP_DAYS         default 7
 set -euo pipefail
 
-DIR="${BACKUP_DIR:-$HOME/agentx/backups}"
+DIR="${BACKUP_DIR:-$HOME/pactora/backups}"
 PASSFILE="${BACKUP_PASSFILE:-$HOME/.pactora-backup-pass}"
-PG_CONTAINER="${PG_CONTAINER:-agentx-full-postgres-1}"
-PG_USER="${PG_USER:-agentx}"
-PG_DB="${PG_DB:-agentx}"
-MINIO_CONTAINER="${MINIO_CONTAINER:-agentx-full-minio-1}"
+PG_CONTAINER="${PG_CONTAINER:-pactora-full-postgres-1}"
+PG_USER="${PG_USER:-pactora}"
+PG_DB="${PG_DB:-pactora}"
+MINIO_CONTAINER="${MINIO_CONTAINER:-pactora-full-minio-1}"
 BUCKET="${OBJECT_STORE_BUCKET:-pactora-evidence}"
 KEEP_DAYS="${KEEP_DAYS:-7}"
 

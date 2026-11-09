@@ -1,10 +1,11 @@
-# The docs moved
+# The docs
 
-The specification, the submission deck, the status workbook and the demo
-video moved, with their history, to their own repository on 2026-10-06:
+The specification, the deck, the status workbook and the demo video live in
+their own repository:
 
-**[github.com/gopaltalaviya/agentx-docs](https://github.com/gopaltalaviya/agentx-docs)**
+**[github.com/gopaltalaviya/pactora-docs-near](https://github.com/gopaltalaviya/pactora-docs-near)**
 
 Same paths there, so `docs/08` in a code comment here means
-[`agentx-docs/docs/08-configuration.md`](https://github.com/gopaltalaviya/agentx-docs/blob/master/docs/08-configuration.md).
-The build log ([`PROGRESS.md`](../PROGRESS.md)) and the plan ([`PLAN.md`](../PLAN.md)) stay in this repo.
+[`pactora-docs-near/docs/08-configuration.md`](https://github.com/gopaltalaviya/pactora-docs-near/blob/master/docs/08-configuration.md).
+In this repo: the build log ([`PROGRESS.md`](../PROGRESS.md)) and the wire
+contract between the services and the chain ([`NEAR-PORT.md`](NEAR-PORT.md)).

@@ -2,7 +2,7 @@
  * The tracked `.env.example` is what a judge copies. It must describe THIS
  * build: every name in it passes the services' own legacy-env guard (or the
  * copy refuses to start), every name is one the code actually reads, and
- * every network value is a NEAR CAIP-2 id — not the Monad build's.
+ * every network value is a NEAR CAIP-2 id.
  */
 import {readFileSync, readdirSync, statSync} from 'node:fs';
 import {dirname, join} from 'node:path';
@@ -64,8 +64,9 @@ describe('.env.example', () => {
       for (const id of example['ENABLED_CHAINS'].split(',')) expect(id.trim()).toMatch(near);
     if (example['PACTORA_CONTRACTS_ROOT'])
       expect(example['PACTORA_CONTRACTS_ROOT']).toBe('../pactora-contracts-near');
+    // No numeric network id anywhere: every network is named by CAIP-2.
     for (const [k, v] of Object.entries(example))
-      expect(`${k}=${v}`).not.toMatch(/monad|10143|agentx-contracts/i);
+      if (/CHAIN_IDS?$/.test(k) && v) expect(v, k).toMatch(/^near:|^$/);
   });
 
   it('ships no secret: every key and token line is empty', () => {

@@ -15,7 +15,7 @@ import {streamEventOf, type EventBus} from './events.js';
  * then the echo. streamEvents drops the second by id, so nothing here tries
  * to tell them apart.
  */
-export const EVENTS_CHANNEL = 'agentx_events';
+export const EVENTS_CHANNEL = 'pactora_events';
 
 export interface LiveDeps {
   db: Db;

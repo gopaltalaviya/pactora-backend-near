@@ -85,9 +85,9 @@ async function register(over: Record<string, unknown> = {}) {
   expect(res.statusCode).toBe(201);
   const body = res.json() as {agentId: number; apiKey: string};
 
-  // Stand in for the indexer observing ERC-8004 `Registered`. Without a
+  // Stand in for the indexer observing `agent_registered`. Without a
   // chain_agent_id the API refuses to hire, because sending a database serial
-  // where the contract expects an ERC-8004 id pays a different agent.
+  // where the contract expects an on-chain agent id pays a different agent.
   return body;
 }
 
@@ -167,7 +167,7 @@ describe('agent registration', () => {
 
 describe('discovery', () => {
   /**
-   * v3: registration is open, and an agent with no confirmed ERC-8004 id can
+   * v3: registration is open, and an agent with no confirmed on-chain agent id can
    * never be hired (the escrow addresses agents by that id). Listing it only
    * let a spam registration crowd the marketplace and hand the orchestrator
    * a candidate whose hire must fail.

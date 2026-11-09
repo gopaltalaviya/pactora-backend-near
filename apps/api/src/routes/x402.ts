@@ -30,7 +30,7 @@ import {hire, requiredIdempotencyKey, type JobRouteDeps} from './jobs.js';
  * - `settle` — the CLIENT pays for a resource it was quoted in a 402. The
  *   payment is a fast-path hire of the worker named in the quote, so it runs
  *   through every rule a hire does: the signer's caps (or the AgentAccount's,
- *   on chain), idempotency, ERC-8004 ids. The answer carries the ready-made
+ *   on chain), idempotency, on-chain agent ids. The answer carries the ready-made
  *   `X-PAYMENT` header for the retry.
  * - `verify` — the WORKER asks whether a presented payment is good. No side
  *   effects; safe to call twice.

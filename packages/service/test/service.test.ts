@@ -234,11 +234,11 @@ describe('build info', () => {
     });
   });
 
-  it("falls back to GIT_SHA, then Railway's commit variable, then 'unknown'", () => {
+  it("falls back to GIT_SHA, then GIT_COMMIT_SHA, then 'unknown'", () => {
     const noFiles = files({});
     expect(buildInfo({service: 's', env: {GIT_SHA: 'abcdef1'}, readFile: noFiles}).commit).toBe('abcdef1');
     expect(
-      buildInfo({service: 's', env: {RAILWAY_GIT_COMMIT_SHA: '0123456789abcdef'}, readFile: noFiles}).commit,
+      buildInfo({service: 's', env: {GIT_COMMIT_SHA: '0123456789abcdef'}, readFile: noFiles}).commit,
     ).toBe('0123456789ab');
     expect(buildInfo({service: 's', env: {}, readFile: noFiles})).toEqual({
       service: 's',

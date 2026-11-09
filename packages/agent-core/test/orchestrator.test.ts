@@ -290,7 +290,7 @@ describe('the branches a live demo actually hits', () => {
   /**
    * The planner used to be asked for the output field names a subtask must
    * produce. It is a guess about a worker not yet chosen, whose schema it
-   * cannot see — and the first live run answered ["eth","usdc","monad"], so
+   * cannot see — and the first live run answered ["eth","usdc","near"], so
    * every worker correctly refused and nothing was ever hired.
    */
   it('does not ask a worker for fields the planner invented', async () => {
@@ -550,9 +550,9 @@ describe('what the worker is told', () => {
       {Plan: {subtasks: [{capability: 'market-research', input: {}}], reasoning: 'the goal is the input'}},
     );
 
-    await orchestrator.run('how deep is ETH/USDC on Monad?');
+    await orchestrator.run('how deep is ETH/USDC on NEAR?');
 
-    expect(specs[0]!.input['goal']).toBe('how deep is ETH/USDC on Monad?');
+    expect(specs[0]!.input['goal']).toBe('how deep is ETH/USDC on NEAR?');
   });
 
   it('tells the worker where its subtask sits in the plan', async () => {

@@ -160,7 +160,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
     }
     const chain = chains[chainId]!;
 
-    // v3: only agents the chain confirmed. One with no ERC-8004 id can never
+    // v3: only agents the chain confirmed. One with no on-chain agent id can never
     // be hired, so listing it let open registration crowd the marketplace.
     const conditions = [eq(agents.chainId, chainId), eq(agents.active, true), isNotNull(agents.chainAgentId)];
     if (q.maxPrice) conditions.push(lte(agents.pricePerTask, q.maxPrice));
@@ -305,7 +305,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
    * counts distinct client owners, how much of the record one owner wrote,
    * and whether a client received payment-token money from the worker's side
    * shortly before it paid — the farming pattern prooflines measured on
-   * Monad. Answered in words with the numbers behind them, and the block the
+   * an earlier deployment. Answered in words with the numbers behind them, and the block the
    * indexer had read up to, so the answer says what it rests on.
    */
   app.get('/v1/agents/:id/trust', async (request) => {

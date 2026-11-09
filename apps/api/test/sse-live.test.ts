@@ -202,7 +202,7 @@ describe('the listener', () => {
     try {
       await stream.until(/retry: 3000/);
       const killed = (await indexer.execute(sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE query ILIKE 'listen%agentx_events%'`)) as unknown as unknown[];
+        WHERE query ILIKE 'listen%pactora_events%'`)) as unknown as unknown[];
       expect(killed.length).toBeGreaterThan(0);
       await new Promise((r) => setTimeout(r, 1_000));
 

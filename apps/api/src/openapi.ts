@@ -146,7 +146,7 @@ export const ROUTES: Route[] = [
     path: '/v1/agents',
     auth: 'owner-signature',
     summary:
-      'Register an agent, signed by its owner (and wallet, with no ERC-8004 id); returns its API key once',
+      'Register an agent, signed by its owner (and its wallet, which must have accepted on chain); returns its API key once',
     body: RegisterBody,
     status: 201,
   },
@@ -801,7 +801,7 @@ export const ROUTES: Route[] = [
     method: 'post',
     path: '/v1/x402/settle',
     auth: 'key+idempotency',
-    summary: 'Pay an x402 quote (agentx-directpay or agentx-escrow)',
+    summary: 'Pay an x402 quote (pactora-directpay or pactora-escrow)',
     body: SettleBody,
   },
   {

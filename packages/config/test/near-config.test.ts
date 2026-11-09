@@ -63,8 +63,8 @@ describe('NEAR network config (docs/NEAR-PORT.md §3)', () => {
   });
 
   it('refuses a chain id it does not know', () => {
-    expect(() => loadConfig({contractsRoot: realRoot, env: {ENABLED_CHAINS: 'eip155:10143'}})).toThrow(
-      /"eip155:10143" is not a supported chain/,
+    expect(() => loadConfig({contractsRoot: realRoot, env: {ENABLED_CHAINS: 'cosmos:hub-4'}})).toThrow(
+      /"cosmos:hub-4" is not a supported chain/,
     );
   });
 

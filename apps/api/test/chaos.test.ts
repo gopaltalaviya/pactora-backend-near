@@ -87,7 +87,7 @@ async function register(name: string): Promise<{agentId: number; apiKey: string}
   });
   expect(res.statusCode, `register ${name}: ${res.body}`).toBe(201);
   const body = res.json() as {agentId: number; apiKey: string};
-  // The API refuses a hire until both sides carry an ERC-8004 id, which the
+  // The API refuses a hire until both sides carry an on-chain agent id, which the
   // indexer would supply. These tests are about the failure paths after that.
   return body;
 }

@@ -28,7 +28,7 @@ import type {Worker} from './worker.js';
  * The worker never sees money or keys here. What it holds is its own API key,
  * and the one question it asks the facilitator is "was I paid for this?".
  *
- * v3: with `schemes` including `agentx-escrow`, the quote also offers the
+ * v3: with `schemes` including `pactora-escrow`, the quote also offers the
  * refundable scheme. Paid that way, the money is in escrow and the job is
  * still open: the worker does the work FIRST, and only on success accepts and
  * submits on chain. On failure it declines, so the client can cancel for a
@@ -128,7 +128,7 @@ export async function serveX402<T>(opts: X402ServerOptions<T>): Promise<X402Serv
     }
 
     // Redeem BEFORE working. A payment still confirming is waited for
-    // briefly — Monad finalises in about a second — rather than bounced: a
+    // briefly — NEAR finalises in a couple of seconds — rather than bounced: a
     // client that paid and got a 402 back would reasonably pay again.
     let verdict: VerifyResponse;
     const deadline = Date.now() + confirmWaitMs;

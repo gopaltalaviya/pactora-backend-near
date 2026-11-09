@@ -11,10 +11,11 @@
 #   ENABLED_CHAINS=near:sandbox RPC_URL_SANDBOX=http://host.docker.internal:3030 …
 #
 # Separate from docker-compose.yml (the dev database the tests use), on its own
-# project, volume and host port, so bringing this up never touches dev data.
+# project, volume and host port (127.0.0.1:5444; the dev database is 5443),
+# so bringing this up never touches dev data.
 # Services start in dependency order and only once what they need is READY:
 # postgres → migrate (runs once, must succeed) → signer → api, and the indexer.
-name: agentx-full
+name: pactora-full
 
 x-build: &build
   context: .
@@ -37,7 +38,7 @@ x-chain: &chain
   # the host, which a container reaches as host.docker.internal.
   RPC_URL_TESTNET: ${RPC_URL_TESTNET:-https://rpc.testnet.near.org}
   RPC_URL_SANDBOX: ${RPC_URL_SANDBOX:-http://host.docker.internal:3030}
-  DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
+  DATABASE_URL: postgres://pactora:pactora@postgres:5432/pactora
   LOG_LEVEL: ${LOG_LEVEL:-info}
 
 services:
@@ -45,13 +46,13 @@ services:
     logging: *logging
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: agentx
-      POSTGRES_PASSWORD: agentx
-      POSTGRES_DB: agentx
-    ports: ['5443:5432']
-    volumes: ['agentx-full-pg:/var/lib/postgresql/data']
+      POSTGRES_USER: pactora
+      POSTGRES_PASSWORD: pactora
+      POSTGRES_DB: pactora
+    ports: ['127.0.0.1:5444:5432']
+    volumes: ['pactora-full-pg:/var/lib/postgresql/data']
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U agentx']
+      test: ['CMD-SHELL', 'pg_isready -U pactora']
       interval: 3s
       retries: 20
 
@@ -70,7 +71,7 @@ services:
       MINIO_ROOT_USER: ${OBJECT_STORE_ACCESS_KEY_ID:-pactora}
       MINIO_ROOT_PASSWORD: ${OBJECT_STORE_SECRET_ACCESS_KEY:?set OBJECT_STORE_SECRET_ACCESS_KEY (8+ characters), the evidence store's password}
       MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY:?set MINIO_KMS_SECRET_KEY (pactora:<32 random bytes, base64>, see deploy/vps/README.md), the evidence store's encryption key}
-    volumes: ['agentx-full-minio:/data']
+    volumes: ['pactora-full-minio:/data']
     healthcheck:
       test: ['CMD', 'mc', 'ready', 'local']
       interval: 5s
@@ -97,7 +98,7 @@ services:
     build: {<<: *build, args: {SERVICE: '@pactora/db'}}
     command: ['node', 'bin/migrate.mjs']
     environment:
-      DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
+      DATABASE_URL: postgres://pactora:pactora@postgres:5432/pactora
     depends_on:
       postgres: {condition: service_healthy}
     restart: 'no'
@@ -165,7 +166,7 @@ services:
     logging: *logging
     build: {<<: *build, args: {SERVICE: '@pactora/notifier'}}
     environment:
-      DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
+      DATABASE_URL: postgres://pactora:pactora@postgres:5432/pactora
       LOG_LEVEL: ${LOG_LEVEL:-info}
       WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?set WEBHOOK_SECRET_KEY (openssl rand -hex 32), shared with the api}
       NOTIFIER_HEALTH_PORT: 9091
@@ -183,7 +184,7 @@ services:
     logging: *logging
     build: {<<: *build, args: {SERVICE: '@pactora/channels'}}
     environment:
-      DATABASE_URL: postgres://agentx:agentx@postgres:5432/agentx
+      DATABASE_URL: postgres://pactora:pactora@postgres:5432/pactora
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
@@ -213,6 +214,15 @@ services:
       # Production screening refuses to start without two reviewers (NEAR
       # accounts, comma-separated) who clear a strong sanctions match.
       COMPLIANCE_REVIEWERS: ${COMPLIANCE_REVIEWERS:-}
+      MAX_AGENTS_PER_OWNER: ${MAX_AGENTS_PER_OWNER:-100}
+      JUDGE_REQUIRE_ATTESTATION: ${JUDGE_REQUIRE_ATTESTATION:-}
+      # Retention (README "Data retention"): days after settlement; 1 = count only.
+      RETENTION_EVIDENCE_DAYS: ${RETENTION_EVIDENCE_DAYS:-180}
+      RETENTION_CHAT_DAYS: ${RETENTION_CHAT_DAYS:-180}
+      RETENTION_DRAFTS_DAYS: ${RETENTION_DRAFTS_DAYS:-90}
+      RETENTION_JOB_EVENTS_DAYS: ${RETENTION_JOB_EVENTS_DAYS:-365}
+      RETENTION_AGENT_EVENTS_READ_DAYS: ${RETENTION_AGENT_EVENTS_READ_DAYS:-90}
+      RETENTION_DRY_RUN: ${RETENTION_DRY_RUN:-0}
       # Settings below are passed so the server's .env can set them; an empty
       # value is unset, so each service's own default applies (docs/08).
       SANCTIONS_SCREENING: ${SANCTIONS_SCREENING:-}
@@ -294,5 +304,5 @@ services:
       PACTORA_API_KEY: ${EXECUTION_BOT_API_KEY:-}
 
 volumes:
-  agentx-full-pg:
-  agentx-full-minio:
+  pactora-full-pg:
+  pactora-full-minio:

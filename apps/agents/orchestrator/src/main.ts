@@ -11,7 +11,7 @@ import {
 /**
  * orchestrator — the client side, as a process.
  *
- *   node dist/main.js "find the deepest ETH/USDC venue on Monad and tell me whether to trade"
+ *   node dist/main.js "find the deepest ETH/USDC venue on NEAR and tell me whether to trade"
  *
  * Prints the trace as it happens. Every on-chain action carries its explorer
  * link on the line where it happens, because a payment nobody can verify is

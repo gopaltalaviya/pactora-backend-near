@@ -8,7 +8,7 @@
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM agents) OR EXISTS (SELECT 1 FROM jobs) OR EXISTS (SELECT 1 FROM token_transfers) THEN
-    RAISE EXCEPTION 'this database holds EVM (Monad) rows; the NEAR build needs an empty database (see docs/NEAR-PORT.md)';
+    RAISE EXCEPTION 'this database holds EVM-chain rows; the NEAR build needs an empty database (see docs/NEAR-PORT.md)';
   END IF;
 END $$;
 

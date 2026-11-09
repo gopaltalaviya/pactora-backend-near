@@ -318,7 +318,7 @@ export class Orchestrator {
           // It used to ask the planner for the field names a subtask must
           // produce, which is a guess about a worker it has not chosen yet
           // and whose schema it cannot see. The first live run had a planner
-          // answer ["eth","usdc","monad"] — topic words — so every worker
+          // answer ["eth","usdc","near"] — topic words — so every worker
           // correctly refused work it could not satisfy and nothing was ever
           // hired. The coupling was brittle by construction, not badly
           // prompted: no planner can know what fields an unknown worker

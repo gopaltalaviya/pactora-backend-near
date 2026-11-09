@@ -5,8 +5,8 @@ services:
       POSTGRES_USER: pactora
       POSTGRES_PASSWORD: pactora
       POSTGRES_DB: pactora_near
-    # 5443 on the host: 5432 is another local Postgres, and 5442 is the Monad
-    # build's (agentx-backend). Connecting to the wrong database is worse than not
+    # 5443 on the host, off 5432, so a Postgres already on the machine is never
+    # the one connected to. Connecting to the wrong database is worse than not
     # connecting: the tests TRUNCATE.
     ports: ['5443:5432']
     volumes: ['pactora-near-pg:/var/lib/postgresql/data']

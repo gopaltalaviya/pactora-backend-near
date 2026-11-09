@@ -61,12 +61,12 @@ WORKDIR /app
 COPY --from=build --chown=node:node /out ./
 COPY --from=contracts --chown=node:node config /contracts/config
 COPY --from=contracts --chown=node:node deployments /contracts/deployments
-# Which code this image is. Railway passes RAILWAY_GIT_COMMIT_SHA to builds
+# Which code this image is. A host may pass GIT_COMMIT_SHA to builds
 # from GitHub; CI and local builds pass GIT_SHA. /health and /v1/status read
 # this file (packages/service/src/build.ts), which accepts only a hex commit
 # and an ISO time — anything else reads "unknown".
-ARG RAILWAY_GIT_COMMIT_SHA=""
-ARG GIT_SHA="${RAILWAY_GIT_COMMIT_SHA}"
+ARG GIT_COMMIT_SHA=""
+ARG GIT_SHA="${GIT_COMMIT_SHA}"
 RUN printf '{"commit":"%s","builtAt":"%s"}\n' "${GIT_SHA}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /app/build-info.json
 USER node
 # SIGTERM reaches node directly (exec form), so the service's own graceful

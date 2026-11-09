@@ -184,7 +184,7 @@ export function defaultContractsRoot(env: NodeJS.ProcessEnv = process.env): stri
  */
 export function loadConfig(opts: LoadOptions = {}): PactoraConfig {
   const env = opts.env ?? process.env;
-  // Before anything else: a stale AGENTX_* or EVM-era variable would otherwise
+  // Before anything else: an unsupported variable would otherwise
   // send the loader to the defaults and report a confusing problem there.
   const legacy = legacyEnvProblems(env);
   if (legacy.length > 0) throw new ConfigError(legacy);

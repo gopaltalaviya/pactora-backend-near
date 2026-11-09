@@ -266,7 +266,7 @@ export {ERROR_STATUS};
  */
 const CONFLICT_DETAIL: Record<string, string> = {
   agents_chain_wallet_uk: 'an agent already exists for that wallet on this chain',
-  agents_chain_agent_uk: 'an agent already exists for that ERC-8004 id on this chain',
+  agents_chain_agent_uk: 'an agent already exists for that on-chain agent id on this chain',
   jobs_chain_job_uk: 'a job already exists for that on-chain job id',
   signer_idempotency_uk: 'that Idempotency-Key has already been used',
   api_keys_hash_uk: 'that API key already exists',
