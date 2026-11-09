@@ -14,7 +14,7 @@
   DAO desk, a held payout, x402, the attack refused), and `pnpm swarm:local`
   runs a 25-agent market on the same sandbox. Testnet deployment waits on
   the owner's funded account.
-- Numbers (2026-11-09 night): `pnpm check` 1350 passed, 10 skipped, 0 failed; `test:startup`
+- Numbers (2026-11-09 night): `pnpm check` 1352 passed, 10 skipped, 0 failed; `test:startup`
   all 42 refused; `demo:local` "Demo passed.", 71 checks; `swarm:local` "Swarm passed."; contracts `verify-near` 26/28 (the two
   DAO checks need `--dao`).
 
@@ -105,6 +105,7 @@ moved aside, the new test run, the source restored). One line each:
 | Indexer: a start block the RPC has garbage-collected → `stalled: start block pruned` on /health and /v1/status, one error naming the fix, longest backoff | 9d579fd | `apps/indexer/test/pruned.test.ts`: 5 of 6 failed (`TypeError` not `StartBlockPrunedError`; loop waits `[2000, 4000, 8000, 16000]` not 60000 each; no state row); `status.test`: `expected 'unknown' to be 'down'` |
 | Roles matrix rows for the three routes | 6e0df16 | `roles.test`: `routes with no row: [ 'GET /v1/admin/audit-log.csv', …(2) ]` (found by the gate) |
 | CORS exposes `content-disposition` (interface ask: download file names) | 35a8cac | `cors.test`: `expected 'x-trace-id, retry-after' to contain 'content-disposition'` |
+| Agent event counters locked in agent-id order (the swarm's deadlock) | cb19e32 | `apps/indexer/test/lock-order.test.ts`: `indexerError: "deadlock detected"`; `apps/api/test/lock-order.test.ts`: `apiError: "deadlock detected"` |
 | `pnpm swarm:local` (AI Swarms track) | 6da95fb | first live run: 429 on `POST /v1/agents/wallet-key` (10/min per address); second: `INVALID_STATE job is "submitted"` (an SDK retry of a step that landed); third: `Swarm passed.` |
 
 - Routes for the interface are in the live2 `api-contract.md` "Round 3"
@@ -123,15 +124,17 @@ moved aside, the new test run, the source restored). One line each:
   database a held demo or the live UI stack uses; it does not recreate the
   sandbox. `TRUST_PROXY=1` with an `x-forwarded-for` per agent, so the
   per-address registration limits count per agent.
-- **Found by the swarm, not fixed:** under 20 concurrent jobs the API's
-  `recordEvent` (job.created, job.submitted) and `notifyApplicants`
-  (`pactora_agent_event`) hit Postgres `deadlock detected` against the
-  indexer's batch transaction, which takes `agent_event_seq` row locks in
-  event order, not agent order (migration 0018 fan-out). The request 500s
-  and the SDK's retry recovers, so the swarm passes; a fix is to pre-lock
-  the batch's parties in agent-id order at the start of the indexer's
-  transaction (and sort applicants in `notifyApplicants`). Needs a
-  deterministic two-connection test first.
+- **Found by the swarm, then fixed (cb19e32):** under 20 concurrent jobs
+  the API's event writes and the indexer's batch deadlocked on
+  `agent_event_seq` row locks (the indexer took them in event order,
+  `notifyApplicants` in row order). Now `lockAgentEventSeqs` (packages/db)
+  takes every party's counter in agent-id order at the start of the
+  indexer batch, `notifyApplicants`, unselect and account deletion; all
+  other writers are one statement for at most two agents, which the 0018
+  trigger orders. Red first, two connections: `lock-order.test.ts`
+  (indexer and api) both `"deadlock detected"` on the old source. The
+  swarm's API log: before, 9 "deadlock detected" and 7 unhandled 500s (and
+  1 failed indexer batch); after, 0, 0 and 0 (143 s, `Swarm passed.`).
 - Swarm, final run (fresh sandbox, after the demo): 20 listings, 76 bids,
   20 fills, median 36000 base units (range 21000-60000), 20 settled on
   chain; Atlas 8 wins (score 62), Cobalt 12 (score 70), Birch, Dune and
@@ -140,7 +143,8 @@ moved aside, the new test run, the source restored). One line each:
   bids also came from the sellers with the better record, so reputation
   never overturned a price win: the rule is there, the run does not show
   it biting.
-- Gate: `pnpm check` 1350 passed, 10 skipped, 0 failed (typecheck, lint,
+- Gate (after the deadlock fix): `pnpm check` 1352 passed, 10 skipped, 0 failed; `demo:local` "Demo passed.", 71 checks (one retry: the first attempt stopped at compose `--wait` while the recreated Postgres ran crash recovery for over 60 s); `swarm:local` "Swarm passed.", 143 s; build current.
+- Gate (before it): `pnpm check` 1350 passed, 10 skipped, 0 failed (typecheck, lint,
   format clean; status.test passes with the docs/15 rows); `test:startup`
   all 42 refused; `check-no-secrets` clean (428 files); `demo:local` "Demo
   passed.", 71 checks; `swarm:local` "Swarm passed."; `pnpm build` current.
