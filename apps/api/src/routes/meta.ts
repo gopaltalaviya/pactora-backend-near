@@ -1,8 +1,9 @@
 import type {FastifyInstance} from 'fastify';
-import {eq} from 'drizzle-orm';
+import {eq, sql} from 'drizzle-orm';
 import {z} from 'zod';
 import {agents, spendPolicies, type Db} from '@pactora/db';
 import type {ChainConfig} from '@pactora/config';
+import {ErrorCode, PactoraError} from '@pactora/shared';
 import {authenticate, resolveChainId} from '../auth.js';
 import type {BudgetReader} from '../chain-reads.js';
 
@@ -150,6 +151,59 @@ export async function registerMetaRoutes(app: FastifyInstance, deps: MetaRouteDe
    * answered is reported in `source`, because "0.20 left" from a stale cache
    * and "0.20 left" from the contract are not the same claim.
    */
+  /**
+   * Home-page figures (UI audit E): jobs the chain settled, who has a track
+   * record — agents and people alike — and what is on offer. Cached 30 s:
+   * the page is public and counts are not worth a query per visitor.
+   */
+  let statsCache: {at: number; chainId: string; body: Record<string, unknown>} | null = null;
+  app.get('/v1/stats', async (request) => {
+    const chainId = (request.query as {chainId?: string}).chainId ?? deps.defaultChainId;
+    const chain = chains[chainId];
+    if (!chain) throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${chainId} is not enabled`);
+    if (statsCache && statsCache.chainId === chainId && Date.now() - statsCache.at < 30_000)
+      return statsCache.body;
+    const [s] = (await db.execute(sql`
+      WITH settled AS (
+        SELECT DISTINCT j.id, j.amount, j.client_agent_id, j.worker_agent_id
+          FROM jobs j JOIN job_events e ON e.job_id = j.id
+         WHERE j.chain_id = ${chainId} AND e.kind IN ('settled', 'direct_paid') AND e.tx_hash IS NOT NULL
+      ), parties AS (
+        SELECT client_agent_id AS id FROM settled UNION SELECT worker_agent_id FROM settled
+      )
+      SELECT (SELECT count(*) FROM settled)::int AS jobs,
+             (SELECT coalesce(sum(amount), 0)::text FROM settled) AS volume,
+             (SELECT count(*) FROM parties p JOIN agents a ON a.id = p.id WHERE a.kind = 'agent')::int AS agents_with,
+             (SELECT count(*) FROM parties p JOIN agents a ON a.id = p.id WHERE a.kind = 'person')::int AS people_with,
+             (SELECT count(*) FROM agents WHERE chain_id = ${chainId} AND kind = 'agent' AND deleted_at IS NULL)::int AS agents,
+             (SELECT count(*) FROM agents WHERE chain_id = ${chainId} AND kind = 'person' AND deleted_at IS NULL)::int AS people,
+             (SELECT count(*) FROM listings WHERE chain_id = ${chainId} AND status = 'open' AND deadline > now() AND hidden_at IS NULL)::int AS open_listings
+    `)) as unknown as {
+      jobs: number;
+      volume: string;
+      agents_with: number;
+      people_with: number;
+      agents: number;
+      people: number;
+      open_listings: number;
+    }[];
+    const body = {
+      chainId,
+      jobsSettledOnChain: s!.jobs,
+      volumeSettledBaseUnits: s!.volume,
+      volumeSettledDisplay: chain.formatToken(BigInt(s!.volume)),
+      agentsWithRecord: s!.agents_with,
+      peopleWithRecord: s!.people_with,
+      participantsWithRecord: s!.agents_with + s!.people_with,
+      agents: s!.agents,
+      people: s!.people,
+      openListings: s!.open_listings,
+      updatedAt: new Date().toISOString(),
+    };
+    statsCache = {at: Date.now(), chainId, body};
+    return body;
+  });
+
   app.get('/v1/budget', async (request) => {
     const caller = await authenticate(db, request);
     const chainId = resolveChainId(request, caller, enabled);

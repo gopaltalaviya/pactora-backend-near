@@ -23,6 +23,7 @@ import {Cursor, page} from '../cursor.js';
 import {lastEventIdOf, streamEventOf, streamEvents, type EventBus} from '../events.js';
 import {acceptedDraftOf, draftDeliveryOf, settleAcceptedDraft, type DraftDelivery} from '../evidence.js';
 import {requireClear, requireWorkerPayable} from '../compliance.js';
+import {jobTitleOf, listingOfSpec} from '../read-model.js';
 import {releaseDeclinedSlot} from '../listing-slots.js';
 
 /** Query for `GET /v1/jobs`. Coerced, because query strings are strings. */
@@ -200,6 +201,10 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
           path: job.path,
           amount: job.amount,
           amountDisplay: chain.formatToken(BigInt(job.amount)),
+          /** In words: the listing's title, else the capability. */
+          title: jobTitleOf(job.spec),
+          listingId: listingOfSpec(job.spec)?.listingId ?? null,
+          listingTitle: listingOfSpec(job.spec)?.title ?? null,
           spec: job.spec,
           specHash: job.specHash,
           /** Which side the caller is on, so an agent need not infer it. */
@@ -239,6 +244,9 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       path: job.path,
       amount: job.amount,
       amountDisplay: chain.formatToken(BigInt(job.amount)),
+      title: jobTitleOf(job.spec),
+      listingId: listingOfSpec(job.spec)?.listingId ?? null,
+      listingTitle: listingOfSpec(job.spec)?.title ?? null,
       fee: job.fee,
       spec: job.spec,
       specHash: job.specHash,

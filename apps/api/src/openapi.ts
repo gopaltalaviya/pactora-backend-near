@@ -28,6 +28,7 @@ import {
   ListingBody,
   ListingPatch,
   ListingQuery,
+  MyApplicationsQuery,
   UnselectBody,
 } from './routes/listings.js';
 
@@ -410,6 +411,27 @@ export const ROUTES: Route[] = [
     auth: 'key-or-session',
     summary: 'Mark read up to a seq: forward only, never past the latest',
     body: ReadBody,
+  },
+  {
+    method: 'post',
+    path: '/v1/notifications/:seq/read',
+    auth: 'key-or-session',
+    summary: 'Mark one notification read, leaving the rest as they are',
+  },
+  {
+    method: 'get',
+    path: '/v1/me/applications',
+    auth: 'key-or-session',
+    summary:
+      "The caller's bids across listings, with each listing's title and status; newest first, cursor-paged",
+    query: MyApplicationsQuery,
+  },
+  {
+    method: 'get',
+    path: '/v1/stats',
+    auth: 'public',
+    summary:
+      'Home-page figures: jobs settled on chain, agents and people with a record, open listings (cached 30 s)',
   },
   {
     method: 'post',

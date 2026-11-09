@@ -710,6 +710,15 @@ function rows(): Row[] {
       body: () => ({}),
       base: rules.either,
     },
+    {
+      route: 'POST /v1/notifications/:seq/read',
+      url: () => '/v1/notifications/999999/read',
+      base: rules.either,
+      // No such item: 404 once past auth.
+      override: Object.fromEntries([...AGENTS, ...PERSONS].map((w) => [w, '404'])),
+    },
+    {route: 'GET /v1/me/applications', url: () => '/v1/me/applications', base: rules.either},
+    {route: 'GET /v1/stats', url: () => '/v1/stats', base: rules.public},
     {route: 'POST /v1/webhooks', url: () => '/v1/webhooks', body: () => ({}), base: rules.either},
     {route: 'GET /v1/webhooks', url: () => '/v1/webhooks', base: rules.either},
     {

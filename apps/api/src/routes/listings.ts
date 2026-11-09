@@ -160,6 +160,12 @@ export const DecideBody = z.object({
 export const ClaimBody = z.object({proposal: text(20, 3000).optional()}).default({});
 
 export const UnselectBody = z.object({applicationId: z.uuid()});
+
+export const MyApplicationsQuery = z.object({
+  status: z.enum(['pending', 'selected', 'rejected', 'withdrawn']).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(LIMITS.pageSize),
+  cursor: Cursor.optional(),
+});
 const UNSELECTED_REASON = 'The client released the selection before the job was funded.';
 
 export interface ListingRouteDeps {
@@ -1340,6 +1346,49 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       caller: {kind: 'agent', agentId: agent.id, chainId: agent.chainId, scopes: [], keyId: 'listing-claim'},
     };
   }
+
+  // ── my bids ───────────────────────────────────────────────────────────
+
+  /** The caller's bids across listings, newest first (UI audit: "my bids"). */
+  app.get('/v1/me/applications', async (request) => {
+    const actor = await actorOf(db, request);
+    const q = MyApplicationsQuery.parse(request.query ?? {});
+    const chain = chainOf(actor.chainId);
+    const rows = await db
+      .select({a: applications, l: listings, client: agents})
+      .from(applications)
+      .innerJoin(listings, eq(listings.id, applications.listingId))
+      .innerJoin(agents, eq(agents.id, listings.clientAgentId))
+      .where(
+        and(
+          eq(applications.applicantAgentId, actor.agent.id),
+          q.status ? eq(applications.status, q.status) : undefined,
+          q.cursor !== undefined ? lt(applications.id, q.cursor) : undefined,
+        ),
+      )
+      .orderBy(desc(applications.id))
+      .limit(q.limit + 1);
+    const {rows: pageRows, nextCursor} = page(
+      rows.map((r) => ({...r, id: r.a.id})),
+      q.limit,
+    );
+    const ids = await jobPublicIds(pageRows.map((r) => r.a.jobId));
+    return {
+      count: pageRows.length,
+      nextCursor,
+      applications: pageRows.map(({a, l, client}) => ({
+        ...applicationView(a, chain, a.jobId !== null ? (ids.get(a.jobId) ?? null) : null),
+        listing: {
+          listingId: l.publicId,
+          title: l.title,
+          status: effectiveStatus(l),
+          maxPriceBaseUnits: l.maxPrice,
+          deadline: l.deadline.toISOString(),
+          client: {publicId: client.publicId, name: client.name, kind: client.kind},
+        },
+      })),
+    };
+  });
 
   // ── unselect: a selected bid whose job never reached the chain ────────
 

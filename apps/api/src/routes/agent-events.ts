@@ -1,8 +1,18 @@
 import type {FastifyInstance, FastifyRequest} from 'fastify';
 import {and, asc, desc, eq, gt, lte, sql} from 'drizzle-orm';
 import {z} from 'zod';
-import {agentEventReads, agentEventSeq, agentEvents, jobs, listings, type Db} from '@pactora/db';
+import {
+  agentEventItemReads,
+  agentEventReads,
+  agentEventSeq,
+  agentEvents,
+  jobs,
+  listings,
+  type Db,
+} from '@pactora/db';
+import {ErrorCode, PactoraError} from '@pactora/shared';
 import {actorOf} from '../actor.js';
+import {CHAIN_KINDS, actorOf as whoActed, jobTitleOf, listingOfSpec} from '../read-model.js';
 
 /**
  * A durable, per-agent feed of everything that happens on its jobs
@@ -27,6 +37,11 @@ export const NotificationsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   /** Page back: the oldest `seq` of the previous page. */
   before: z.coerce.number().int().min(1).optional(),
+  /**
+   * Default true: leave out what the reader did themselves, and the chain's
+   * confirmation of an event already in the feed. `false` lists everything.
+   */
+  fold: z.enum(['true', 'false']).default('true'),
 });
 
 export const ReadBody = z.object({
@@ -34,29 +49,56 @@ export const ReadBody = z.object({
   upTo: z.coerce.number().int().min(0),
 });
 
-type Row = typeof agentEvents.$inferSelect & {jobPublicId: string | null; listingPublicId: string | null};
+type Row = typeof agentEvents.$inferSelect & {
+  jobPublicId: string | null;
+  listingPublicId: string | null;
+  jobSpec: unknown;
+  listingTitle: string | null;
+};
 
-/** One feed item. `jobId` or `listingId` (or neither, for an account event) says what it is about. */
-const view = (r: Row) => ({
-  seq: r.seq,
-  kind: r.kind,
-  role: r.role,
-  jobId: r.jobPublicId,
-  listingId: r.listingPublicId,
-  payload: r.payload,
-  at: r.createdAt.toISOString(),
-});
+/**
+ * One feed item. `jobId` or `listingId` (or neither, for an account event)
+ * says what it is about; `actor` and `confirmation` let a page fold the
+ * chain's echo into the API's event and skip the reader's own actions;
+ * `jobTitle` / `listingTitle` name it in words.
+ */
+const view = (r: Row) => {
+  const fromSpec = listingOfSpec(r.jobSpec);
+  return {
+    seq: r.seq,
+    kind: r.kind,
+    role: r.role,
+    jobId: r.jobPublicId,
+    listingId: r.listingPublicId ?? fromSpec?.listingId ?? null,
+    jobTitle: r.jobPublicId ? jobTitleOf(r.jobSpec) : null,
+    listingTitle: r.listingTitle ?? fromSpec?.title ?? null,
+    actor: whoActed(r.kind, r.role, r.payload),
+    confirmation: CHAIN_KINDS.has(r.kind),
+    payload: r.payload,
+    at: r.createdAt.toISOString(),
+  };
+};
 
-/** The feed rows with the public ids of what they are about: a job, a listing, or neither. */
-const SELECT = {e: agentEvents, jobPublicId: jobs.publicId, listingPublicId: listings.publicId};
+/** The feed rows with the public ids and words of what they are about: a job, a listing, or neither. */
+const SELECT = {
+  e: agentEvents,
+  jobPublicId: jobs.publicId,
+  listingPublicId: listings.publicId,
+  jobSpec: jobs.spec,
+  listingTitle: listings.title,
+};
 const withIds = (r: {
   e: typeof agentEvents.$inferSelect;
   jobPublicId: string | null;
   listingPublicId: string | null;
+  jobSpec: unknown;
+  listingTitle: string | null;
 }) => ({
   ...r.e,
   jobPublicId: r.jobPublicId,
   listingPublicId: r.listingPublicId,
+  jobSpec: r.jobSpec,
+  listingTitle: r.listingTitle,
 });
 
 export interface AgentEventRouteDeps {
@@ -113,6 +155,13 @@ export async function registerAgentEventRoutes(
   app.get('/v1/notifications', async (request) => {
     const actor = await actorOf(db, request);
     const q = NotificationsQuery.parse(request.query ?? {});
+    const fold = q.fold === 'true';
+    // Folded: a chain echo whose API event is in this agent's feed for the
+    // same job is left out (the API event stands for both), and so is what
+    // the reader did themselves.
+    const echoed = sql`EXISTS (SELECT 1 FROM agent_events o WHERE o.agent_id = ${agentEvents.agentId}
+      AND o.job_id = ${agentEvents.jobId} AND o.kind = 'job.' || ${agentEvents.kind})`;
+    const isChainKind = sql`${agentEvents.kind} IN ('created', 'accepted', 'submitted', 'disputed', 'settled', 'refunded', 'direct_paid')`;
     const rows = await db
       .select(SELECT)
       .from(agentEvents)
@@ -122,25 +171,50 @@ export async function registerAgentEventRoutes(
         and(
           eq(agentEvents.agentId, actor.agent.id),
           ...(q.before !== undefined ? [lte(agentEvents.seq, q.before - 1)] : []),
+          ...(fold ? [sql`NOT (${isChainKind} AND ${echoed})`] : []),
         ),
       )
       .orderBy(desc(agentEvents.seq))
-      .limit(q.limit);
+      .limit(fold ? q.limit * 3 : q.limit);
     const latest = await lastSeq(actor.agent.id);
     const readSeq =
       (await db.query.agentEventReads.findFirst({where: eq(agentEventReads.agentId, actor.agent.id)}))
         ?.readSeq ?? 0;
-    const oldest = rows.at(-1)?.e.seq;
+    const items = rows
+      .map((r) => view(withIds(r)))
+      .filter((v) => !fold || v.actor !== 'me')
+      .slice(0, q.limit);
+    const marked = new Set(
+      (
+        await db
+          .select({seq: agentEventItemReads.seq})
+          .from(agentEventItemReads)
+          .where(and(eq(agentEventItemReads.agentId, actor.agent.id), gt(agentEventItemReads.seq, readSeq)))
+      ).map((m) => m.seq),
+    );
+    // Paging continues from the last item shown, not the last row read (folding reads ahead).
+    const oldest = items.length === q.limit ? items.at(-1)?.seq : rows.at(-1)?.e.seq;
     return {
-      unread: Math.max(0, latest - readSeq),
+      unread: Math.max(0, latest - readSeq - marked.size),
       readSeq,
       latest,
       before: oldest !== undefined && oldest > 1 ? oldest : null,
-      notifications: rows.map((r) => ({
-        ...view(withIds(r)),
-        read: r.e.seq <= readSeq,
-      })),
+      notifications: items.map((v) => ({...v, read: v.seq <= readSeq || marked.has(v.seq)})),
     };
+  });
+
+  /** Mark one notification read, leaving the rest as they are. */
+  app.post('/v1/notifications/:seq/read', async (request) => {
+    const actor = await actorOf(db, request);
+    const seq = Number((request.params as {seq: string}).seq);
+    if (!Number.isSafeInteger(seq) || seq < 1)
+      throw new PactoraError(ErrorCode.NOT_FOUND, 'no such notification');
+    const row = await db.query.agentEvents.findFirst({
+      where: and(eq(agentEvents.agentId, actor.agent.id), eq(agentEvents.seq, seq)),
+    });
+    if (!row) throw new PactoraError(ErrorCode.NOT_FOUND, `no notification ${seq}`);
+    await db.insert(agentEventItemReads).values({agentId: actor.agent.id, seq}).onConflictDoNothing();
+    return {seq, read: true};
   });
 
   app.post('/v1/notifications/read', async (request) => {

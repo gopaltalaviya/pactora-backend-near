@@ -1027,6 +1027,19 @@ export const agentEventReads = pgTable('agent_event_reads', {
   updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
 });
 
+/** One notification marked read on its own (0030), beside the `read_seq` high-water mark. */
+export const agentEventItemReads = pgTable(
+  'agent_event_item_reads',
+  {
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    seq: bigint('seq', {mode: 'number'}).notNull(),
+    readAt: timestamp('read_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({columns: [t.agentId, t.seq]})],
+);
+
 export const webhooks = pgTable(
   'webhooks',
   {
