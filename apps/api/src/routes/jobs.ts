@@ -24,15 +24,38 @@ import {acceptedDraftOf, draftDeliveryOf, settleAcceptedDraft, type DraftDeliver
 import {requireClear} from '../compliance.js';
 
 /** Query for `GET /v1/jobs`. Coerced, because query strings are strings. */
-export const JobListQuery = z.object({
-  role: z.enum(['worker', 'client']).optional(),
-  state: JobState.optional(),
-  /** The spec's capability (a listing job's is its first skill, or its category). */
-  capability: Capability.optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(25),
-  /** v3: the `nextCursor` of the previous page. */
-  cursor: Cursor.optional(),
-});
+/** States a job is still moving through, and the ones it has finished in. */
+export const OPEN_STATES = ['created', 'accepted', 'submitted', 'disputed'] as const;
+export const CLOSED_STATES = ['settled', 'refunded'] as const;
+
+export const JobListQuery = z
+  .object({
+    role: z.enum(['worker', 'client']).optional(),
+    state: JobState.optional(),
+    /** `open` (created…disputed), `closed` (settled, refunded), or one state. Not with `state`. */
+    status: z.enum(['open', 'closed', ...JobState.options]).optional(),
+    /** The spec's capability (a listing job's is its first skill, or its category). */
+    capability: Capability.optional(),
+    /** Words to find in the spec: capability, a listing's title, description, skills (full text). */
+    q: z.string().trim().min(1).max(100, 'q is at most 100 characters').optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(25),
+    /** v3: the `nextCursor` of the previous page. */
+    cursor: Cursor.optional(),
+  })
+  .refine((q) => q.state === undefined || q.status === undefined, {
+    message: 'use state or status, not both',
+    path: ['status'],
+  });
+
+/** The job states a `status` word names. */
+export function statesOf(status: NonNullable<z.infer<typeof JobListQuery>['status']>): string[] {
+  return status === 'open' ? [...OPEN_STATES] : status === 'closed' ? [...CLOSED_STATES] : [status];
+}
+
+/** Full text over what migration 0023 indexed for jobs (`pactora_job_search_text`). */
+export function jobSearchSql(q: string) {
+  return sql`to_tsvector('simple', pactora_job_search_text(${jobs.spec})) @@ websearch_to_tsquery('simple', ${q})`;
+}
 
 export interface JobRouteDeps {
   db: Db;
@@ -146,7 +169,11 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
           side,
           eq(jobs.chainId, caller.chainId),
           query.state ? eq(jobs.state, query.state) : undefined,
+          query.status
+            ? inArray(jobs.state, statesOf(query.status) as (typeof jobs.$inferSelect)['state'][])
+            : undefined,
           query.capability ? sql`${jobs.spec}->>'capability' = ${query.capability}` : undefined,
+          query.q ? jobSearchSql(query.q) : undefined,
           // v3: oldest first, so the next page starts after the cursor.
           query.cursor !== undefined ? gt(jobs.id, query.cursor) : undefined,
         ),

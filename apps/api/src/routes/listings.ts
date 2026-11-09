@@ -120,6 +120,8 @@ export const ListingQuery = z.object({
   match: z.literal('me').optional(),
   /** `true`: only listings the caller posted (needs a bearer). */
   mine: z.enum(['true', 'false']).optional(),
+  /** Words to find in the title, description or skills (Postgres full text, every word must match). */
+  q: z.string().trim().min(1).max(100, 'q is at most 100 characters').optional(),
   /** Default: the caller's chain, else the API's default. */
   chainId: ChainId.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(LIMITS.pageSize),
@@ -171,6 +173,15 @@ const CLOSED_REASON = 'Hiring closed before this bid was decided.';
 const FILLED_REASON = 'Every worker slot on this listing was filled.';
 const CANCELLED_REASON = 'The client cancelled this listing.';
 const CLAIM_PROPOSAL = 'Claimed in instant mode at the listed price.';
+
+/**
+ * Full text over title, description and skills, as migration 0023 indexed
+ * it. `websearch_to_tsquery` never throws on user input (unbalanced quotes,
+ * stray operators), unlike `to_tsquery`.
+ */
+export function listingSearchSql(q: string): SQL {
+  return sql`to_tsvector('simple', pactora_listing_search_text(${listings.title}, ${listings.description}, ${listings.skills})) @@ websearch_to_tsquery('simple', ${q})`;
+}
 
 /** Open in the database but past its deadline reads as closed: applications stop at the deadline. */
 export function effectiveStatus(
@@ -540,6 +551,8 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
           query.interactionMode ? eq(listings.interactionMode, query.interactionMode) : undefined,
           query.hiringMode ? eq(listings.hiringMode, query.hiringMode) : undefined,
           query.skill ? sql`${query.skill} = ANY(${listings.skills})` : undefined,
+          // The same expression migration 0023 indexed, or the index is not used.
+          query.q ? listingSearchSql(query.q) : undefined,
           query.location !== undefined
             ? locationMatchesSql(sql`${listings.location}`, sql`${query.location}`)
             : undefined,
