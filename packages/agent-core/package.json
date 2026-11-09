@@ -17,6 +17,8 @@
   "dependencies": {
     "@pactora/shared": "workspace:*",
     "@anthropic-ai/sdk": "^0.128.0",
+    "@noble/curves": "1.9.1",
+    "@noble/hashes": "1.8.0",
     "zod": "^4.6.6",
     "@pactora/sdk": "workspace:*"
   }

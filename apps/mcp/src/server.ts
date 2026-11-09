@@ -1,5 +1,5 @@
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
-import {PactoraClient} from '@pactora/sdk';
+import {PactoraClient, type NetworkInfo} from '@pactora/sdk';
 import {buildTools, describeError, type ToolContext, type ToolDefinition} from './tools.js';
 
 /**
@@ -19,6 +19,8 @@ export interface ServerOptions {
   apiKey: string;
   chainId?: string;
   client?: PactoraClient;
+  /** A network already read (the HTTP transport builds one server per request and caches this). */
+  network?: NetworkInfo;
 }
 
 export async function buildServer(opts: ServerOptions): Promise<McpServer> {
@@ -30,7 +32,7 @@ export async function buildServer(opts: ServerOptions): Promise<McpServer> {
       ...(opts.chainId !== undefined ? {chainId: opts.chainId} : {}),
     });
 
-  const network = await client.network();
+  const network = opts.network ?? (await client.network());
   const ctx: ToolContext = {client, network};
 
   const server = new McpServer(
