@@ -73,6 +73,56 @@ export interface Caller {
 }
 
 /**
+ * What a key may do (2026-11-09; `api_keys.scopes` was stored and never
+ * read). `client`: hire, approve, dispute, cancel, post and run listings,
+ * pay x402, start runs. `worker`: accept, decline, deliver, draft, upload,
+ * apply, claim, verify/redeem x402. `read`: GET only. A key registered or
+ * re-issued has both `client` and `worker` (= full); `[]` from before
+ * scopes existed is full too. Everything not in the table below (profile,
+ * webhooks, messages, reports, keys) needs any non-read key.
+ */
+export const KEY_SCOPES = ['read', 'client', 'worker'] as const;
+export type KeyScope = (typeof KEY_SCOPES)[number];
+
+const SCOPE_OF: [RegExp, KeyScope][] = [
+  [/^POST \/v1\/jobs$/, 'client'],
+  [/^POST \/v1\/jobs\/:id\/(approve|dispute|cancel)$/, 'client'],
+  [/^POST \/v1\/jobs\/:id\/drafts\/:draftId\/review$/, 'client'],
+  [/^POST \/v1\/jobs\/:id\/dispute\/(notes|files)$/, 'client'],
+  [/^POST \/v1\/listings$/, 'client'],
+  [/^(PATCH|DELETE) \/v1\/listings\/:id$/, 'client'],
+  [/^POST \/v1\/listings\/:id\/(decide|close|reopen|unselect)$/, 'client'],
+  [/^POST \/v1\/x402\/settle$/, 'client'],
+  [/^POST \/v1\/runs$/, 'client'],
+  [/^POST \/v1\/jobs\/:id\/(accept|decline|result|drafts|files)$/, 'worker'],
+  [/^POST \/v1\/listings\/:id\/(applications|claim)$/, 'worker'],
+  [/^POST \/v1\/x402\/(verify|redeem)$/, 'worker'],
+];
+
+/** The scope a route needs from a key, or null when any authenticated key may call it. */
+export function scopeFor(method: string, routeUrl: string | undefined): KeyScope | null {
+  if (method === 'GET' || method === 'HEAD') return null;
+  const key = `${method} ${routeUrl ?? ''}`;
+  return SCOPE_OF.find(([re]) => re.test(key))?.[1] ?? null;
+}
+
+/** Refuse a key whose scopes do not cover the route (403). `[]` and client+worker are full. */
+export function requireScope(scopes: readonly string[], method: string, routeUrl: string | undefined): void {
+  if (scopes.length === 0) return;
+  const full = scopes.includes('client') && scopes.includes('worker');
+  if (full) return;
+  const needed = scopeFor(method, routeUrl);
+  const write = method !== 'GET' && method !== 'HEAD';
+  const readOnly = scopes.every((s) => s === 'read');
+  if ((readOnly && write) || (needed && !scopes.includes(needed))) {
+    throw new PactoraError(
+      ErrorCode.FORBIDDEN,
+      `this API key's scopes (${scopes.join(', ')}) do not allow ${method} ${routeUrl ?? ''}${needed ? ` — it needs the ${needed} scope` : ''}`,
+    );
+  }
+}
+
+/**
  * Resolve the caller from `Authorization: Bearer ax_...`.
  *
  * Every key is bound to exactly one agent, and an agent belongs to exactly one
@@ -112,6 +162,7 @@ export async function authenticate(db: Db, request: FastifyRequest): Promise<Cal
 
   await db.update(apiKeys).set({lastUsedAt: new Date()}).where(eq(apiKeys.id, match.id));
 
+  requireScope(match.scopes, request.method, request.routeOptions?.url);
   return {agentId: agent.id, chainId: agent.chainId, scopes: match.scopes, keyId};
 }
 

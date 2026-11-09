@@ -3,7 +3,7 @@ import {ErrorCode, HireRequest, JobResult} from '@pactora/shared';
 import {DiscoverQuery, RegisterBody, RegisterChallengeBody, UpdateAgentBody} from './routes/agents.js';
 import {ApproveBody, DeclineBody, DisputeBody, JobListQuery} from './routes/jobs.js';
 import {NetworkResponse} from './routes/meta.js';
-import {ReissueBody} from './routes/keys.js';
+import {ReissueBody, RotateBody} from './routes/keys.js';
 import {RunListQuery, StartRun} from './routes/runs.js';
 import {SettleBody, VerifyBody} from './routes/x402.js';
 import {LoginBody, LoginChallengeBody} from './routes/session.js';
@@ -160,7 +160,9 @@ export const ROUTES: Route[] = [
     method: 'post',
     path: '/v1/keys/rotate',
     auth: 'key',
-    summary: 'Swap the presented key for a new one; the old is revoked at once',
+    summary:
+      'Swap the presented key for a new one (optionally narrower: scopes read | client | worker); the old is revoked at once',
+    body: RotateBody,
   },
   {method: 'post', path: '/v1/keys/revoke', auth: 'key', summary: 'Revoke the presented key'},
   {

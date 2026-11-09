@@ -11,7 +11,7 @@ import {
 } from '@pactora/db';
 import {clientKey} from '@pactora/service';
 import {PactoraError, ErrorCode} from '@pactora/shared';
-import {authenticate, generateApiKey, hashApiKey} from '../auth.js';
+import {KEY_SCOPES, authenticate, generateApiKey, hashApiKey} from '../auth.js';
 import type {IdentityReader} from '../chain-reads.js';
 import {CHALLENGE_TTL_MS, LIVE_PER_REQUESTER, NONCE_RE, newNonce, type OwnerVerifier} from '../challenges.js';
 
@@ -47,6 +47,11 @@ export const ReissueBody = z.object({
   signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, 'signature is base64'),
   nonce: z.string().regex(NONCE_RE, 'nonce comes from POST /v1/agents/:id/keys/challenge'),
 });
+
+/** Rotate may narrow the new key: a subset of the presenting key's scopes (a full key may ask for any). */
+export const RotateBody = z
+  .object({scopes: z.array(z.enum(KEY_SCOPES)).min(1).max(3).optional()})
+  .default({});
 
 export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps): Promise<void> {
   const {db, readIdentity, verifyOwner} = deps;
@@ -85,13 +90,24 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
   /** Swap the presented key for a new one. The old one is revoked in the same transaction. */
   app.post('/v1/keys/rotate', async (request) => {
     const caller = await authenticate(db, request);
+    const body = RotateBody.parse(request.body ?? {});
+    // Never wider than the key presented: a worker-only key cannot mint a client key.
+    const full =
+      caller.scopes.length === 0 || (caller.scopes.includes('client') && caller.scopes.includes('worker'));
+    const scopes = body.scopes ? [...new Set(body.scopes)] : full ? ['client', 'worker'] : [...caller.scopes];
+    if (!full && scopes.some((s) => s !== 'read' && !caller.scopes.includes(s))) {
+      throw new PactoraError(
+        ErrorCode.FORBIDDEN,
+        `a key with scopes (${caller.scopes.join(', ')}) cannot issue one with (${scopes.join(', ')})`,
+      );
+    }
     const {key, keyId} = generateApiKey();
     await db.transaction(async (tx) => {
       await revokeLive(tx, caller.keyId);
-      await tx.insert(apiKeys).values({agentId: caller.agentId, keyId, keyHash: hashApiKey(key)});
+      await tx.insert(apiKeys).values({agentId: caller.agentId, keyId, keyHash: hashApiKey(key), scopes});
     });
     await endOwnerSessions(caller.agentId);
-    return {agentId: String(caller.agentId), apiKey: key, keyId, revokedKeyId: caller.keyId};
+    return {agentId: String(caller.agentId), apiKey: key, keyId, scopes, revokedKeyId: caller.keyId};
   });
 
   /** The kill switch for a key that leaked. */
@@ -200,7 +216,9 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
         .update(apiKeys)
         .set({revokedAt: new Date()})
         .where(and(eq(apiKeys.agentId, agent.id), isNull(apiKeys.revokedAt)));
-      await tx.insert(apiKeys).values({agentId: agent.id, keyId, keyHash: hashApiKey(key)});
+      await tx
+        .insert(apiKeys)
+        .values({agentId: agent.id, keyId, keyHash: hashApiKey(key), scopes: ['client', 'worker']});
       return true;
     });
     if (!issued) throw new PactoraError(ErrorCode.UNAUTHORIZED, 'that challenge was already used');
