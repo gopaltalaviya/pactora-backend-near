@@ -51,8 +51,13 @@ export interface OnChainJob {
   disputeDeadline: bigint;
 }
 
-/** The deadline whose passing made `exit` due. */
-export function deadlineOf(job: OnChainJob, exit: Exit): bigint {
+/**
+ * The deadline whose passing made `exit` due. For a dispute that is the
+ * dispute deadline PLUS the contract's `dispute_grace` (1.1.0): the arbiter
+ * may still rule during the grace, and `expire_dispute` before it ends is
+ * `DeadlineNotPassed`.
+ */
+export function deadlineOf(job: OnChainJob, exit: Exit, disputeGrace: bigint): bigint {
   switch (exit) {
     case 'expire_unaccepted':
       return job.acceptDeadline;
@@ -61,7 +66,7 @@ export function deadlineOf(job: OnChainJob, exit: Exit): bigint {
     case 'auto_approve':
       return job.reviewDeadline;
     case 'expire_dispute':
-      return job.disputeDeadline;
+      return job.disputeDeadline + disputeGrace;
   }
 }
 
@@ -70,8 +75,10 @@ export function deadlineOf(job: OnChainJob, exit: Exit): bigint {
  *
  * Strictly after the deadline: the contract requires `now_s() > deadline`
  * (`DeadlineNotPassed` otherwise), so the boundary second buys a failure.
+ * `disputeGrace` is the contract's current `dispute_grace` (read at expiry
+ * by the contract too, so a parameter change applies to open disputes).
  */
-export function dueExit(job: OnChainJob, now: bigint): Exit | null {
+export function dueExit(job: OnChainJob, now: bigint, disputeGrace: bigint): Exit | null {
   switch (job.state) {
     case JobState.CREATED:
       return now > job.acceptDeadline ? 'expire_unaccepted' : null;
@@ -80,7 +87,7 @@ export function dueExit(job: OnChainJob, now: bigint): Exit | null {
     case JobState.SUBMITTED:
       return job.reviewDeadline > 0n && now > job.reviewDeadline ? 'auto_approve' : null;
     case JobState.DISPUTED:
-      return job.disputeDeadline > 0n && now > job.disputeDeadline ? 'expire_dispute' : null;
+      return job.disputeDeadline > 0n && now > job.disputeDeadline + disputeGrace ? 'expire_dispute' : null;
     default:
       return null;
   }
@@ -93,6 +100,8 @@ export interface KeeperDeps {
   readJob: (chainJobId: bigint) => Promise<OnChainJob | null>;
   /** Seconds, from the chain's final block rather than this machine's clock. */
   now: () => Promise<bigint>;
+  /** The contract's `dispute_grace` in seconds (`get_params`), read once per sweep. */
+  disputeGrace: () => Promise<bigint>;
   send: (exit: Exit, chainJobId: bigint) => Promise<string>;
   logger?: {
     info: (o: unknown, m?: string) => void;
@@ -131,11 +140,12 @@ export class Keeper {
     }
 
     const now = await this.deps.now();
+    const grace = await this.deps.disputeGrace();
     let oldestUnsent: bigint | null = null;
 
     for (const id of ids) {
       const job = await this.deps.readJob(id);
-      const exit = job ? dueExit(job, now) : null;
+      const exit = job ? dueExit(job, now, grace) : null;
       if (!job || !exit) continue;
 
       try {
@@ -149,7 +159,7 @@ export class Keeper {
         // working, not breaking.
         const reason = err instanceof Error ? err.message.split('\n')[0]! : String(err);
         result.failed.push({chainJobId: id.toString(), exit, reason});
-        const due = deadlineOf(job, exit);
+        const due = deadlineOf(job, exit, grace);
         if (oldestUnsent === null || due < oldestUnsent) oldestUnsent = due;
         this.deps.onExit?.(exit, 'failed');
         this.log.warn({chainJobId: id.toString(), exit, reason}, 'exit not sent');
@@ -294,6 +304,14 @@ export function chainKeeper(opts: {
     // The final block's clock, which is what the contract's `now_s()` will
     // be at least: the exit executes in a later block.
     now: async () => (await near.finalBlock()).timestampNs / 1_000_000_000n,
+    // From the chain, not the config file: the owner may change it, and the
+    // contract reads it at expiry.
+    disputeGrace: async () => {
+      const p = await near.view<{dispute_grace?: number | string}>(chain.contracts.Pactora, 'get_params', {});
+      if (p.dispute_grace === undefined)
+        throw new Error('get_params has no dispute_grace: a contract before 1.1.0');
+      return BigInt(p.dispute_grace);
+    },
     send: keeperSender(near, chain, account),
   });
 }

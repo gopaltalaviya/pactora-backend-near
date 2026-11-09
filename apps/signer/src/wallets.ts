@@ -1,3 +1,5 @@
+import {sql, type SQL} from 'drizzle-orm';
+
 /**
  * NEAR balances of the accounts this signer sends from.
  *
@@ -32,6 +34,45 @@ interface BalanceReader {
   balance(accountId: string): Promise<bigint | null>;
 }
 
+/** Balances read at once (audit M1): a long list of keys is not a burst of RPC reads. */
+export const WALLET_READ_CONCURRENCY = 8;
+
+/** `Promise.all(items.map(fn))` with at most `limit` calls in flight; results keep their order. */
+async function mapBounded<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  // One iterator shared by the workers: each takes the next item when it is free.
+  const queue = items.entries();
+  const worker = async () => {
+    for (const [i, item] of queue) out[i] = await fn(item);
+  };
+  await Promise.all(Array.from({length: Math.min(limit, items.length)}, worker));
+  return out;
+}
+
+/**
+ * Of the accounts the signer holds keys for, those an agent row names as its
+ * wallet on this chain (audit M1). A key is created before its account
+ * exists, so the store also holds keys for accounts that were never made;
+ * reading their balances said "no such account" into `/health`, which turned
+ * `/v1/status` degraded for anyone who asked for a key and walked away.
+ */
+export async function signingAccountsToWatch(
+  db: {execute(q: SQL): Promise<unknown>},
+  chainId: string,
+  held: string[],
+): Promise<string[]> {
+  if (held.length === 0) return [];
+  const rows = (await db.execute(
+    sql`SELECT DISTINCT wallet_address FROM agents WHERE chain_id = ${chainId} AND wallet_address IN ${held}`,
+  )) as {wallet_address: string}[];
+  const named = new Set(rows.map((r) => r.wallet_address));
+  return held.filter((a) => named.has(a));
+}
+
 interface GaugeLike {
   labels(labels: Record<string, string>): {set(value: number): void};
 }
@@ -55,7 +96,9 @@ export class WalletWatch {
   async check(): Promise<void> {
     try {
       const watched = await this.deps.wallets();
-      const balances = await Promise.all(watched.map((w) => this.deps.near.balance(w.account)));
+      const balances = await mapBounded(watched, WALLET_READ_CONCURRENCY, (w) =>
+        this.deps.near.balance(w.account),
+      );
       const wallets = watched.map((w, i) => {
         const b = balances[i] ?? null;
         return {

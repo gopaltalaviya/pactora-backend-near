@@ -30,6 +30,33 @@ export interface Faucet {
   send(receiverId: string, amount: bigint): Promise<FaucetSendResult>;
 }
 
+/**
+ * The faucet account must not be the payment token's owner — that key could
+ * mint without limit. Read from the chain at start. An RPC failure REFUSES
+ * to start (audit L5): the guard used to be skipped when the owner could not
+ * be read, which is the one case where nothing had been checked.
+ */
+export async function assertFaucetNotOwner(
+  near: Pick<NearClient, 'view'>,
+  chain: ChainConfig,
+  faucet: Pick<ServiceAccount, 'accountId'>,
+): Promise<void> {
+  let owner: string;
+  try {
+    owner = await near.view<string>(chain.contracts.PaymentToken, 'owner', {});
+  } catch (err) {
+    throw new Error(
+      `could not read the payment token's owner from ${chain.contracts.PaymentToken} ` +
+        `(${err instanceof Error ? err.message : String(err)}) — the faucet guard cannot run; refusing to start`,
+    );
+  }
+  if (owner === faucet.accountId) {
+    throw new Error(
+      `FAUCET_ACCOUNT_ID ${faucet.accountId} is the payment token's owner — use a separate account holding a limited float`,
+    );
+  }
+}
+
 /** Only one send at a time: the nonce high-water mark below assumes it. */
 function serial() {
   let tail: Promise<unknown> = Promise.resolve();

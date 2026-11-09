@@ -221,4 +221,40 @@ describe('POST /v1/agents/wallet-key', () => {
     });
     expect(res.statusCode).toBe(409);
   });
+
+  /**
+   * Audit M1: the route needs no credentials and every new wallet costs the
+   * signer a key derivation and a row. One client gets ten a minute,
+   * whatever the app-wide limit.
+   */
+  it('allows one client 10 wallet keys a minute, then 429', async () => {
+    const own = await buildApp({
+      db,
+      chains: config.chains,
+      defaultChainId: 'near:sandbox',
+      bus: new EventBus(),
+      verifyOwner: fakeOwnerVerifier(config),
+      submit: async () => ({txHash: 'unused'}),
+      walletKeys: fakeWalletKeys,
+      rateLimitPerMinute: 100_000,
+    });
+    try {
+      const codes: number[] = [];
+      for (let i = 0; i < 11; i++) {
+        codes.push(
+          (
+            await own.inject({
+              method: 'POST',
+              url: '/v1/agents/wallet-key',
+              payload: {walletAddress: `burst-${i}.test.near`},
+            })
+          ).statusCode,
+        );
+      }
+      expect(codes.slice(0, 10).every((c) => c === 200)).toBe(true);
+      expect(codes[10]).toBe(429);
+    } finally {
+      await own.close();
+    }
+  });
 });

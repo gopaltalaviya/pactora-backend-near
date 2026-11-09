@@ -130,9 +130,15 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
       const dao = roles?.arbiter ?? null;
       if (dao) {
         const policy = (await deps.view(chainId, dao, 'get_policy').catch(() => null)) as DaoPolicy | null;
+        // Council is whoever may approve a FUNCTION CALL proposal — the kind
+        // a ruling is (`resolve_dispute`). Sputnik names it `call`; `*` is
+        // every kind. A role that may approve only transfers, or policy
+        // changes, is not council though its permission also ends in
+        // `:VoteApprove` (audit L3).
         const members = (policy?.roles ?? []).flatMap((r) => {
           const g = (r.kind as {Group?: unknown})?.Group;
-          return Array.isArray(g) && (r.permissions ?? []).some((p) => p.endsWith(':VoteApprove'))
+          return Array.isArray(g) &&
+            (r.permissions ?? []).some((p) => p === 'call:VoteApprove' || p === '*:VoteApprove')
             ? (g as string[])
             : [];
         });

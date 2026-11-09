@@ -663,6 +663,93 @@ describe('a transaction whose fate is not known at once', () => {
     fake.state.onSend = () => ({kind: 'http', status: 503});
     await expectRefusal(makeSigner().sign(request(id)), ErrorCode.UPSTREAM_UNAVAILABLE);
   });
+
+  /**
+   * Audit H1. The node took the transaction (it landed, its nonce is used)
+   * but the HTTP answer was lost (503). near-api-js re-sends the SAME bytes;
+   * the node now answers InvalidNonce — for a transaction that executed.
+   * Treating that as "never sent" marked the row failed, and the caller's
+   * retry signed a second hire.
+   */
+  it('a lost answer followed by InvalidNonce on the resend is the landed transaction, not a failure', async () => {
+    const id = await anAgent();
+    let calls = 0;
+    fake.state.onSend = (tx) => {
+      calls++;
+      if (calls === 1) {
+        fake.state.sent.push(tx);
+        fake.land(tx.hash, 77);
+        return {kind: 'http', status: 503};
+      }
+      if (calls === 2) {
+        return {
+          kind: 'rejected',
+          invalidTx: {InvalidNonce: {tx_nonce: Number(tx.nonce), ak_nonce: Number(tx.nonce)}},
+        };
+      }
+      return {kind: 'success', value: 78};
+    };
+    const signer = new SignerService({
+      db,
+      locks,
+      chain: CHAIN,
+      keys: {kind: 't', keyFor: async (a) => (a === WALLET ? key : null), accounts: async () => [WALLET]},
+      near: nearClient(fake.url, {retries: 3}),
+    });
+    const req = request(id, {idempotencyKey: 'audit-dup-1'});
+    const first = await signer.sign(req).catch((e: PactoraError) => e);
+    const row = (await rowsOf())[0]!;
+    expect(row.status, 'a transaction the chain may hold is never marked failed').not.toBe('failed');
+    const second = await signer.sign(req).catch((e: PactoraError) => e);
+    const landed = [...fake.state.outcomes.keys()];
+    expect(landed, 'a safe signer executes the hire once').toHaveLength(1);
+    expect(fake.state.sent.filter((t) => t.method === 'create_job')).toHaveLength(1);
+    // Both answers are the one transaction that landed.
+    for (const r of [first, second]) {
+      expect(r).toMatchObject({txHash: landed[0], result: 77});
+    }
+  });
+
+  it('a node rejection for a nonce the chain already used keeps the row for resolution', async () => {
+    const id = await anAgent();
+    fake.state.onSend = (tx) => {
+      // The transaction executed (another path delivered it), yet this answer is InvalidNonce.
+      fake.state.sent.push(tx);
+      fake.land(tx.hash, 5);
+      return {
+        kind: 'rejected',
+        invalidTx: {InvalidNonce: {tx_nonce: Number(tx.nonce), ak_nonce: Number(tx.nonce)}},
+      };
+    };
+    const result = await makeSigner().sign(request(id, {idempotencyKey: 'used-nonce'}));
+    expect(result).toMatchObject({replayed: false, result: 5});
+    expect((await rowsOf())[0]).toMatchObject({status: 'final'});
+    fake.state.onSend = () => ({kind: 'success', value: 99});
+    const again = await makeSigner().sign(request(id, {idempotencyKey: 'used-nonce'}));
+    expect(again).toMatchObject({replayed: true, result: 5});
+    expect(fake.state.sent).toHaveLength(1);
+  });
+
+  it('send_tx itself is never retried by the RPC client: one attempt, then the outcome is asked for', async () => {
+    const id = await anAgent();
+    let sends = 0;
+    fake.state.onSend = () => {
+      sends++;
+      return {kind: 'http', status: 503};
+    };
+    await expectRefusal(
+      new SignerService({
+        db,
+        locks,
+        chain: CHAIN,
+        keys: {kind: 't', keyFor: async (a) => (a === WALLET ? key : null), accounts: async () => [WALLET]},
+        near: nearClient(fake.url, {retries: 3}),
+      }).sign(request(id)),
+      ErrorCode.UPSTREAM_UNAVAILABLE,
+    );
+    expect(sends).toBe(1);
+    expect((await rowsOf())[0]).toMatchObject({status: 'signed'});
+  });
 });
 
 describe('accepting a wallet before its agent row exists', () => {

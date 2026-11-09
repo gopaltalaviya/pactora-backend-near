@@ -13,6 +13,7 @@ import {
   DEFAULT_WINDOW_BLOCKS,
   type Db,
 } from '@pactora/db';
+import {clientKey} from '@pactora/service';
 import {AccountId, PactoraError, BaseUnits, Capability, ChainId, ErrorCode} from '@pactora/shared';
 import type {ChainConfig} from '@pactora/config';
 import {authenticate, generateApiKey, hashApiKey, resolveChainId} from '../auth.js';
@@ -107,7 +108,16 @@ export interface RouteDeps {
    * loopback or a private address (SSRF). On in production.
    */
   requirePublicHttpsEndpoints?: boolean;
+  /** The app-wide per-minute limit; wallet-key creation never allows more than it. */
+  rateLimitPerMinute?: number;
 }
+
+/**
+ * Wallet keys created per client per minute (audit M1). The route needs no
+ * credentials and each key is a KDF derivation and a row in the signer; a
+ * person registers one agent at a time.
+ */
+export const WALLET_KEY_RATE_PER_MINUTE = 10;
 
 /** Hostnames and literal addresses that name this machine or a private network. */
 const PRIVATE_HOST =
@@ -305,7 +315,15 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
    * function-call key scoped to the Pactora contract. Unauthenticated: a
    * public key is harmless, and asking twice returns the same key.
    */
-  app.post('/v1/agents/wallet-key', async (request) => {
+  const walletKeyLimit = {
+    config: {
+      rateLimit: {
+        max: Math.min(WALLET_KEY_RATE_PER_MINUTE, deps.rateLimitPerMinute ?? WALLET_KEY_RATE_PER_MINUTE),
+        timeWindow: '1 minute',
+      },
+    },
+  };
+  app.post('/v1/agents/wallet-key', walletKeyLimit, async (request) => {
     const body = z.object({walletAddress: AccountId, chainId: ChainId.optional()}).parse(request.body);
     const chainId = body.chainId ?? defaultChainId;
     if (!enabled.includes(chainId)) {
@@ -336,7 +354,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
     const ownerAddress = body.ownerAddress;
     const nonce = newNonce();
     const expiresAt = new Date(Date.now() + CHALLENGE_TTL_MS);
-    const requester = request.ip;
+    const requester = clientKey(request.ip);
     await db.transaction(async (tx) => {
       await tx.insert(registrationChallenges).values({nonce, chainId, ownerAddress, requester, expiresAt});
       await tx.execute(sql`

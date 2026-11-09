@@ -244,6 +244,40 @@ describe('verifyNep413', () => {
       false,
     );
   });
+
+  /**
+   * Audit M2. The access key was read over RPC BEFORE the signature was
+   * checked, so anyone could spend one RPC read per garbage signature on an
+   * unauthenticated route. The signature is checked locally first; the chain
+   * is asked only about a signature that verifies.
+   */
+  it('checks the signature locally first: garbage costs no RPC read', async () => {
+    let reads = 0;
+    const client = {
+      accessKey: async () => {
+        reads++;
+        return {nonce: 1n, permission: 'FullAccess' as const};
+      },
+    };
+    for (let i = 0; i < 20; i++) {
+      const ok = await verifyNep413(
+        {
+          accountId: 'victim.testnet',
+          publicKey,
+          signature: Buffer.alloc(64).toString('base64'),
+          message: `m${i}`,
+          recipient: 'pactora',
+          nonce,
+        },
+        client,
+      );
+      expect(ok).toBe(false);
+    }
+    expect(reads).toBe(0);
+    // A real signature is checked against the chain, once.
+    expect(await verifyNep413(await signed(), client)).toBe(true);
+    expect(reads).toBe(1);
+  });
 });
 
 describe('block sources', () => {

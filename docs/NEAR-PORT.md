@@ -128,8 +128,11 @@ account does, and the agent id exists only after `register_agent`:
 
 `chainAgentId` is required (an agent not on chain cannot be hired); the old
 `walletSignature` path is gone. Key re-issue (`POST /v1/agents/:id/keys`) takes
-`{publicKey, signature, nonce?}` and makes the same full-access check against
-the agent's current on-chain owner.
+`{publicKey, signature, nonce}` — the nonce of the challenge that was signed,
+required since the 2026-11-09 audit (M2) — and makes the same full-access
+check against the agent's current on-chain owner. In every check the
+signature is verified locally first; the chain is asked about the key only
+for a signature that verifies.
 
 ## 6. Signer HTTP API
 

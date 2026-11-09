@@ -333,6 +333,11 @@ export interface Nep413Proof {
  * Whether `proof` is a NEP-413 signature by a **full-access** key of
  * `accountId` — near-api-js's `verifyMessage`, which checks both. A
  * function-call key (an agent's) cannot sign for its owner.
+ *
+ * The signature is checked LOCALLY first, and the chain is asked about the
+ * key only when it verifies (audit M2): the routes that take these proofs
+ * need no credentials, and reading the access key over RPC before looking at
+ * the signature let anyone spend one RPC read per garbage signature.
  */
 export async function verifyNep413(
   proof: Nep413Proof,
@@ -346,7 +351,22 @@ export async function verifyNep413(
   } catch {
     return false;
   }
-  // The only provider method verifyMessage uses; see near-api-js lib/nep413.
+  const payload = {message: proof.message, recipient: proof.recipient, nonce: proof.nonce};
+  type Provider = Parameters<typeof verifyMessage>[0]['provider'];
+  // 1. The signature alone: near-api-js's own serialisation and check, with
+  //    a provider that answers "full access" without asking anyone.
+  try {
+    await verifyMessage({
+      signerAccountId: proof.accountId,
+      signerPublicKey: proof.publicKey,
+      payload,
+      signature,
+      provider: {viewAccessKey: async () => ({permission: 'FullAccess', nonce: 0n})} as unknown as Provider,
+    });
+  } catch {
+    return false;
+  }
+  // 2. A signature that verifies: is the key a full-access key of the account?
   const provider = {
     viewAccessKey: async ({accountId, publicKey}: {accountId: string; publicKey: string | PublicKey}) => {
       const key = await client.accessKey(accountId, publicKey.toString());
@@ -358,9 +378,9 @@ export async function verifyNep413(
     await verifyMessage({
       signerAccountId: proof.accountId,
       signerPublicKey: proof.publicKey,
-      payload: {message: proof.message, recipient: proof.recipient, nonce: proof.nonce},
+      payload,
       signature,
-      provider: provider as unknown as Parameters<typeof verifyMessage>[0]['provider'],
+      provider: provider as unknown as Provider,
     });
     return true;
   } catch {
@@ -407,12 +427,22 @@ export interface NearClientOptions {
 }
 
 export function nearClient(rpcUrl: string, opts: NearClientOptions = {}): NearClient {
+  const connection = {url: rpcUrl, ...(opts.timeoutMs ? {timeout: opts.timeoutMs} : {})};
   const provider = new JsonRpcProvider(
-    {url: rpcUrl, ...(opts.timeoutMs ? {timeout: opts.timeoutMs} : {})},
+    connection,
     // near-api-js's `retries` is the number of ATTEMPTS (0 sends nothing); ours
     // is retries after a failure.
     opts.retries !== undefined ? {retries: opts.retries + 1} : {},
   );
+  /**
+   * `send_tx` is sent ONCE (audit H1). near-api-js retries a request on a
+   * 500/503/408 or a failed fetch — and a broadcast whose answer was lost
+   * may well have landed. Re-sending the same bytes then earns an
+   * InvalidNonce for a transaction that executed, which no caller can tell
+   * from a transaction that was refused. The signer owns that retry: it asks
+   * for the outcome by hash (`txOutcome`), which is idempotent.
+   */
+  const sendProvider = new JsonRpcProvider(connection, {retries: 1});
   const rpc = <T>(method: string, params: unknown): Promise<T> =>
     provider.sendJsonRpc<never, never, T>(method as never, params as never);
 
@@ -478,10 +508,13 @@ export function nearClient(rpcUrl: string, opts: NearClientOptions = {}): NearCl
     },
 
     async sendSigned(signed) {
-      const raw = await rpc<RawOutcome>('send_tx', {
-        signed_tx_base64: Buffer.from(signed.bytes).toString('base64'),
-        wait_until: 'FINAL',
-      });
+      const raw = await sendProvider.sendJsonRpc<never, never, RawOutcome>(
+        'send_tx' as never,
+        {
+          signed_tx_base64: Buffer.from(signed.bytes).toString('base64'),
+          wait_until: 'FINAL',
+        } as never,
+      );
       return parseOutcome(raw, signed.hash);
     },
   };

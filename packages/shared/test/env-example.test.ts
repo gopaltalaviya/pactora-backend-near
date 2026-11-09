@@ -39,8 +39,8 @@ const code = [
   ...sources(join(ROOT, 'scripts')),
 ].join('\n');
 
-/** Read by libraries, not by name in our code. */
-const READ_ELSEWHERE = new Set(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
+/** Read by libraries, not by name in our code — or by docker-compose.full.yml's minio service (MINIO_KMS_SECRET_KEY). */
+const READ_ELSEWHERE = new Set(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MINIO_KMS_SECRET_KEY']);
 /** Built from the network slug: `RPC_URL_${slug}` (packages/config). */
 const RPC_PER_NETWORK = /^RPC_URL_(TESTNET|SANDBOX|MAINNET)$/;
 

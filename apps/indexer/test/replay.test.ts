@@ -122,6 +122,33 @@ describe('every lifecycle event lands in the job trail', () => {
     expect(events[1]!.payload).toEqual({jobId: '7', workerAgentId: '2', clientAgentId: '1', amount: '1000'});
   });
 
+  /**
+   * Contract 1.1.0: an expired dispute splits the client's bond — half to the
+   * worker, half back — so one receipt carries TWO dispute_bond_settled
+   * events and a dispute_expired that says the split. Every one is kept.
+   */
+  it('records both bond settlements and the split of a 1.1.0 dispute expiry', async () => {
+    await seedJob(db, {state: 'disputed'});
+    const h = harness();
+    h.pactora(
+      log.disputeBondSettled({jobId: 7, to: 2, amount: 250}),
+      log.disputeBondSettled({jobId: 7, to: 1, amount: 250}),
+      log.disputeExpired({jobId: 7, bondToWorker: 250, bondToClient: 250}),
+    );
+    await h.sync();
+    const events = await eventRows(db);
+    expect(events.map((e) => e.kind)).toEqual([
+      'dispute_bond_settled',
+      'dispute_bond_settled',
+      'dispute_expired',
+    ]);
+    expect(events.map((e) => e.payload)).toEqual([
+      {jobId: '7', toAgentId: '2', amount: '250'},
+      {jobId: '7', toAgentId: '1', amount: '250'},
+      {jobId: '7', bondToWorker: '250', bondToClient: '250'},
+    ]);
+  });
+
   it('ignores an event for a job this API did not create', async () => {
     await seedJob(db);
     const h = harness();

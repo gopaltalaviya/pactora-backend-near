@@ -686,21 +686,39 @@ export class SignerService {
     try {
       outcome = await near.sendSigned(signed);
     } catch (err) {
-      const name = errorName(err);
-      if (REJECTED.has(name)) {
-        // The node refused the transaction itself: it was never included, so
-        // its nonce is unused and the request may be retried as it is.
-        await ledger.unsent().catch((e: unknown) => this.log.error({err: e}, 'could not mark a rejected tx'));
-        this.log.warn({wallet, txHash: signed.hash, rejected: name}, 'transaction rejected by the node');
-        throw rejectedError(name, wallet);
-      }
-      // Timed out, or the RPC failed: it may or may not have landed. Ask once.
+      // Whatever the node said, the one fact that settles it is whether the
+      // chain holds this transaction. Ask by hash first (idempotent), then
+      // read the key's nonce: a nonce at or past ours means a transaction
+      // with it executed — ours, or one that makes ours impossible.
       outcome = await near.txOutcome(signed.hash, wallet).catch(() => ({
         status: 'pending' as const,
         txHash: signed.hash,
         receipts: [],
       }));
+      const name = errorName(err);
+      if (outcome.status === 'pending' && REJECTED.has(name)) {
+        // The node refused the transaction. Audit H1: that is NOT proof it
+        // never executed — a broadcast whose answer was lost and re-sent is
+        // refused as InvalidNonce by the node that already included it. Only
+        // a key whose nonce is still below ours says the slot is unused.
+        const used = await this.nonceUsed(wallet, opts.key, opts.nonce);
+        if (used === false) {
+          await ledger
+            .unsent()
+            .catch((e: unknown) => this.log.error({err: e}, 'could not mark a rejected tx'));
+          this.log.warn({wallet, txHash: signed.hash, rejected: name}, 'transaction rejected by the node');
+          throw rejectedError(name, wallet);
+        }
+        this.log.warn(
+          {wallet, txHash: signed.hash, rejected: name, nonce: opts.nonce},
+          used === null
+            ? 'rejected by the node, but the key could not be read: outcome unknown'
+            : 'rejected by the node, but its nonce is used: outcome unknown',
+        );
+        throw uncertainError(signed.hash);
+      }
       if (outcome.status === 'pending') {
+        // Timed out, or the RPC failed: it may or may not have landed.
         this.log.warn(
           {wallet, txHash: signed.hash, error: (err as Error).message?.slice(0, 500)},
           'broadcast outcome unknown',
@@ -745,9 +763,24 @@ export class SignerService {
       await on.reverted(outcome.failure ?? 'unknown failure');
       throw refusalOf(outcome.failure ?? '', txHash);
     }
-    const access = await this.deps.near.accessKey(wallet, key.publicKey);
-    if (access && access.nonce >= BigInt(nonce)) throw uncertainError(txHash);
+    const used = await this.nonceUsed(wallet, key, nonce);
+    if (used !== false) throw uncertainError(txHash);
     return {reuseNonce: nonce};
+  }
+
+  /**
+   * Whether the key's nonce on chain has reached `nonce`: true when a
+   * transaction with it (or a later one) executed, false when the slot is
+   * still free, null when the key could not be read — which is never taken
+   * as "free".
+   */
+  private async nonceUsed(wallet: string, key: TxKey, nonce: number): Promise<boolean | null> {
+    try {
+      const access = await this.deps.near.accessKey(wallet, key.publicKey);
+      return access !== null && access.nonce >= BigInt(nonce);
+    } catch {
+      return null;
+    }
   }
 
   // ── plumbing ───────────────────────────────────────────────────────────

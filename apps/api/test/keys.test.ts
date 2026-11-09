@@ -111,10 +111,14 @@ describe('re-issue by the owner', () => {
     expect(res.statusCode).toBe(200);
     return res.json() as {message: string; nonce: string};
   }
+  /** The body a re-issue takes: the signature and the nonce of the challenge it is over (audit M2). */
+  async function reissue(account: string, c: {message: string; nonce: string}, as = account) {
+    return {...(await signChallenge(account, c, as)), nonce: c.nonce};
+  }
 
   it('issues a new key for a signature over the challenge, and revokes every old one', async () => {
     const {agentId, apiKey} = await register();
-    const signed = await signChallenge(owner, await challenge(agentId));
+    const signed = await reissue(owner, await challenge(agentId));
     const res = await post(`/v1/agents/${agentId}/keys`, undefined, signed);
     expect(res.statusCode).toBe(201);
     expect((await whoAmI(res.json().apiKey)).statusCode).toBe(200);
@@ -126,7 +130,7 @@ describe('re-issue by the owner', () => {
     const res = await post(
       `/v1/agents/${agentId}/keys`,
       undefined,
-      await signChallenge(stranger, await challenge(agentId)),
+      await reissue(stranger, await challenge(agentId)),
     );
     expect(res.statusCode).toBe(401);
   });
@@ -138,7 +142,7 @@ describe('re-issue by the owner', () => {
     const res = await post(
       `/v1/agents/${agentId}/keys`,
       undefined,
-      await signChallenge(owner, await challenge(agentId)),
+      await reissue(owner, await challenge(agentId)),
     );
     expect(res.statusCode).toBe(401);
     expect(res.json().detail).toMatch(/full-access key/);
@@ -146,7 +150,7 @@ describe('re-issue by the owner', () => {
 
   it('accepts a challenge once: a replayed signature gets nothing', async () => {
     const {agentId} = await register();
-    const signed = await signChallenge(owner, await challenge(agentId));
+    const signed = await reissue(owner, await challenge(agentId));
     expect((await post(`/v1/agents/${agentId}/keys`, undefined, signed)).statusCode).toBe(201);
     expect((await post(`/v1/agents/${agentId}/keys`, undefined, signed)).statusCode).toBe(401);
   });
@@ -155,7 +159,7 @@ describe('re-issue by the owner', () => {
     const {agentId} = await register();
     const c = await challenge(agentId);
     await db.execute(sql`UPDATE key_challenges SET expires_at = now() - interval '1 second'`);
-    const res = await post(`/v1/agents/${agentId}/keys`, undefined, await signChallenge(owner, c));
+    const res = await post(`/v1/agents/${agentId}/keys`, undefined, await reissue(owner, c));
     expect(res.statusCode).toBe(401);
   });
 
@@ -167,7 +171,7 @@ describe('re-issue by the owner', () => {
     const res = await post(
       `/v1/agents/${agentId}/keys`,
       undefined,
-      await signChallenge(owner, await challenge(agentId)),
+      await reissue(owner, await challenge(agentId)),
     );
     expect(res.statusCode).toBe(401);
     expect(res.json().detail).toMatch(/on-chain owner/);
@@ -200,12 +204,31 @@ describe('re-issue by the owner', () => {
     expect(res.statusCode).toBe(201);
   });
 
-  it('finds the signed challenge among several live ones even without its nonce', async () => {
+  /**
+   * Audit M2. Without the nonce, every live challenge was tried in turn, and
+   * each try read the access key over RPC — twenty reads for one garbage
+   * signature on a route that needs no credentials. The nonce names the one
+   * challenge the signature is over, and a request without it is malformed.
+   */
+  it('requires the nonce: the signed challenge is named, never searched for', async () => {
     const {agentId} = await register();
     const first = await challenge(agentId);
     await challenge(agentId);
-    const res = await post(`/v1/agents/${agentId}/keys`, undefined, await signChallenge(owner, first));
-    expect(res.statusCode).toBe(201);
+    const unnamed = await signChallenge(owner, first);
+    const res = await post(`/v1/agents/${agentId}/keys`, undefined, unnamed);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().detail).toMatch(/nonce/);
+    const named = await post(`/v1/agents/${agentId}/keys`, undefined, {...unnamed, nonce: first.nonce});
+    expect(named.statusCode).toBe(201);
+  });
+
+  it('a signature over another live challenge than the one named is refused', async () => {
+    const {agentId} = await register();
+    const first = await challenge(agentId);
+    const second = await challenge(agentId);
+    const signed = await signChallenge(owner, first);
+    const res = await post(`/v1/agents/${agentId}/keys`, undefined, {...signed, nonce: second.nonce});
+    expect(res.statusCode).toBe(401);
   });
 
   it('keeps only a few live challenges per requester, so asking cannot grow without bound', async () => {
@@ -219,5 +242,31 @@ describe('re-issue by the owner', () => {
 
   it('is NOT_FOUND for an agent that does not exist', async () => {
     expect((await post('/v1/agents/999999/keys/challenge')).statusCode).toBe(404);
+  });
+
+  /** Audit M2: the two routes need no credentials; one client gets a few a minute, whatever the app-wide limit. */
+  it('allows one client 20 re-issue requests a minute, then 429', async () => {
+    const own = await buildApp({
+      ...chainDeps(config),
+      db,
+      chains: config.chains,
+      defaultChainId: 'near:sandbox',
+      bus: new EventBus(),
+      submit: async () => ({txHash: 'unused'}),
+      rateLimitPerMinute: 100_000,
+    });
+    try {
+      const {agentId} = await register();
+      const codes: number[] = [];
+      for (let i = 0; i < 21; i++) {
+        codes.push(
+          (await own.inject({method: 'POST', url: `/v1/agents/${agentId}/keys/challenge`})).statusCode,
+        );
+      }
+      expect(codes.slice(0, 20).every((c) => c === 200)).toBe(true);
+      expect(codes[20]).toBe(429);
+    } finally {
+      await own.close();
+    }
   });
 });

@@ -124,6 +124,165 @@ images build, and the stack ran `operational` on the sandbox in Docker. Server
   docs/08 (`JUDGE_PROVIDER`, `NEAR_AI_API_KEY`, `NEAR_AI_MODEL`,
   `NEAR_AI_BASE_URL`).
 
+**2026-11-09 (branch human-work): security-audit fixes.** Every fix has a
+test that failed on the old code first (the one line of evidence is quoted).
+The auditor's reproductions were adapted into the repo's own test files.
+
+- **H1 — a double-signed hire on `InvalidNonce` (fixed).** near-api-js
+  retried `send_tx` up to 12 times on a 500/503/408 or a failed fetch, so a
+  broadcast whose answer was lost was re-sent, the node answered
+  `InvalidNonce` for a transaction that had EXECUTED, and the signer took
+  that as "never sent" (row `failed`, no hash) — the caller's retry signed a
+  second `create_job`. Now `send_tx` is sent once (`nearClient` has a
+  1-attempt provider for it; `packages/near/src/index.ts`), and on ANY
+  rejection the signer first asks for the outcome by hash and then reads the
+  key's nonce: a known outcome is recorded as such; a nonce at or past ours
+  (or a key that cannot be read) keeps the row `signed` for
+  `resolveUncertain`; only a nonce still below ours marks the slot unused
+  (`apps/signer/src/signer.ts` `send`, `nonceUsed`). Tests
+  (`apps/signer/test/signer.test.ts`, "a transaction whose fate is not known
+  at once"): the auditor's scenario — red `expected 'failed' not to be
+  'failed'`, two `create_job`s on chain; a rejection for a used nonce — red
+  (row `failed`); `send_tx` sent once — red `expected 4 to be 1`.
+- **M1 — signer scrypt DoS and junk keys (fixed, one deviation).**
+  (a) `encryptSecret`/`decryptSecret` use the asynchronous `crypto.scrypt`
+  (`apps/signer/src/keystore.ts`); red `apps/signer/test/keys-dos.test.ts`:
+  `the event loop stalled 217 ms` for 30 keys (green: under 150 ms, `/health`
+  answered within the burst). (c) `POST /v1/agents/wallet-key` is limited to
+  10 a minute per client (`WALLET_KEY_RATE_PER_MINUTE`,
+  `apps/api/src/routes/agents.ts`; test in `identity.test.ts`, 11th → 429).
+  (d) `WalletWatch` reads at most 8 balances at once (red `expected 40 to be
+  less than or equal to 8`) and the signer watches only wallets an `agents`
+  row names (`signingAccountsToWatch`, `apps/signer/src/wallets.ts`,
+  `main.ts`) — this is what fixed the known "unauthenticated wallet-key
+  creation degrades `/v1/status`" (removed from `pactora-docs-near`
+  `docs/STATUS.md`). (b) **Deviation:** the brief asked that a key be
+  refused unless the account exists on chain. That would break registration:
+  by `docs/NEAR-PORT.md` §5 the owner CREATES the wallet account with the
+  key (`CreateAccount` + `AddKey` in one transaction; the interface's
+  `lib/wallet.ts` and `scripts/demo.mjs` do exactly that), so the account
+  cannot exist first. Instead a key is swept once it is unclaimed:
+  `DbKeyStore.sweepUnclaimed` (hourly in `main.ts`,
+  `SIGNER_KEY_UNCLAIMED_GRACE_MS`, default a day) deletes rows older than
+  the grace period whose account is not on chain and that no agent row
+  names, keeps every row when the RPC fails, and checks at most 50 rows per
+  sweep. Tests in `keystore.test.ts` (red: `sweepUnclaimed is not a
+  function`). Net effect: a junk row lives a day, is never read by the
+  wallet watch, and costs no synchronous CPU.
+- **M2 — unauthenticated key re-issue cost 20 RPC reads (fixed).**
+  `verifyNep413` checks the signature locally first (near-api-js's own
+  `verifyMessage` with a provider that answers "full access" without a
+  network) and asks the chain about the key only for a signature that
+  verifies — so `/v1/session`, `/v1/agents` and the re-issue all benefit
+  (`packages/near/src/index.ts`; red `packages/near/test/near.test.ts`
+  `expected 20 to be +0` RPC reads for 20 garbage signatures). `nonce` is
+  required on `POST /v1/agents/:id/keys` and the try-every-live-challenge
+  loop is gone (`apps/api/src/routes/keys.ts`; red `expected 201 to be
+  422`); both re-issue routes are limited to 20 a minute per client
+  (`REISSUE_RATE_PER_MINUTE`; test: 21st → 429). No client in this repo
+  omitted the nonce (`scripts/demo.mjs` does not re-issue; the interface has
+  no re-issue page). `docs/NEAR-PORT.md` §5 updated.
+- **L1 — IPv6 rate-limit buckets (fixed).** `clientKey(ip)` in
+  `@pactora/service` (`http.ts`): IPv6 → its /64, IPv4 and IPv4-mapped
+  unchanged; used by the app-wide limiter's `keyGenerator` and the
+  `requester` fields in `session.ts`, `keys.ts`, `agents.ts`. Test
+  `packages/service/test/client-key.test.ts` (red: `clientKey is not a
+  function`).
+- **L2 — SSRF guard gaps (fixed).** `netguard.ts` blocks `::/96`
+  (IPv4-compatible), `::ffff:0:0:0/96` (SIIT), `2002::/16` (6to4),
+  `64:ff9b:1::/48`, `fec0::/10`, `2001::/32` (Teredo), and judges the IPv6
+  ranges before the embedded IPv4. Red: the auditor's probe ALLOWED
+  `[::127.0.0.1]`, `[::ffff:0:7f00:1]`, `[2002:7f00:1::]`,
+  `[64:ff9b:1::a00:1]`, `[fec0::1]`, Teredo (6 of 10); 8 new
+  `isPublicAddress` cases and 5 `checkTarget` cases failed. Trap found on
+  the way: a BlockList rule on `::ffff:0:0/96` refuses EVERY IPv4 address
+  (Node checks IPv4 through its mapped form) — the SIIT range is
+  `::ffff:0:0:0/96`.
+- **L3 — council membership (fixed).** Only `call:VoteApprove` or
+  `*:VoteApprove` makes a role council (`apps/api/src/routes/admin.ts`);
+  red `apps/api/test/admin.test.ts`: a `transfer:VoteApprove`-only member
+  got `200`, expected `403`.
+- **L4 — MinIO KMS key in the data volume (fixed).**
+  `docker-compose.full.yml` requires `MINIO_KMS_SECRET_KEY` from the
+  environment (`${…:?}`) and no longer generates a key into `/data`;
+  `.env.example` (empty), `deploy/vps/README.md` (the server `.env` line and
+  the format `pactora:<32 random bytes, base64>`). Red
+  `packages/shared/test/compose-env.test.ts`: 2 cases. A deployment that
+  already holds objects under a volume-generated key must set that key's
+  value as `MINIO_KMS_SECRET_KEY` (none exists today: the VPS was retired).
+- **L5 — faucet owner check skipped on RPC failure (fixed).**
+  `assertFaucetNotOwner` (`apps/signer/src/faucet.ts`) refuses to start when
+  the token's `owner` cannot be read; red `apps/signer/test/faucet.test.ts`
+  (3 cases). Not in `test:startup`: its cases point at a closed port, which
+  the RPC network check refuses before the faucet guard runs.
+- **I1 — backup integrity (fixed).** `deploy/vps/backup-lib.sh`: an
+  HMAC-SHA256 beside every `.enc` (`<file>.hmac`), keyed from the
+  passphrase under the label `pactora-backup-mac-v1`; `backup.sh` writes and
+  self-verifies it and copies it off-host; `restore-test.sh` verifies it
+  before `pg_restore` (and before `tar`). `bash deploy/vps/backup-lib.test.sh`:
+  6 checks — the flipped ciphertext byte failed the MAC while openssl still
+  decrypted the tampered file without error, which is the finding.
+- **I2 — AEAD tag length and KDF cost (fixed).** `authTagLength: 16` on
+  both sides of `keystore.ts` and `secretbox.ts`, a shortened tag refused;
+  the KDF cost read from a row is bounded (N a power of two in [2^10, 2^17],
+  r ≤ 32, p ≤ 16; `MAX_KDF_N`). Red: `keystore.test.ts` (a 4-byte tag was
+  accepted; N = 2^18 was derived), `netguard.test.ts` secretbox (12-byte tag
+  accepted).
+- **I3 — the flaky channels outbox test (fixed).** `apps/channels/test`
+  freezes `now` 1 s ahead in `beforeEach`; the outbox rows took the
+  database's `now()` as `next_attempt_at`, so when the TRUNCATE and inserts
+  took over a second under load nothing was due — `sent: 0`. Reproduced by
+  a 1.2 s delay before the inserts (`expected { sent: +0, dropped: +0 }`);
+  the rows now carry `nextAttemptAt` on the test clock, which passed with
+  the delay in place and 10/10 without it. Production is unaffected (one
+  real clock; a database ahead of the node delays a message by the skew).
+- **Recorded, not changed:** dispute reasons are public in the
+  `job.disputed` event (design); sessions outlive key removal (7 d); the
+  services share one database role; `pnpm audit` advisories are dev-only
+  (esbuild/vitest/glob/minimatch). vitest: the latest is 5.1.0 and the
+  latest 3.x is the installed 3.2.7, so no upgrade was within the major and
+  none was attempted.
+**Contracts 1.1.0 (`pactora-contracts-near` 25df5c3) — the backend follows:**
+
+- `chain/config/params.*.json` re-synced (`node scripts/sync-chain-facts.mjs`):
+  `dispute_grace` (10 s sandbox, 24 h testnet), testnet `dispute_timeout`
+  7 days. `OnchainParamsSchema` (strict) gains `dispute_grace`;
+  `params.disputeGraceSeconds`. New wasm sha256s live in the contracts
+  repo's `wasm/SHA256SUMS` (pactora `e0ed7876…`, mock_usdc `de2a79c2…`);
+  the backend keeps no copy — `demo:local` deploys the contracts repo's
+  committed wasm through its `deploy.mjs`, which checks those sums.
+- Keeper: `dueExit`/`deadlineOf` take the contract's `dispute_grace`
+  (read from `get_params` once per sweep) — a disputed job is due only after
+  `dispute_deadline + dispute_grace`, where before the keeper got
+  `DeadlineNotPassed` on every sweep for the whole grace. Red
+  (`apps/signer/test/keeper.test.ts`): `expected 'expire_dispute' to be
+  null` at deadline + 1 with a 100 s grace; the fake-RPC sweep sent
+  `expire_dispute` for a job inside the grace (4 sends, expected 3).
+- `GET /v1/network` `windows.disputeGrace` (`apps/api/src/routes/meta.ts`,
+  in the OpenAPI document through the schema).
+- `new` is `#[private]`: the contracts repo's `deploy.mjs` already calls it
+  as the contract account itself (deploy + `new` in one transaction signed
+  by that account); no backend script calls `new`.
+- Indexer: `dispute_expired` carries `bond_to_worker` / `bond_to_client`
+  (optional in the decoder: a 1.0.0 event decodes with nulls), and the two
+  `dispute_bond_settled` events an expiry now emits are both kept (distinct
+  log index). Red (`apps/indexer/test`): the 1.1.0 shape decoded without
+  the split; the replay of two settlements + expiry did not carry it. The
+  job feed (`GET /v1/jobs/:id` `events[]`) serves `kind`, `txHash`,
+  `explorerUrl`, `occurredAt` — no payload — so the only visible change for
+  the interface is a second `dispute_bond_settled` entry on an expiry
+  (worker's half, then the client's); the interface repo was not touched.
+- Gate (all on the fixed code): `pnpm check` 1272 passed, 10 skipped (86
+  files; was 1231); `test:startup` all 40 refused; `node
+  scripts/check-no-secrets.mjs` clean (389 files); `pnpm demo:local` `Demo
+  passed.`, 64 checks, on a fresh sandbox running the 1.1.0 wasm (deploy.mjs
+  printed pactora `e0ed7876…`, mock_usdc `de2a79c2…`); the channels test
+  10/10 alone; `bash deploy/vps/backup-lib.test.sh` 6 checks. Trap: setting
+  `MSYS_NO_PATHCONV=1` for a whole PowerShell session breaks pnpm's shell
+  shims (`C:\c\Users\…\tsc`) — set it only on the docker command that needs
+  it. `pactora-docs-near/docs/STATUS.md` has the known-issue line struck
+  (uncommitted there).
+
 ---
 
 ## 🏷 Rebrand: AGENTX → Pactora (decided 2026-10-30)

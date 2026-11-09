@@ -89,16 +89,45 @@ describe('testnet development credentials from env', () => {
 });
 
 describe('sealing a key', () => {
-  it('round-trips, and fails loudly on a wrong passphrase', () => {
-    const sealed = encryptSecret('secret', PASS, 'aad', FAST);
-    expect(decryptSecret(sealed, PASS, 'aad')).toBe('secret');
-    expect(() => decryptSecret(sealed, 'q'.repeat(40), 'aad')).toThrow(/does not decrypt/);
+  it('round-trips, and fails loudly on a wrong passphrase', async () => {
+    const sealed = await encryptSecret('secret', PASS, 'aad', FAST);
+    expect(await decryptSecret(sealed, PASS, 'aad')).toBe('secret');
+    await expect(decryptSecret(sealed, 'q'.repeat(40), 'aad')).rejects.toThrow(/does not decrypt/);
   });
 
   /** A ciphertext copied onto another row must not sign as that row's account. */
-  it('is bound to its row: another account’s identity does not decrypt it', () => {
-    const sealed = encryptSecret('secret', PASS, 'pactora-signer-key|near:testnet|a.testnet|pk', FAST);
-    expect(() => decryptSecret(sealed, PASS, 'pactora-signer-key|near:testnet|b.testnet|pk')).toThrow();
+  it('is bound to its row: another account’s identity does not decrypt it', async () => {
+    const sealed = await encryptSecret('secret', PASS, 'pactora-signer-key|near:testnet|a.testnet|pk', FAST);
+    await expect(
+      decryptSecret(sealed, PASS, 'pactora-signer-key|near:testnet|b.testnet|pk'),
+    ).rejects.toThrow();
+  });
+
+  /**
+   * Audit I2. The KDF cost is read from the row. A row altered to N = 2^30
+   * would make the signer derive for minutes (and allocate gigabytes); a tag
+   * shortened to 4 bytes would be accepted as a 4-byte tag.
+   */
+  it('refuses a KDF cost above 2^17, or one that is not scrypt’s shape', async () => {
+    const sealed = await encryptSecret('secret', PASS, 'aad', FAST);
+    const [format, , ...rest] = sealed.split('.');
+    const withCost = (cost: string) => [format, cost, ...rest].join('.');
+    await expect(decryptSecret(withCost(`${2 ** 18},8,1`), PASS, 'aad')).rejects.toThrow(/KDF cost/);
+    await expect(decryptSecret(withCost('1000,8,1'), PASS, 'aad')).rejects.toThrow(/KDF cost/);
+    await expect(decryptSecret(withCost('x,8,1'), PASS, 'aad')).rejects.toThrow(/KDF cost/);
+    await expect(decryptSecret(withCost(`${2 ** 10},64,1`), PASS, 'aad')).rejects.toThrow(/KDF cost/);
+    await expect(decryptSecret(withCost(`${2 ** 17},8,1`), 'q'.repeat(40), 'aad')).rejects.toThrow(
+      /does not decrypt/,
+    );
+  });
+
+  it('accepts only a full 16-byte authentication tag', async () => {
+    const sealed = await encryptSecret('secret', PASS, 'aad', FAST);
+    const parts = sealed.split('.');
+    const tag = Buffer.from(parts[4]!, 'base64');
+    expect(tag).toHaveLength(16);
+    parts[4] = tag.subarray(0, 4).toString('base64');
+    await expect(decryptSecret(parts.join('.'), PASS, 'aad')).rejects.toThrow();
   });
 });
 
@@ -167,6 +196,58 @@ describe('the database key store', () => {
   it('refuses a short passphrase and an account id NEAR would not accept', async () => {
     expect(() => new DbKeyStore(db, 'near:testnet', 'short')).toThrow(/at least 32/);
     await expect(store().ensure('NOT VALID')).rejects.toThrow(/not a NEAR account id/);
+  });
+
+  /**
+   * Audit M1. A key is handed out BEFORE its account exists (the owner
+   * creates the account with it, NEAR-PORT §5 step 2), so a made-up account
+   * leaves a row. Those are not permanent: after the grace period, a key
+   * whose account never appeared on chain and that no agent row names is
+   * removed. A key whose account exists is kept, registered or not.
+   */
+  it('sweeps keys whose account never appeared on chain, after the grace period', async () => {
+    const s = store();
+    await s.ensure('never-made.testnet');
+    await s.ensure('exists-unregistered.testnet');
+    await s.ensure('registered.testnet');
+    await s.ensure('fresh.testnet');
+    await db.execute(
+      sql`UPDATE signer_keys SET created_at = now() - interval '2 days' WHERE account_id <> 'fresh.testnet'`,
+    );
+    await db.execute(
+      sql`INSERT INTO agents (chain_id, chain_agent_id, owner_address, wallet_address, name, price_per_task)
+          VALUES ('near:testnet', '1', 'o.testnet', 'registered.testnet', 'R', 1)`,
+    );
+    const asked: string[] = [];
+    const near = {
+      balance: async (a: string) => {
+        asked.push(a);
+        return a === 'exists-unregistered.testnet' ? 10n ** 24n : null;
+      },
+    };
+    const swept = await s.sweepUnclaimed(near, {graceMs: 24 * 3600_000});
+    expect(swept).toEqual(['never-made.testnet']);
+    // The chain is asked only about aged rows with no agent row.
+    expect(asked.sort()).toEqual(['exists-unregistered.testnet', 'never-made.testnet']);
+    expect((await s.accounts()).sort()).toEqual([
+      'exists-unregistered.testnet',
+      'fresh.testnet',
+      'registered.testnet',
+    ]);
+    await db.execute(sql`DELETE FROM agents WHERE wallet_address = 'registered.testnet'`);
+  });
+
+  it('keeps every row when the chain cannot be asked', async () => {
+    const s = store();
+    await s.ensure('maybe.testnet');
+    await db.execute(sql`UPDATE signer_keys SET created_at = now() - interval '2 days'`);
+    const near = {
+      balance: async () => {
+        throw new Error('rpc down');
+      },
+    };
+    expect(await s.sweepUnclaimed(near, {graceMs: 1000})).toEqual([]);
+    expect(await s.accounts()).toEqual(['maybe.testnet']);
   });
 });
 

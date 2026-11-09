@@ -28,7 +28,8 @@ export interface DecodedJobEvent {
 }
 
 type FieldType = 'u64' | 'u128' | 'hash' | 'hash?' | 'string' | 'bool' | 'outcome' | 'outcome?';
-type Field = readonly [type: FieldType, from: string, to: string];
+/** `optional`: the field may be absent (an event an older contract wrote without it); absent → null. */
+type Field = readonly [type: FieldType, from: string, to: string, presence?: 'optional'];
 
 /** The contract's `Outcome` enum, as serde writes a unit variant. */
 const OUTCOMES = new Set(['Success', 'Failed', 'DisputeLost', 'Unresolved']);
@@ -87,7 +88,16 @@ const JOB_EVENTS: Record<string, {kind: string; fields: readonly Field[]}> = {
       ['string', 'arbiter', 'arbiter'],
     ],
   },
-  dispute_expired: {kind: 'dispute_expired', fields: [['u64', 'job_id', 'jobId']]},
+  // Contract 1.1.0 splits the client's dispute bond on expiry (half to the
+  // worker for the wait, half back) and says how; 1.0.0 wrote job_id alone.
+  dispute_expired: {
+    kind: 'dispute_expired',
+    fields: [
+      ['u64', 'job_id', 'jobId'],
+      ['u128', 'bond_to_worker', 'bondToWorker', 'optional'],
+      ['u128', 'bond_to_client', 'bondToClient', 'optional'],
+    ],
+  },
   job_settled: {
     kind: 'settled',
     fields: [
@@ -203,8 +213,14 @@ export function decodePactoraEvent(e: Nep297Event): DecodedJobEvent | null {
   }
   const data = e.data[0];
   const payload: Record<string, unknown> = {};
-  for (const [type, from, to] of spec.fields) {
-    if (!(from in data)) throw new Error(`${where}: field ${from} is missing`);
+  for (const [type, from, to, presence] of spec.fields) {
+    if (!(from in data)) {
+      if (presence === 'optional') {
+        payload[to] = null;
+        continue;
+      }
+      throw new Error(`${where}: field ${from} is missing`);
+    }
     payload[to] = field(type, from, data[from], where);
   }
   return {kind: spec.kind, chainJobId: payload['jobId'] as string, payload};

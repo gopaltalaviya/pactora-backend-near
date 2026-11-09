@@ -34,6 +34,7 @@ KEEPER_ACCOUNT_ID=
 KEEPER_SECRET_KEY=       # ed25519:… — testnet only
 # Branch human-work only (docs/26). Both required by docker-compose.full.yml there:
 OBJECT_STORE_SECRET_ACCESS_KEY=  # openssl rand -hex 24 — the evidence MinIO's password
+MINIO_KMS_SECRET_KEY=    # "pactora:$(head -c 32 /dev/urandom | base64)" — the evidence MinIO's encryption key; keep it with the backup passphrase, or no stored evidence can be read
 WEBHOOK_SECRET_KEY=      # openssl rand -hex 32 — seals webhook secrets; shared by api and notifier; keep it, or every hook must be re-created
 # Optional, testnet: the test-token faucet — a SEPARATE account with a limited
 # mUSDC float and a little NEAR, never the token's owner (docs/08).
@@ -53,8 +54,9 @@ agentx-docs, `docs/13-deploy.md` §5.
 | `bootstrap-ubuntu.sh` | firewall (22, 80, 443 only), Docker, 2 GB swap, automatic security updates |
 | `docker-compose.vps.yml` | Postgres and the API publish no port; Caddy alone listens on 80/443 |
 | `Caddyfile` | HTTPS for `API_HOST`, certificate from Let's Encrypt, live events unbuffered, `/metrics` answers 404 at the edge |
-| `backup.sh` | daily: the database and the evidence bucket, encrypted, checked, copied off the host |
-| `restore-test.sh` | monthly: restores the newest backup into a scratch database and compares it with the live schema |
+| `backup.sh` | daily: the database and the evidence bucket, encrypted and HMAC'd, checked, copied off the host |
+| `backup-lib.sh` | shared by the two above: encrypt/decrypt and the HMAC beside every `.enc` (`backup-lib.test.sh` exercises it) |
+| `restore-test.sh` | monthly: verifies the newest backup's HMAC, restores it into a scratch database and compares it with the live schema |
 | `alerts.sh` | every 5 minutes: readiness, status, signer gas, indexer lag, keeper backlog, failed webhooks, sanctions-list age, backup age |
 
 ```bash
@@ -87,11 +89,16 @@ API_HOST=api.<ip-with-dashes>.sslip.io
 
 - `backup.sh` writes `pactora-db-<stamp>.dump.enc` (`pg_dump -Fc`) and
   `pactora-evidence-<stamp>.tar.enc` (the bucket via `mc mirror`), both
-  AES-256 with the passphrase (`openssl enc -pbkdf2`). It decrypts each back
-  and lists it — a dump that does not list is a failed run, not a backup —
-  copies both to `BACKUP_REMOTE`, and keeps 7 days locally.
-- `restore-test.sh` restores the newest dump into a scratch database, fails
-  if its table count differs from the live one or the dump is over 48 h old,
+  AES-256 with the passphrase (`openssl enc -pbkdf2`), each with an
+  HMAC-SHA256 beside it (`<file>.hmac`, keyed from the passphrase under its
+  own label — `backup-lib.sh`): CBC alone does not detect a changed byte. It
+  verifies the HMAC, decrypts each back and lists it — a dump that does not
+  list is a failed run, not a backup — copies all four files to
+  `BACKUP_REMOTE`, and keeps 7 days locally.
+- `restore-test.sh` verifies the newest dump's HMAC (a missing or different
+  `.hmac` fails the run before anything is decrypted), restores it into a
+  scratch database, fails if its table count differs from the live one or
+  the dump is over 48 h old,
   counts the rows that are not on chain (agents, API keys, jobs, runs,
   evidence records, profiles) and the evidence objects, then drops the
   scratch database.
@@ -114,6 +121,9 @@ its cursor and catches up):
 ```bash
 # --wait: without it pg_restore races the database's first start and fails.
 docker compose -f docker-compose.full.yml -f docker-compose.vps.yml up -d --wait postgres
+# Integrity first (backup-lib.sh): stop if the file was altered or truncated.
+PASSFILE=$HOME/.pactora-backup-pass; . deploy/vps/backup-lib.sh
+verify_hmac backups/pactora-db-YYYYMMDD-HHMMSS.dump.enc || echo "REFUSE: the backup does not match its HMAC"
 openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:$HOME/.pactora-backup-pass \
   < backups/pactora-db-YYYYMMDD-HHMMSS.dump.enc \
   | docker exec -i agentx-full-postgres-1 pg_restore -U agentx -d agentx --no-owner --exit-on-error

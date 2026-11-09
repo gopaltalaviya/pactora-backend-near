@@ -1,6 +1,13 @@
 import Fastify, {type FastifyBaseLogger, type FastifyInstance} from 'fastify';
 import helmet from '@fastify/helmet';
-import {registerMetrics, serviceOptions, withTimeout, type BuildInfo, type Metrics} from '@pactora/service';
+import {
+  clientKey,
+  registerMetrics,
+  serviceOptions,
+  withTimeout,
+  type BuildInfo,
+  type Metrics,
+} from '@pactora/service';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import {postgresRateLimitStore} from './rate-store.js';
@@ -211,8 +218,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     // Per client IP, BEFORE authentication. It was keyed on the raw
     // Authorization header — so an attacker got a fresh bucket for every
     // garbage key, which made the per-request auth cost unbounded. With
-    // TRUST_PROXY set, `req.ip` is the client, not Railway's proxy.
-    keyGenerator: (req) => req.ip,
+    // TRUST_PROXY set, `req.ip` is the client, not Railway's proxy. An IPv6
+    // client counts under its /64 (audit L1), or every request could come
+    // from a fresh address in its own prefix.
+    keyGenerator: (req) => clientKey(req.ip),
     // Never the probes. A client that spends its budget must not make the
     // instance look dead to the load balancer reading /health and /ready —
     // behind one shared egress IP that took a healthy instance out of rotation.
@@ -322,11 +331,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.walletKeys ? {walletKeys: deps.walletKeys} : {}),
     ...(deps.signRecipient ? {signRecipient: deps.signRecipient} : {}),
     requirePublicHttpsEndpoints: deps.requirePublicHttpsEndpoints ?? false,
+    ...(deps.rateLimitPerMinute ? {rateLimitPerMinute: deps.rateLimitPerMinute} : {}),
   });
   await registerKeyRoutes(app, {
     db: deps.db,
     verifyOwner: deps.verifyOwner,
     ...(deps.readIdentity ? {readIdentity: deps.readIdentity} : {}),
+    ...(deps.rateLimitPerMinute ? {rateLimitPerMinute: deps.rateLimitPerMinute} : {}),
   });
   await registerJobRoutes(app, {
     db: deps.db,

@@ -27,9 +27,12 @@ export function parseSecretKey(raw: string): Buffer {
   return bytes;
 }
 
+/** GCM's full tag. Fixed on both sides (audit I2): a shortened tag is refused, never accepted as a shorter one. */
+const TAG_BYTES = 16;
+
 export function seal(key: Buffer, plaintext: string, aad = ''): string {
   const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const cipher = createCipheriv('aes-256-gcm', key, iv, {authTagLength: TAG_BYTES});
   if (aad) cipher.setAAD(Buffer.from(aad, 'utf8'));
   const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   return [VERSION, iv, cipher.getAuthTag(), ct]
@@ -45,7 +48,9 @@ export function open(key: Buffer, sealed: string, aad = ''): string {
   const parts = sealed.split('.');
   if (parts.length !== 4 || parts[0] !== VERSION) throw new Error('not a sealed secret');
   const [iv, tag, ct] = parts.slice(1).map((p) => Buffer.from(p, 'base64url'));
-  const decipher = createDecipheriv('aes-256-gcm', key, iv!);
+  if (tag!.length !== TAG_BYTES)
+    throw new Error('not a sealed secret: the authentication tag is not 16 bytes');
+  const decipher = createDecipheriv('aes-256-gcm', key, iv!, {authTagLength: TAG_BYTES});
   if (aad) decipher.setAAD(Buffer.from(aad, 'utf8'));
   decipher.setAuthTag(tag!);
   return Buffer.concat([decipher.update(ct!), decipher.final()]).toString('utf8');

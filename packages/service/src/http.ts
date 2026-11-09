@@ -1,4 +1,5 @@
 import {randomUUID, timingSafeEqual} from 'node:crypto';
+import {isIP} from 'node:net';
 import type {FastifyInstance, FastifyServerOptions} from 'fastify';
 import pino from 'pino';
 
@@ -34,6 +35,56 @@ export function serviceOptions(
 /** Trust the nearest `hops` addresses in the forwarding chain, and nothing past them. */
 function trustHops(hops: number): (address: string, index: number) => boolean {
   return (_address, index) => index < hops;
+}
+
+/**
+ * The key a client's address counts under, for rate limits and per-requester
+ * caps (audit L1). An IPv4 address is itself, as is an IPv4 address mapped
+ * into IPv6. An IPv6 address is its /64: a client is given a /64 (often
+ * more) and can pick a fresh address inside it for every request, so a
+ * per-address bucket is no bucket at all. Anything that is not an address
+ * is returned as it is — Fastify gives `req.ip` from the socket or a trusted
+ * X-Forwarded-For, so that does not happen in practice.
+ */
+export function clientKey(ip: string): string {
+  const bare = ip.replace(/%.*$/, ''); // a zone id (fe80::1%eth0) is not part of the address
+  const family = isIP(bare);
+  if (family === 4) return bare;
+  if (family !== 6) return ip;
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(bare);
+  if (mapped) return mapped[1]!;
+  const groups = expandIpv6(bare);
+  if (!groups) return ip;
+  const mappedHex = groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff;
+  if (mappedHex) {
+    const hi = groups[6]!;
+    const lo = groups[7]!;
+    return [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.');
+  }
+  const prefix = groups.slice(0, 4).map((g) => g.toString(16));
+  while (prefix.length > 0 && prefix[prefix.length - 1] === '0') prefix.pop();
+  return `${prefix.join(':')}::/64`;
+}
+
+/** The eight 16-bit groups of an IPv6 address, or null when it is not one. */
+function expandIpv6(addr: string): number[] | null {
+  let text = addr;
+  // A trailing dotted quad (::ffff:1.2.3.4) becomes two hex groups.
+  const dotted = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+  if (dotted) {
+    const [a, b, c, d] = dotted[1]!.split('.').map(Number) as [number, number, number, number];
+    text = `${text.slice(0, -dotted[1]!.length)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
+  const groups = [...head, ...Array.from({length: missing}, () => '0'), ...tail].map((g) => parseInt(g, 16));
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff)
+    ? groups
+    : null;
 }
 
 /** Paths redacted from every log line: credentials, payments, key material. */

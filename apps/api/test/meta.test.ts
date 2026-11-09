@@ -98,6 +98,9 @@ describe('GET /v1/network', () => {
     expect(windows.accept).toBeGreaterThan(0);
     expect(windows.work).toBeGreaterThan(0);
     expect(windows.review).toBeGreaterThan(0);
+    expect(windows.dispute).toBeGreaterThan(0);
+    // Contract 1.1.0: a client or arbiter plans against deadline + grace.
+    expect(windows.disputeGrace).toBeGreaterThan(0);
   });
 
   it('reports the fast-path threshold, so a caller can predict which path a hire takes', async () => {

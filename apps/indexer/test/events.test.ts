@@ -81,7 +81,9 @@ describe('pactora events → kind and payload', () => {
       {jobId: '7', disputeBond: '500', disputeDeadline: '1700010800', reasonHash: null},
     ],
     [GOLDEN.disputeResolved, 'dispute_resolved', {jobId: '7', forWorker: true, arbiter: 'arbiter.test.near'}],
-    [GOLDEN.disputeExpired, 'dispute_expired', {jobId: '7'}],
+    // 1.0.0 wrote job_id alone; 1.1.0 adds the bond split. Both are read.
+    [GOLDEN.disputeExpired, 'dispute_expired', {jobId: '7', bondToWorker: null, bondToClient: null}],
+    [GOLDEN.disputeExpiredSplit, 'dispute_expired', {jobId: '7', bondToWorker: '250', bondToClient: '250'}],
     [
       GOLDEN.jobSettled,
       'settled',

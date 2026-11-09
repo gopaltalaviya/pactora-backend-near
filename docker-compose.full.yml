@@ -3,6 +3,7 @@
 #
 #   SIGNER_TOKEN=$(openssl rand -hex 24) SIGNER_KEY_PASSPHRASE=$(openssl rand -hex 24) \
 #   OBJECT_STORE_SECRET_ACCESS_KEY=$(openssl rand -hex 24) \
+#   MINIO_KMS_SECRET_KEY="pactora:$(head -c 32 /dev/urandom | base64)" \
 #     docker compose -f docker-compose.full.yml up --build
 #
 # NEAR testnet by default (ENABLED_CHAINS / DEFAULT_CHAIN, CAIP-2 ids). Against
@@ -56,20 +57,19 @@ services:
 
   # Evidence storage (docs/26 F6): S3-compatible, private, server-side
   # encrypted. Publishes no port: only the api reaches it, on the compose
-  # network. The SSE key is generated into the volume on first start.
+  # network. The SSE key is a secret the operator holds (MINIO_KMS_SECRET_KEY,
+  # `pactora:<32 random bytes, base64>`), required at start. It used to be
+  # generated into the data volume, beside the objects it encrypts, so a copy
+  # of the volume carried both (audit L4). Keep it with the other secrets:
+  # without it no stored evidence can be read.
   minio:
     logging: *logging
     image: cgr.dev/chainguard/minio@sha256:869ca3178831d9f521ea02258a0f0d4fbc1e9f84302e707514e1f861b860865d
-    entrypoint: ['/bin/sh', '-c']
-    command:
-      - |
-        mkdir -p /data/.pactora-kms
-        [ -s /data/.pactora-kms/key ] || head -c 32 /dev/urandom | base64 > /data/.pactora-kms/key
-        export MINIO_KMS_SECRET_KEY="pactora:$$(cat /data/.pactora-kms/key)"
-        exec minio server /data
+    command: ['server', '/data']
     environment:
       MINIO_ROOT_USER: ${OBJECT_STORE_ACCESS_KEY_ID:-pactora}
       MINIO_ROOT_PASSWORD: ${OBJECT_STORE_SECRET_ACCESS_KEY:?set OBJECT_STORE_SECRET_ACCESS_KEY (8+ characters), the evidence store's password}
+      MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY:?set MINIO_KMS_SECRET_KEY (pactora:<32 random bytes, base64>, see deploy/vps/README.md), the evidence store's encryption key}
     volumes: ['agentx-full-minio:/data']
     healthcheck:
       test: ['CMD', 'mc', 'ready', 'local']

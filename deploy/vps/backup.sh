@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Daily backup on the VPS (docs/26 F28): the database and the evidence bucket,
-# each encrypted, checked, kept for 7 days, and copied off the host.
+# each encrypted, HMAC'd (`<file>.hmac`, verified by restore-test.sh before
+# anything is decrypted), checked, kept for 7 days, and copied off the host.
 # Installed by cron (see README.md):
 #   0 3 * * * /root/agentx/backup.sh >> /root/agentx/backups/backup.log 2>&1
 #
@@ -44,21 +45,27 @@ trap 'rm -f "$DIR"/*.part' EXIT
 # To the second: two runs in one minute must not overwrite each other.
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 
-encrypt() { openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass "file:$PASSFILE"; }
-decrypt() { openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$PASSFILE"; }
+# encrypt / decrypt, and the HMAC beside every .enc (audit I1): backup-lib.sh.
+# shellcheck source=backup-lib.sh
+. "$(dirname "$(readlink -f "$0")")/backup-lib.sh"
 
 # 1. The database.
 db="$DIR/pactora-db-$stamp.dump.enc"
 docker exec "$PG_CONTAINER" pg_dump -U "$PG_USER" -Fc "$PG_DB" | encrypt > "$db.part"
 mv "$db.part" "$db"
 chmod 600 "$db"
+write_hmac "$db"
+verify_hmac "$db" || {
+  echo "$(date -u +%FT%TZ) backup FAILED: $db does not verify against the HMAC just written" >&2
+  exit 1
+}
 # A dump that decrypts but that pg_restore cannot list is not a backup.
 tables="$(decrypt < "$db" | docker exec -i "$PG_CONTAINER" pg_restore --list | awk '$4 == "TABLE" && $5 != "DATA"' | wc -l)"
 if [ "${tables:-0}" -eq 0 ]; then
   echo "$(date -u +%FT%TZ) backup FAILED: $db lists no tables" >&2
   exit 1
 fi
-made=("$db")
+made=("$db" "$db.hmac")
 
 # 2. The evidence bucket: mirrored inside the MinIO container (it has `mc`
 # but no tar), then streamed out as a tar by `docker cp`.
@@ -73,12 +80,17 @@ if [ "$MINIO_CONTAINER" != none ]; then
   docker exec "$MINIO_CONTAINER" rm -rf /tmp/pactora-mirror
   mv "$ev.part" "$ev"
   chmod 600 "$ev"
+  write_hmac "$ev"
+  verify_hmac "$ev" || {
+    echo "$(date -u +%FT%TZ) backup FAILED: $ev does not verify against the HMAC just written" >&2
+    exit 1
+  }
   list="$(decrypt < "$ev" | tar -tf -)" || {
     echo "$(date -u +%FT%TZ) backup FAILED: $ev does not decrypt to a tar" >&2
     exit 1
   }
   objects="$(printf '%s\n' "$list" | grep -vc '/$' || true)"
-  made+=("$ev")
+  made+=("$ev" "$ev.hmac")
 fi
 
 # 3. Off the host.
@@ -90,5 +102,5 @@ else
   echo "$(date -u +%FT%TZ) $where" >&2
 fi
 
-find "$DIR" \( -name 'pactora-db-*.dump.enc' -o -name 'pactora-evidence-*.tar.enc' \) -mtime +"$KEEP_DAYS" -delete
+find "$DIR" \( -name 'pactora-db-*.dump.enc' -o -name 'pactora-evidence-*.tar.enc' -o -name 'pactora-*.enc.hmac' \) -mtime +"$KEEP_DAYS" -delete
 echo "$(date -u +%FT%TZ) backup ok: $db ($tables tables, $(du -h "$db" | cut -f1))${ev:+, $ev (${objects:-0} objects, $(du -h "$ev" | cut -f1))}; $where"

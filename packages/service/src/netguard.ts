@@ -36,22 +36,34 @@ for (const [net, prefix] of [
   blocked.addSubnet(net, prefix, 'ipv4');
 }
 for (const [net, prefix] of [
-  ['::', 128], // unspecified
-  ['::1', 128],
-  ['64:ff9b::', 96], // NAT64: maps to IPv4, checked below
+  // Everything that embeds an IPv4 address other than ::ffff:0:0/96 (mapped,
+  // checked as its IPv4 below) and 64:ff9b::/96 (NAT64, likewise) is
+  // refused whole (audit L2): the deprecated IPv4-compatible ::/96 (which
+  // also holds :: and ::1), SIIT's ::ffff:0:0/96, 6to4's 2002::/16 and
+  // Teredo's 2001::/32 — a public address in those forms is a relay, not a
+  // webhook receiver — and the local-use NAT64 prefix 64:ff9b:1::/48.
+  ['::', 96], // IPv4-compatible (deprecated), unspecified, loopback
+  // NOT ::ffff:0:0/96, the IPv4-mapped range: Node checks an IPv4 address
+  // against IPv6 rules through its mapped form, so that rule would refuse
+  // every IPv4 address. Mapped addresses are judged as their IPv4 below.
+  ['::ffff:0:0:0', 96], // SIIT (IPv4-translated, ::ffff:0:a.b.c.d)
+  ['64:ff9b:1::', 48], // local-use NAT64
   ['100::', 64], // discard
+  ['2001::', 32], // Teredo
   ['2001:db8::', 32], // documentation
+  ['2002::', 16], // 6to4
   ['fc00::', 7], // unique local
   ['fe80::', 10], // link-local
+  ['fec0::', 10], // site-local (deprecated)
   ['ff00::', 8], // multicast
 ] as const) {
   blocked.addSubnet(net, prefix, 'ipv6');
 }
 
-/** The IPv4 address inside an IPv4-mapped/compatible or NAT64 IPv6 address, if any. */
+/** The IPv4 address inside an IPv4-mapped (::ffff:0:0/96) or NAT64 (64:ff9b::/96) IPv6 address, if any. */
 function embeddedIpv4(addr: string): string | null {
   const lower = addr.toLowerCase();
-  const dotted = /^(?:::ffff:|::|64:ff9b::)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(lower);
+  const dotted = /^(?:::ffff:|64:ff9b::)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(lower);
   if (dotted) return dotted[1]!;
   const hex = /^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
   if (hex) {
@@ -67,9 +79,12 @@ export function isPublicAddress(addr: string): boolean {
   const family = isIP(addr);
   if (family === 4) return !blocked.check(addr, 'ipv4');
   if (family === 6) {
+    // The IPv6 ranges first: a mapped or NAT64 form of a public IPv4 is then
+    // judged as that IPv4.
+    if (blocked.check(addr, 'ipv6')) return false;
     const v4 = embeddedIpv4(addr);
     if (v4) return isPublicAddress(v4);
-    return !blocked.check(addr, 'ipv6');
+    return true;
   }
   return false;
 }

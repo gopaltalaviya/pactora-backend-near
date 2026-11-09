@@ -47,6 +47,8 @@ let daoProposals: {
   votes: Record<string, string>;
 }[] = [];
 let reviewers: string[] = [];
+/** Other DAO roles beside the council, as the policy lists them. */
+let extraRoles: {name: string; kind: unknown; permissions: string[]}[] = [];
 
 const view: ChainViewer = async (_chain, contract, method) => {
   if (contract === PACTORA && method === 'get_roles') return {arbiter, owner: 'test.near'};
@@ -54,6 +56,7 @@ const view: ChainViewer = async (_chain, contract, method) => {
     return {
       roles: [
         {name: 'council', kind: {Group: councilMembers}, permissions: ['*:AddProposal', '*:VoteApprove']},
+        ...extraRoles,
       ],
     };
   if (contract === DAO && method === 'get_last_proposal_id') return daoProposals.length;
@@ -91,6 +94,7 @@ beforeEach(async () => {
   councilMembers = [];
   daoProposals = [];
   reviewers = [];
+  extraRoles = [];
   await db.execute(
     sql`TRUNCATE agents, jobs, job_events, sessions, login_challenges, registration_challenges, api_keys, party_reviews RESTART IDENTITY CASCADE`,
   );
@@ -156,6 +160,25 @@ describe('who is admin is read from the chain, every time', () => {
     expect((await get(m.token, '/v1/admin/me')).statusCode).toBe(200);
     councilMembers = [];
     expect((await get(m.token, '/v1/admin/me')).statusCode).toBe(403);
+  });
+
+  /**
+   * Audit L3. Council is whoever may vote on the ruling — a FUNCTION CALL
+   * proposal. A role that may approve only transfers (or any other kind) is
+   * not council, though its permission also ends in `:VoteApprove`.
+   */
+  it('a role that may approve only another proposal kind is not council', async () => {
+    const treasurer = await person(app, `treas${++n}`);
+    extraRoles = [
+      {name: 'treasury', kind: {Group: [treasurer.account]}, permissions: ['transfer:VoteApprove']},
+    ];
+    const j = await disputed();
+    expect((await get(treasurer.token, `/v1/admin/disputes/${j.publicId}`)).statusCode).toBe(403);
+    expect((await get(treasurer.token, '/v1/admin/me')).statusCode).toBe(403);
+    // A role naming the kind by its word is council.
+    const voter = await person(app, `voter${++n}`);
+    extraRoles.push({name: 'judges', kind: {Group: [voter.account]}, permissions: ['call:VoteApprove']});
+    expect((await get(voter.token, `/v1/admin/disputes/${j.publicId}`)).statusCode).toBe(200);
   });
 
   it('a plain-account arbiter has no council: no one rules through the desk', async () => {

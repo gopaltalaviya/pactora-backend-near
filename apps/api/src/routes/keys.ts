@@ -1,14 +1,18 @@
 import type {FastifyInstance} from 'fastify';
-import {and, desc, eq, gt, isNull, sql} from 'drizzle-orm';
+import {and, eq, gt, isNull, sql} from 'drizzle-orm';
 import {z} from 'zod';
 import {agents, apiKeys, keyChallenges, type Db} from '@pactora/db';
+import {clientKey} from '@pactora/service';
 import {PactoraError, ErrorCode} from '@pactora/shared';
 import {authenticate, generateApiKey, hashApiKey} from '../auth.js';
 import type {IdentityReader} from '../chain-reads.js';
 import {CHALLENGE_TTL_MS, LIVE_PER_REQUESTER, NONCE_RE, newNonce, type OwnerVerifier} from '../challenges.js';
 
-/** Live challenges tried when a re-issue does not say which one it signed. */
-const MAX_TRIED = 20;
+/**
+ * Requests per client per minute on the two re-issue routes, which need no
+ * credentials: a challenge is a row, an issue a signature check (audit M2).
+ */
+export const REISSUE_RATE_PER_MINUTE = 20;
 
 export interface KeyRouteDeps {
   db: Db;
@@ -16,6 +20,8 @@ export interface KeyRouteDeps {
   readIdentity?: IdentityReader;
   /** NEP-413 with a full-access key of the owner (challenges.ts). */
   verifyOwner: OwnerVerifier;
+  /** The app-wide per-minute limit; the re-issue routes never allow more than it. */
+  rateLimitPerMinute?: number;
 }
 
 /**
@@ -25,17 +31,26 @@ export interface KeyRouteDeps {
 
 /**
  * The owner's NEP-413 signature over the re-issue challenge, the public key
- * that made it — and, preferably, the nonce it signed. Without the nonce each
- * live challenge is tried in turn.
+ * that made it, and the nonce of the challenge it signed. The nonce is
+ * required (audit M2): without it every live challenge was tried in turn,
+ * each try reading the owner's access key over RPC.
  */
 export const ReissueBody = z.object({
   publicKey: z.string().regex(/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,50}$/, 'publicKey is ed25519:<base58>'),
   signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, 'signature is base64'),
-  nonce: z.string().regex(NONCE_RE).optional(),
+  nonce: z.string().regex(NONCE_RE, 'nonce comes from POST /v1/agents/:id/keys/challenge'),
 });
 
 export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps): Promise<void> {
   const {db, readIdentity, verifyOwner} = deps;
+  const limited = {
+    config: {
+      rateLimit: {
+        max: Math.min(REISSUE_RATE_PER_MINUTE, deps.rateLimitPerMinute ?? REISSUE_RATE_PER_MINUTE),
+        timeWindow: '1 minute',
+      },
+    },
+  };
 
   /** Swap the presented key for a new one. The old one is revoked in the same transaction. */
   app.post('/v1/keys/rotate', async (request) => {
@@ -65,11 +80,11 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
    * signature before it arrived (audit L2). Each requester address keeps its
    * newest few; nobody else's asking evicts them.
    */
-  app.post('/v1/agents/:id/keys/challenge', async (request) => {
+  app.post('/v1/agents/:id/keys/challenge', limited, async (request) => {
     const agent = await loadAgent(db, (request.params as {id: string}).id);
     const nonce = newNonce();
     const expiresAt = new Date(Date.now() + CHALLENGE_TTL_MS);
-    const requester = request.ip;
+    const requester = clientKey(request.ip);
     await db.transaction(async (tx) => {
       await tx.insert(keyChallenges).values({nonce, agentId: agent.id, requester, expiresAt});
       // Expired ones for this agent, and this requester's beyond its newest few.
@@ -96,25 +111,20 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
    * sold the agent cannot mint keys for it. Every existing key is revoked;
    * the new one is shown once.
    */
-  app.post('/v1/agents/:id/keys', async (request, reply) => {
+  app.post('/v1/agents/:id/keys', limited, async (request, reply) => {
     const agent = await loadAgent(db, (request.params as {id: string}).id);
     // A ZodError becomes a 422 that names the field (errors.ts).
     const {publicKey, signature, nonce} = ReissueBody.parse(request.body);
 
-    // The one it names, or every live one for this agent, newest first.
-    const live = await db
-      .select()
-      .from(keyChallenges)
-      .where(
-        and(
-          eq(keyChallenges.agentId, agent.id),
-          gt(keyChallenges.expiresAt, new Date()),
-          nonce !== undefined ? eq(keyChallenges.nonce, nonce) : undefined,
-        ),
-      )
-      .orderBy(desc(keyChallenges.expiresAt))
-      .limit(MAX_TRIED);
-    if (live.length === 0) {
+    // The one challenge the signature names, if it is live.
+    const challenge = await db.query.keyChallenges.findFirst({
+      where: and(
+        eq(keyChallenges.agentId, agent.id),
+        eq(keyChallenges.nonce, nonce),
+        gt(keyChallenges.expiresAt, new Date()),
+      ),
+    });
+    if (!challenge) {
       throw new PactoraError(ErrorCode.UNAUTHORIZED, 'no live challenge for this agent — request a new one');
     }
 
@@ -131,24 +141,15 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
       owner = onChain.owner;
     }
 
-    let challenge: (typeof live)[number] | undefined;
-    for (const c of live) {
-      const message = challengeMessage(agent.id, agent.chainId, c.nonce);
-      if (
-        await verifyOwner({
-          chainId: agent.chainId,
-          accountId: owner,
-          publicKey,
-          signature,
-          message,
-          nonce: c.nonce,
-        })
-      ) {
-        challenge = c;
-        break;
-      }
-    }
-    if (!challenge) {
+    const signed = await verifyOwner({
+      chainId: agent.chainId,
+      accountId: owner,
+      publicKey,
+      signature,
+      message: challengeMessage(agent.id, agent.chainId, challenge.nonce),
+      nonce: challenge.nonce,
+    });
+    if (!signed) {
       throw new PactoraError(
         ErrorCode.UNAUTHORIZED,
         `the signature is not from a full-access key of the agent's on-chain owner ${owner}`,

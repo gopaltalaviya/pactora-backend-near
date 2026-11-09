@@ -7,10 +7,10 @@ import {buildInfo, createMetrics, env, installShutdown, loadEnv, serviceLogger} 
 import {buildSignerApp} from './app.js';
 import {awsKms, type KmsClient} from './kms.js';
 import {faucetAccount, keeperAccount, signerKeys} from './keysource.js';
-import {makeFaucet} from './faucet.js';
+import {assertFaucetNotOwner, makeFaucet} from './faucet.js';
 import {SignerService} from './signer.js';
 import {chainKeeper} from './keeper.js';
-import {WalletWatch, type WatchedWallet} from './wallets.js';
+import {WalletWatch, signingAccountsToWatch, type WatchedWallet} from './wallets.js';
 import {bindHost} from './auth.js';
 
 /**
@@ -56,6 +56,8 @@ const Env = z.object({
     .regex(/^\d+$/, 'must be a whole number of yoctoNEAR')
     .default('100000000000000000000000'),
   WALLET_CHECK_INTERVAL_MS: env.positiveInt(60_000),
+  /** How long a generated key waits for its account to appear on chain before it is removed. Default a day. */
+  SIGNER_KEY_UNCLAIMED_GRACE_MS: env.positiveInt(24 * 60 * 60 * 1000),
   METRICS_TOKEN: z.string().optional(),
   TRUST_PROXY: env.trustProxy(),
   LOG_LEVEL: env.logLevel(),
@@ -98,15 +100,9 @@ if (keys.kind.includes('dev-credentials')) {
 }
 const keeper = await keeperAccount(process.env, chain.testnet, kms);
 const faucetKey = faucetAccount(process.env, chain.testnet);
-if (faucetKey) {
-  // Never the token's owner: that key could mint without limit.
-  const owner = await near.view<string>(chain.contracts.PaymentToken, 'owner', {}).catch(() => null);
-  if (owner === faucetKey.accountId) {
-    throw new Error(
-      `FAUCET_ACCOUNT_ID ${faucetKey.accountId} is the payment token's owner — use a separate account holding a limited float`,
-    );
-  }
-}
+// Never the token's owner: that key could mint without limit. An RPC that
+// does not answer refuses the start rather than skipping the check.
+if (faucetKey) await assertFaucetNotOwner(near, chain, faucetKey);
 const faucet = faucetKey
   ? makeFaucet({near, chain, account: faucetKey, maxPerSend: BigInt(cfg.FAUCET_MAX_PER_SEND)})
   : undefined;
@@ -115,11 +111,15 @@ const service = new SignerService({db, locks, chain, keys, near, logger});
 const metrics = createMetrics('signer');
 
 // The balances of every account this signer sends from, read in the
-// background so /health never waits on the RPC.
+// background so /health never waits on the RPC. Of the held keys, only the
+// wallets an agent row names: a key asked for and never used is not a wallet.
 const walletWatch = new WalletWatch({
   near,
   wallets: async (): Promise<WatchedWallet[]> => [
-    ...(await keys.accounts()).map((account) => ({account, role: 'signing-key'})),
+    ...(await signingAccountsToWatch(db, chain.chainId, await keys.accounts())).map((account) => ({
+      account,
+      role: 'signing-key',
+    })),
     ...(keeper ? [{account: keeper.accountId, role: 'keeper'}] : []),
     ...(faucet ? [{account: faucet.accountId, role: 'faucet'}] : []),
   ],
@@ -130,6 +130,21 @@ const walletWatch = new WalletWatch({
   ]),
 });
 const stopWalletWatch = walletWatch.start(cfg.WALLET_CHECK_INTERVAL_MS);
+
+// Keys asked for whose account never appeared on chain are removed after a
+// day (keystore.ts `sweepUnclaimed`): a bounded number of reads per hour.
+const sweepKeys = setInterval(
+  () => {
+    keys
+      .sweepUnclaimed(near, {graceMs: cfg.SIGNER_KEY_UNCLAIMED_GRACE_MS})
+      .then((removed) => {
+        if (removed.length > 0) logger.info({removed: removed.length}, 'removed unclaimed wallet keys');
+      })
+      .catch((err: unknown) => logger.warn({err}, 'sweeping unclaimed wallet keys failed'));
+  },
+  60 * 60 * 1000,
+);
+sweepKeys.unref();
 
 const app = buildSignerApp({
   service,
@@ -167,6 +182,7 @@ installShutdown({
   closers: [
     ['keeper', async () => stopKeeper?.()],
     ['wallet-watch', async () => stopWalletWatch()],
+    ['key-sweep', async () => clearInterval(sweepKeys)],
     // Stops accepting, then waits for in-flight signs to finish.
     ['http', () => app.close()],
     ['locks', () => closeLockPool(locks)],

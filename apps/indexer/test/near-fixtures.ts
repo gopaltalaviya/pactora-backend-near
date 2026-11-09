@@ -26,6 +26,8 @@ export const GOLDEN = {
   jobDisputedNoReason: `EVENT_JSON:{"standard":"pactora","version":"1.0.0","event":"job_disputed","data":[{"job_id":7,"dispute_bond":"500","dispute_deadline":1700010800,"reason_hash":null}]}`,
   disputeResolved: `EVENT_JSON:{"standard":"pactora","version":"1.0.0","event":"dispute_resolved","data":[{"job_id":7,"for_worker":true,"arbiter":"arbiter.test.near"}]}`,
   disputeExpired: `EVENT_JSON:{"standard":"pactora","version":"1.0.0","event":"dispute_expired","data":[{"job_id":7}]}`,
+  /** Contract 1.1.0: the client's bond is split on expiry, and the event says how. */
+  disputeExpiredSplit: `EVENT_JSON:{"standard":"pactora","version":"1.0.0","event":"dispute_expired","data":[{"job_id":7,"bond_to_worker":"250","bond_to_client":"250"}]}`,
   jobSettled: `EVENT_JSON:{"standard":"pactora","version":"1.0.0","event":"job_settled","data":[{"job_id":7,"worker":2,"paid":"19800","fee":"200","outcome":"Success"}]}`,
   jobSettledUnresolved: `EVENT_JSON:{"standard":"pactora","version":"1.0.0","event":"job_settled","data":[{"job_id":7,"worker":2,"paid":"19800","fee":"200","outcome":"Unresolved"}]}`,
   jobRefundedUndelivered: `EVENT_JSON:{"standard":"pactora","version":"1.0.0","event":"job_refunded","data":[{"job_id":7,"client":1,"amount":"20000","reason":"undelivered","outcome":"Failed"}]}`,
@@ -95,7 +97,14 @@ export const log = {
     }),
   disputeResolved: (o: {jobId: Id; forWorker: boolean; arbiter: string}) =>
     pactora('dispute_resolved', {job_id: o.jobId, for_worker: o.forWorker, arbiter: o.arbiter}),
-  disputeExpired: (o: {jobId: Id}) => pactora('dispute_expired', {job_id: o.jobId}),
+  /** 1.1.0 carries the bond split; without `bondToWorker` the 1.0.0 shape (job_id alone) is written. */
+  disputeExpired: (o: {jobId: Id; bondToWorker?: Amt; bondToClient?: Amt}) =>
+    pactora('dispute_expired', {
+      job_id: o.jobId,
+      ...(o.bondToWorker !== undefined
+        ? {bond_to_worker: s(o.bondToWorker), bond_to_client: s(o.bondToClient ?? 0)}
+        : {}),
+    }),
   jobSettled: (o: {jobId: Id; worker: Id; paid: Amt; fee: Amt; outcome: string}) =>
     pactora('job_settled', {
       job_id: o.jobId,

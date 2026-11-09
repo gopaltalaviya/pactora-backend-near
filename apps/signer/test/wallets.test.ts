@@ -88,6 +88,30 @@ describe('WalletWatch', () => {
     expect(watch.snapshot().wallets.map((w) => w.account)).toEqual([A, B]);
   });
 
+  /** Audit M1: a long list of wallets must not become a burst of RPC reads. */
+  it('reads at most 8 balances at once', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const near = {
+      balance: async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return NEAR;
+      },
+    };
+    const watch = new WalletWatch({
+      near,
+      wallets: () => Array.from({length: 40}, (_, i) => ({account: `w${i}.testnet`, role: 'signing-key'})),
+      lowYocto: 1n,
+    });
+    await watch.check();
+    expect(watch.snapshot().wallets).toHaveLength(40);
+    expect(peak).toBeLessThanOrEqual(8);
+    expect(peak).toBeGreaterThan(1);
+  });
+
   it('sets a gauge per account, in NEAR, when given one', async () => {
     const set: [Record<string, string>, number][] = [];
     const gauge = {labels: (l: Record<string, string>) => ({set: (v: number) => set.push([l, v])})};

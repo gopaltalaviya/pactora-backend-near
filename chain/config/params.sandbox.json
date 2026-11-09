@@ -1,5 +1,5 @@
 {
-  "_comment": "Local sandbox only. Same as testnet except the review window, dispute timeout and withdraw delay, which are 10 s so the end-to-end demo and verify-near.mjs can run every exit path (auto_approve, expire_dispute, complete_unstake) in seconds. onchain is passed to new(params) byte for byte and must equal get_params after deploy.",
+  "_comment": "Local sandbox only. Same as testnet except the review window, dispute timeout, dispute grace and withdraw delay, which are 10 s so the end-to-end demo and verify-near.mjs can run every exit path (auto_approve, expire_dispute, complete_unstake) in seconds. onchain is passed to new(params) byte for byte and must equal get_params after deploy.",
   "onchain": {
     "protocol_fee_bps": 100,
     "min_fee": "100",
@@ -10,6 +10,7 @@
     "max_accept_window": 3000,
     "max_work_window": 18000,
     "dispute_timeout": 10,
+    "dispute_grace": 10,
     "bond_bps": 2000,
     "min_bond": "10000",
     "dispute_bond_bps": 1000,

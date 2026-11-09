@@ -38,6 +38,9 @@ describe('NEAR network config (docs/NEAR-PORT.md §3)', () => {
     const c = loadConfig({contractsRoot: realRoot, env: sandbox}).chain('near:sandbox');
     expect(c.params.reviewWindowSeconds).toBe(c.onchainParams.review_window);
     expect(c.params.disputeTimeoutSeconds).toBe(c.onchainParams.dispute_timeout);
+    // Contract 1.1.0: the grace after the dispute deadline during which the arbiter may still rule.
+    expect(c.params.disputeGraceSeconds).toBe(c.onchainParams.dispute_grace);
+    expect(c.params.disputeGraceSeconds).toBeGreaterThan(0);
     expect(c.params.fastPathMax).toBe(BigInt(c.onchainParams.fast_path_max));
     expect(c.params.acceptWindowSeconds).toBeLessThanOrEqual(c.params.maxAcceptWindowSeconds);
   });

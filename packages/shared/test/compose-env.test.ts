@@ -77,6 +77,24 @@ function schemaKeys(app: string): string[] {
   ];
 }
 
+/**
+ * Audit L4. The evidence store's encryption key was generated into the data
+ * volume (`/data/.pactora-kms/key`), beside the data it protects: a copy of
+ * the volume, or a backup of it, carried both. It is a secret the operator
+ * holds, required at start, never derived or stored in the volume.
+ */
+describe('the evidence store’s KMS key', () => {
+  const minio = compose.slice(compose.indexOf('\n  minio:\n'), compose.indexOf('\n  minio-setup:\n'));
+
+  it('is required from the environment, like the other secrets', () => {
+    expect(minio).toMatch(/MINIO_KMS_SECRET_KEY: \$\{MINIO_KMS_SECRET_KEY:\?/);
+  });
+
+  it('is never generated into, or read from, the data volume', () => {
+    expect(minio).not.toMatch(/\.pactora-kms|\/dev\/urandom/);
+  });
+});
+
 describe('docker-compose.full.yml passes every setting the services read', () => {
   for (const app of ['api', 'signer', 'indexer', 'notifier', 'channels']) {
     it(app, () => {

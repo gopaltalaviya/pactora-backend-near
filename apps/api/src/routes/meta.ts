@@ -45,6 +45,12 @@ export const NetworkResponse = z.object({
       work: z.number().int(),
       review: z.number().int(),
       dispute: z.number().int(),
+      disputeGrace: z
+        .number()
+        .int()
+        .describe(
+          'After the dispute window, how long the arbiter may still rule before anyone may expire the dispute',
+        ),
     })
     .describe('Seconds'),
   minJobAmount: BaseUnits.describe('The smallest job the escrow accepts'),
@@ -109,8 +115,10 @@ export async function registerMetaRoutes(app: FastifyInstance, deps: MetaRouteDe
         accept: Number(chain.params.acceptWindowSeconds),
         work: Number(chain.params.workWindowSeconds),
         review: Number(chain.params.reviewWindowSeconds),
-        /** After this, anyone may settle a disputed job for the worker. */
+        /** The arbiter's window to rule. */
         dispute: Number(chain.params.disputeTimeoutSeconds),
+        /** Contract 1.1.0: after `dispute`, the arbiter may still rule for this long; only then may anyone expire the dispute. */
+        disputeGrace: Number(chain.params.disputeGraceSeconds),
       },
       /** The smallest job the escrow accepts, and the least any job pays in fees. */
       minJobAmount: String(chain.params.minJobAmount),

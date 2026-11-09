@@ -2,6 +2,7 @@ import type {FastifyInstance} from 'fastify';
 import {and, eq, gt, isNull, sql} from 'drizzle-orm';
 import {z} from 'zod';
 import {agents, loginChallenges, sessions, type Db} from '@pactora/db';
+import {clientKey} from '@pactora/service';
 import {AccountId, ChainId, ErrorCode, PactoraError} from '@pactora/shared';
 import {authenticatePerson, generateSessionToken, hashApiKey, SESSION_TTL_MS} from '../auth.js';
 import {
@@ -96,7 +97,7 @@ export async function registerSessionRoutes(app: FastifyInstance, deps: SessionR
     const accountId = body.accountId;
     const nonce = newNonce();
     const expiresAt = new Date(Date.now() + CHALLENGE_TTL_MS);
-    const requester = request.ip;
+    const requester = clientKey(request.ip);
     await db.transaction(async (tx) => {
       await tx.insert(loginChallenges).values({nonce, chainId, accountId, requester, expiresAt});
       await tx.execute(sql`
@@ -175,7 +176,7 @@ export async function registerSessionRoutes(app: FastifyInstance, deps: SessionR
         accountId: body.accountId,
         chainId,
         expiresAt,
-        requester: request.ip,
+        requester: clientKey(request.ip),
       });
     });
 

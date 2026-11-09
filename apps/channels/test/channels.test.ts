@@ -189,8 +189,13 @@ describe('the outbox', () => {
     channel: 'telegram',
     send: async (to) => behaviour(to),
   });
+  // Due when created, on the test's clock — not the database's `now()`: the
+  // test clock is frozen in beforeEach, and a slow setup under load let the
+  // database default run past it, so nothing was due ("sent: 0").
   const add = (address: string, body = 'hello', createdAt = now) =>
-    db.insert(channelOutbox).values({channel: 'telegram', address, body, createdAt});
+    db
+      .insert(channelOutbox)
+      .values({channel: 'telegram', address, body, createdAt, nextAttemptAt: createdAt});
   const row = async (address: string) =>
     (await db.select().from(channelOutbox).where(eq(channelOutbox.address, address)))[0]!;
 

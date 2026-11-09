@@ -2,7 +2,15 @@ import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
 import {fileURLToPath} from 'node:url';
 import {loadConfig} from '@pactora/config';
 import {KeyPair, TGAS, keyPairKey, nearClient} from '@pactora/near';
-import {Keeper, JobState, chainKeeper, dueExit, type Exit, type OnChainJob} from '../src/keeper.js';
+import {
+  Keeper,
+  JobState,
+  chainKeeper,
+  deadlineOf,
+  dueExit,
+  type Exit,
+  type OnChainJob,
+} from '../src/keeper.js';
 import {createMetrics} from '@pactora/service';
 import {FakeNear} from './helpers/fake-near.js';
 
@@ -28,43 +36,60 @@ const job = (over: Partial<OnChainJob>): OnChainJob => ({
 
 describe('which exit is due', () => {
   it('refunds an offer nobody accepted, once the accept deadline has passed', () => {
-    expect(dueExit(job({}), 1_001n)).toBe('expire_unaccepted');
+    expect(dueExit(job({}), 1_001n, 0n)).toBe('expire_unaccepted');
   });
 
   it('sends nothing on the deadline second itself — the contract would refuse', () => {
-    expect(dueExit(job({}), 1_000n)).toBeNull();
-    expect(dueExit(job({state: JobState.ACCEPTED}), 2_000n)).toBeNull();
-    expect(dueExit(job({state: JobState.SUBMITTED, reviewDeadline: 3_000n}), 3_000n)).toBeNull();
+    expect(dueExit(job({}), 1_000n, 0n)).toBeNull();
+    expect(dueExit(job({state: JobState.ACCEPTED}), 2_000n, 0n)).toBeNull();
+    expect(dueExit(job({state: JobState.SUBMITTED, reviewDeadline: 3_000n}), 3_000n, 0n)).toBeNull();
   });
 
   it('refunds accepted work that was never delivered', () => {
-    expect(dueExit(job({state: JobState.ACCEPTED}), 2_001n)).toBe('expire_undelivered');
+    expect(dueExit(job({state: JobState.ACCEPTED}), 2_001n, 0n)).toBe('expire_undelivered');
   });
 
   it('does not expire accepted work on the ACCEPT deadline', () => {
-    expect(dueExit(job({state: JobState.ACCEPTED}), 1_500n)).toBeNull();
+    expect(dueExit(job({state: JobState.ACCEPTED}), 1_500n, 0n)).toBeNull();
   });
 
   /** The client going quiet must not let it keep a result without paying. */
   it('pays for a result nobody reviewed, once the review window closes', () => {
-    expect(dueExit(job({state: JobState.SUBMITTED, reviewDeadline: 3_000n}), 3_001n)).toBe('auto_approve');
+    expect(dueExit(job({state: JobState.SUBMITTED, reviewDeadline: 3_000n}), 3_001n, 0n)).toBe(
+      'auto_approve',
+    );
   });
 
   it('leaves every terminal state alone, and any state it does not know', () => {
     for (const state of [JobState.SETTLED, JobState.REFUNDED, 'SomethingNew']) {
-      expect(dueExit(job({state, reviewDeadline: 1n, disputeDeadline: 1n}), 10_000_000n)).toBeNull();
+      expect(dueExit(job({state, reviewDeadline: 1n, disputeDeadline: 1n}), 10_000_000n, 0n)).toBeNull();
     }
   });
 
   /** An arbiter who never rules must not hold the funds forever. */
   it('settles a dispute nobody ruled on, once its timeout passes', () => {
     const disputed = job({state: JobState.DISPUTED, reviewDeadline: 3_000n, disputeDeadline: 5_000n});
-    expect(dueExit(disputed, 5_000n)).toBeNull();
-    expect(dueExit(disputed, 5_001n)).toBe('expire_dispute');
+    expect(dueExit(disputed, 5_000n, 0n)).toBeNull();
+    expect(dueExit(disputed, 5_001n, 0n)).toBe('expire_dispute');
+  });
+
+  /**
+   * Contract 1.1.0: the arbiter may still rule for `dispute_grace` after the
+   * deadline, and `expire_dispute` before that is DeadlineNotPassed. A keeper
+   * that ignored the grace failed every sweep for the whole grace.
+   */
+  it('waits out the dispute grace: due only after deadline + grace', () => {
+    const disputed = job({state: JobState.DISPUTED, reviewDeadline: 3_000n, disputeDeadline: 5_000n});
+    expect(dueExit(disputed, 5_001n, 100n)).toBeNull();
+    expect(dueExit(disputed, 5_100n, 100n)).toBeNull();
+    expect(dueExit(disputed, 5_101n, 100n)).toBe('expire_dispute');
+    expect(deadlineOf(disputed, 'expire_dispute', 100n)).toBe(5_100n);
+    // The grace is a dispute matter: the other exits are unchanged.
+    expect(dueExit(job({}), 1_001n, 100n)).toBe('expire_unaccepted');
   });
 
   it('never expires a dispute whose deadline the chain has not set', () => {
-    expect(dueExit(job({state: JobState.DISPUTED, disputeDeadline: 0n}), 10_000_000n)).toBeNull();
+    expect(dueExit(job({state: JobState.DISPUTED, disputeDeadline: 0n}), 10_000_000n, 0n)).toBeNull();
   });
 });
 
@@ -75,6 +100,7 @@ describe('a sweep', () => {
       openJobs: async () => Object.keys(jobs).map(BigInt),
       readJob: async (id) => jobs[id.toString()] ?? null,
       now: async () => now,
+      disputeGrace: async () => 0n,
       send: async (exit, id) => {
         if (failOn.includes(id.toString()))
           throw new Error('the contract refused: InvalidState\nmore detail');
@@ -139,6 +165,7 @@ describe('a sweep', () => {
       openJobs: async () => Object.keys(jobs).map(BigInt),
       readJob: async (id) => jobs[id.toString() as keyof typeof jobs],
       now: async () => 5_000n,
+      disputeGrace: async () => 0n,
       send: async (_exit, id) => {
         if (failing.has(id.toString())) throw new Error('rpc down');
         return 'tx';
@@ -164,6 +191,9 @@ describe('a sweep', () => {
       now: async () => {
         clockRead = true;
         return 0n;
+      },
+      disputeGrace: async () => {
+        throw new Error('should not read params');
       },
       send: async () => {
         throw new Error('should not send');
@@ -195,7 +225,10 @@ describe('on a NEAR chain', () => {
     fake.addKey(KEEPER, key.publicKey, 'FullAccess', 70n);
     onChain = {};
     fake.view(PACTORA, 'get_job', (a) => onChain[a['job_id'] as number] ?? null);
+    fake.view(PACTORA, 'get_params', () => ({dispute_timeout: 10, dispute_grace: GRACE}));
   });
+  /** The contract's dispute_grace, as get_params answers it (1.1.0). */
+  const GRACE = 5;
 
   const nowS = () => Number(fake.state.block.timestampNs / 1_000_000_000n);
   const jobView = (state: string, over: Record<string, number> = {}) => ({
@@ -221,10 +254,11 @@ describe('on a NEAR chain', () => {
     onChain[1] = jobView('Created', {accept_deadline: t - 1});
     onChain[2] = jobView('Created', {accept_deadline: t}); // the boundary second: not yet
     onChain[3] = jobView('Submitted', {review_deadline: t - 10});
-    onChain[4] = jobView('Disputed', {dispute_deadline: t - 1});
+    onChain[4] = jobView('Disputed', {dispute_deadline: t - GRACE - 1});
     onChain[5] = jobView('Settled');
+    onChain[7] = jobView('Disputed', {dispute_deadline: t - 1}); // past the deadline, inside the grace
 
-    const result = await keeper([1n, 2n, 3n, 4n, 5n, 6n]).sweep();
+    const result = await keeper([1n, 2n, 3n, 4n, 5n, 6n, 7n]).sweep();
 
     expect(result.failed).toEqual([]);
     expect(fake.state.sent.map((s) => [s.method, s.args])).toEqual([

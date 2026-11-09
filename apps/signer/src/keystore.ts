@@ -1,7 +1,8 @@
-import {createCipheriv, createDecipheriv, randomBytes, scryptSync} from 'node:crypto';
-import {and, eq} from 'drizzle-orm';
+import {createCipheriv, createDecipheriv, randomBytes, scrypt} from 'node:crypto';
+import {promisify} from 'node:util';
+import {and, eq, lt, sql} from 'drizzle-orm';
 import {KeyPair, keyPairKey, type TxKey} from '@pactora/near';
-import {type Db, signerKeys} from '@pactora/db';
+import {type Db, agents, signerKeys} from '@pactora/db';
 import {ACCOUNT_ID_RE, ErrorCode, PactoraError} from '@pactora/shared';
 
 /**
@@ -132,39 +133,89 @@ export interface KdfCost {
 }
 /** ~50 ms per derivation; derived once per key per process (keys are cached). */
 export const DEFAULT_KDF: KdfCost = {N: 2 ** 15, r: 8, p: 1};
+/**
+ * The most a stored row may ask for (audit I2). The cost is read from the
+ * row; a row altered to N = 2^30 would otherwise make the signer derive for
+ * minutes and allocate gigabytes.
+ */
+export const MAX_KDF_N = 2 ** 17;
+const MIN_KDF_N = 2 ** 10;
+const TAG_BYTES = 16;
 
-function derive(passphrase: string, salt: Buffer, cost: KdfCost): Buffer {
-  return scryptSync(passphrase, salt, 32, {...cost, maxmem: 256 * cost.N * cost.r + 1024 * 1024});
+const scryptAsync = promisify(scrypt) as (
+  password: string,
+  salt: Buffer,
+  keylen: number,
+  options: {N: number; r: number; p: number; maxmem: number},
+) => Promise<Buffer>;
+
+/** A cost scrypt accepts and this signer is willing to pay, or an error naming the field. */
+function checkCost(cost: KdfCost): void {
+  const {N, r, p} = cost;
+  const ok =
+    Number.isInteger(N) &&
+    N >= MIN_KDF_N &&
+    N <= MAX_KDF_N &&
+    (N & (N - 1)) === 0 &&
+    Number.isInteger(r) &&
+    r >= 1 &&
+    r <= 32 &&
+    Number.isInteger(p) &&
+    p >= 1 &&
+    p <= 16;
+  if (!ok) {
+    throw new Error(
+      `signer key KDF cost N=${N},r=${r},p=${p} is refused: N must be a power of two in [2^10, 2^17], r in [1, 32], p in [1, 16]`,
+    );
+  }
 }
 
-export function encryptSecret(
+/**
+ * Asynchronous (audit M1): a synchronous scrypt ran on the event loop, so a
+ * burst of `POST /keys` — reachable without credentials through the API —
+ * stalled every other request the signer was serving.
+ */
+function derive(passphrase: string, salt: Buffer, cost: KdfCost): Promise<Buffer> {
+  checkCost(cost);
+  return scryptAsync(passphrase, salt, 32, {...cost, maxmem: 256 * cost.N * cost.r + 1024 * 1024});
+}
+
+export async function encryptSecret(
   plaintext: string,
   passphrase: string,
   aad: string,
   cost = DEFAULT_KDF,
-): string {
+): Promise<string> {
   const salt = randomBytes(16);
   const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', derive(passphrase, salt, cost), iv);
+  const cipher = createCipheriv('aes-256-gcm', await derive(passphrase, salt, cost), iv, {
+    authTagLength: TAG_BYTES,
+  });
   cipher.setAAD(Buffer.from(aad, 'utf8'));
   const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const parts = [salt, iv, cipher.getAuthTag(), ct].map((b) => b.toString('base64'));
   return [FORMAT, `${cost.N},${cost.r},${cost.p}`, ...parts].join('.');
 }
 
-export function decryptSecret(sealed: string, passphrase: string, aad: string): string {
+export async function decryptSecret(sealed: string, passphrase: string, aad: string): Promise<string> {
   const [format, costText, salt, iv, tag, ct] = sealed.split('.');
   if (format !== FORMAT || !costText || !salt || !iv || !tag || ct === undefined) {
     throw new Error('not a sealed signer key');
   }
   const [N, r, p] = costText.split(',').map(Number) as [number, number, number];
+  checkCost({N, r, p});
+  const tagBytes = Buffer.from(tag, 'base64');
+  if (tagBytes.length !== TAG_BYTES) {
+    throw new Error('signer key does not decrypt: the authentication tag is not 16 bytes');
+  }
   const decipher = createDecipheriv(
     'aes-256-gcm',
-    derive(passphrase, Buffer.from(salt, 'base64'), {N, r, p}),
+    await derive(passphrase, Buffer.from(salt, 'base64'), {N, r, p}),
     Buffer.from(iv, 'base64'),
+    {authTagLength: TAG_BYTES},
   );
   decipher.setAAD(Buffer.from(aad, 'utf8'));
-  decipher.setAuthTag(Buffer.from(tag, 'base64'));
+  decipher.setAuthTag(tagBytes);
   try {
     return Buffer.concat([decipher.update(Buffer.from(ct, 'base64')), decipher.final()]).toString('utf8');
   } catch {
@@ -215,7 +266,11 @@ export class DbKeyStore implements KeyStore {
     if (cached) return cached;
     const row = await this.row(accountId);
     if (!row) return null;
-    const plain = decryptSecret(row.ciphertext, this.passphrase, this.aad(row.accountId, row.publicKey));
+    const plain = await decryptSecret(
+      row.ciphertext,
+      this.passphrase,
+      this.aad(row.accountId, row.publicKey),
+    );
     const {accountId: inside, keyPair} = parseCredential(JSON.parse(plain));
     if (inside !== accountId || keyPair.getPublicKey().toString() !== row.publicKey) {
       throw new Error(`signer_keys row for ${accountId} does not hold the key it names`);
@@ -239,7 +294,7 @@ export class DbKeyStore implements KeyStore {
       public_key: publicKey,
       private_key: keyPair.toString(),
     };
-    const ciphertext = encryptSecret(
+    const ciphertext = await encryptSecret(
       JSON.stringify(credential),
       this.passphrase,
       this.aad(accountId, publicKey),
@@ -266,6 +321,55 @@ export class DbKeyStore implements KeyStore {
       .from(signerKeys)
       .where(eq(signerKeys.chainId, this.chainId));
     return rows.map((r) => r.accountId);
+  }
+
+  /**
+   * Remove keys nobody claimed (audit M1). A key is handed out BEFORE its
+   * account exists — the owner creates the account with it (NEAR-PORT §5,
+   * step 2) — so anyone may leave a row for a made-up account. After the
+   * grace period, a row whose account is not on chain and that no agent row
+   * names is deleted. A row whose account exists is kept, registered or not:
+   * the owner may be mid-registration, and deleting the key would strand the
+   * wallet. When the chain cannot be asked, nothing is deleted. At most
+   * `limit` rows are checked per call, so a sweep is a bounded number of RPC
+   * reads. Answers the accounts removed.
+   */
+  async sweepUnclaimed(
+    near: {balance(accountId: string): Promise<bigint | null>},
+    opts: {graceMs: number; limit?: number},
+  ): Promise<string[]> {
+    const before = new Date(Date.now() - opts.graceMs);
+    const aged = await this.db
+      .select({id: signerKeys.id, accountId: signerKeys.accountId})
+      .from(signerKeys)
+      .where(
+        and(
+          eq(signerKeys.chainId, this.chainId),
+          lt(signerKeys.createdAt, before),
+          sql`NOT EXISTS (SELECT 1 FROM ${agents} WHERE ${agents.chainId} = ${signerKeys.chainId} AND ${agents.walletAddress} = ${signerKeys.accountId})`,
+        ),
+      )
+      .orderBy(signerKeys.createdAt)
+      .limit(opts.limit ?? 50);
+    const removed: string[] = [];
+    for (const row of aged) {
+      let balance: bigint | null;
+      try {
+        balance = await near.balance(row.accountId);
+      } catch {
+        break; // the chain is not answering: keep everything, try next time
+      }
+      if (balance !== null) continue;
+      const gone = await this.db
+        .delete(signerKeys)
+        .where(eq(signerKeys.id, row.id))
+        .returning({id: signerKeys.id});
+      if (gone.length > 0) {
+        this.cache.delete(row.accountId);
+        removed.push(row.accountId);
+      }
+    }
+    return removed;
   }
 }
 
@@ -303,5 +407,14 @@ export class Keys implements KeyStore {
   async accounts(): Promise<string[]> {
     const all = [...((await this.imported?.accounts()) ?? []), ...((await this.store?.accounts()) ?? [])];
     return [...new Set(all)];
+  }
+
+  /** Imported keys are the operator's; only the store's unclaimed keys are swept. */
+  async sweepUnclaimed(
+    near: {balance(accountId: string): Promise<bigint | null>},
+    opts: {graceMs: number; limit?: number},
+  ): Promise<string[]> {
+    if (!(this.store instanceof DbKeyStore)) return [];
+    return this.store.sweepUnclaimed(near, opts);
   }
 }

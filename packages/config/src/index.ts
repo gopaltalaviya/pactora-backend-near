@@ -63,6 +63,8 @@ export const OnchainParamsSchema = z
     max_accept_window: z.number().int().positive(),
     max_work_window: z.number().int().positive(),
     dispute_timeout: z.number().int().positive(),
+    /** 1.1.0: after dispute_deadline, how long the arbiter may still rule before anyone may expire the dispute. */
+    dispute_grace: z.number().int().positive(),
     bond_bps: z.number().int().min(0).max(10_000),
     min_bond: Units,
     dispute_bond_bps: z.number().int().min(0).max(10_000),
@@ -117,6 +119,8 @@ export interface Params {
   withdrawDelaySeconds: number;
   reviewWindowSeconds: number;
   disputeTimeoutSeconds: number;
+  /** After the dispute deadline, the arbiter may still rule for this long; only then may anyone expire the dispute. */
+  disputeGraceSeconds: number;
   maxAcceptWindowSeconds: number;
   maxWorkWindowSeconds: number;
   acceptWindowSeconds: number;
@@ -338,6 +342,7 @@ export function loadConfig(opts: LoadOptions = {}): PactoraConfig {
         withdrawDelaySeconds: on.withdraw_delay,
         reviewWindowSeconds: on.review_window,
         disputeTimeoutSeconds: on.dispute_timeout,
+        disputeGraceSeconds: on.dispute_grace,
         maxAcceptWindowSeconds: on.max_accept_window,
         maxWorkWindowSeconds: on.max_work_window,
         acceptWindowSeconds: off.acceptWindowSeconds,

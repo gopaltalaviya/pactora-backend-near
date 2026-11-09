@@ -38,6 +38,16 @@ describe('isPublicAddress', () => {
     '64:ff9b::10.0.0.1', // NAT64 to a private address
     '2001:db8::1',
     'not-an-ip',
+    // Audit L2: the other ways to write an IPv4 address inside an IPv6 one.
+    '::127.0.0.1', // IPv4-compatible (deprecated, ::/96)
+    '::7f00:1', // the same, as the URL parser writes it
+    '::ffff:0:7f00:1', // SIIT (::ffff:0:0/96)
+    '::ffff:0:127.0.0.1',
+    '2002:7f00:1::', // 6to4 of 127.0.0.1
+    '2002:a00:1::1', // 6to4 of 10.0.0.1
+    '64:ff9b:1::a00:1', // local-use NAT64 (64:ff9b:1::/48)
+    'fec0::1', // site-local (deprecated)
+    '2001:0:4136:e378:8000:63bf:3fff:fdd2', // Teredo
   ])('refuses %s', (a) => {
     expect(isPublicAddress(a)).toBe(false);
   });
@@ -88,6 +98,11 @@ describe('checkTarget', () => {
     ['https://[::1]/', /non-public/],
     ['https://2130706433/', /non-public/], // 127.0.0.1 as a decimal integer, normalised by URL
     ['https://0x7f.1/', /non-public/],
+    ['https://[::127.0.0.1]/', /non-public/],
+    ['https://[::ffff:0:7f00:1]/', /non-public/],
+    ['https://[2002:7f00:1::]/', /non-public/],
+    ['https://[64:ff9b:1::a00:1]/', /non-public/],
+    ['https://[fec0::1]/', /non-public/],
     ['https://nowhere.example.com/', /does not resolve/],
     ['not a url', /not a URL/],
   ])('refuses %s', async (raw, why) => {
@@ -183,6 +198,16 @@ describe('secretbox', () => {
     ct[0] = ct[0]! ^ 1;
     expect(() => open(key, [...parts.slice(0, 3), ct.toString('base64url')].join('.'), 'hook-1')).toThrow();
     expect(() => open(key, 'v0.a.b.c')).toThrow(/not a sealed secret/);
+  });
+
+  /** Audit I2: a truncated tag must not be accepted as a shorter, weaker tag. */
+  it('accepts only a full 16-byte authentication tag', () => {
+    const sealed = seal(key, 'whsec_abc', 'hook-1');
+    const parts = sealed.split('.');
+    const tag = Buffer.from(parts[2]!, 'base64url');
+    expect(tag).toHaveLength(16);
+    const short = [parts[0], parts[1], tag.subarray(0, 12).toString('base64url'), parts[3]].join('.');
+    expect(() => open(key, short, 'hook-1')).toThrow();
   });
 
   it('takes a key as 64 hex or 44 base64 characters, and nothing weaker', () => {
