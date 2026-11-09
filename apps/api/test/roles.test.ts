@@ -528,6 +528,13 @@ function rows(): Row[] {
       only: ['pClient'],
     },
     {route: 'POST /v1/listings/:id/close', url: L('/close'), base: rules.either, only: ['pClient']},
+    {
+      route: 'POST /v1/listings/:id/unselect',
+      url: L('/unselect'),
+      body: () => ({}),
+      base: rules.either,
+      only: ['pClient'],
+    },
     {route: 'POST /v1/listings/:id/reopen', url: L('/reopen'), base: rules.either, only: ['pClient']},
     {
       route: 'POST /v1/listings/:id/claim',
@@ -722,6 +729,15 @@ function rows(): Row[] {
       base: rules.either,
       override: Object.fromEntries(
         [...AGENTS, ...PERSONS].filter((w) => w !== 'pClient').map((w) => [w, '404']),
+      ),
+    },
+    {
+      route: 'POST /v1/webhooks/:id/rotate',
+      note: "agent A's hook",
+      url: () => `/v1/webhooks/${F.hookA}/rotate`,
+      base: rules.either,
+      override: Object.fromEntries(
+        [...AGENTS, ...PERSONS].filter((w) => w !== 'agentA').map((w) => [w, '404']),
       ),
     },
     {

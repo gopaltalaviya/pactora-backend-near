@@ -262,6 +262,11 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
 
     const agent = row[0];
     if (!agent) throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
+    // A person is not an agent in the directory: their row (name, NEAR
+    // account) is public only through a published profile, and then only
+    // what the profile shows (live probe).
+    const personView = await personPublicView(db, agent.id);
+    if (personView === 'hidden') throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
 
     const caps = await db
       .select({capability: agentCapabilities.capability})
@@ -274,9 +279,22 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
     // Every skill it offers, and any it has a record in, with that record.
     const record = (await skillStats(db, agent.chainId, [agent.id], floorOf(chain))).get(agent.id) ?? [];
     const names = [...new Set([...caps.map((c) => c.capability), ...record.map((s) => s.capability)])].sort();
-    return {
+    const full = {
       ...present({...agent, capabilities: caps.map((c) => c.capability)}, chain),
       skills: names.map((n) => record.find((s) => s.capability === n) ?? noHistory(n)),
+    };
+    if (!personView) return full;
+    const {walletAddress: _w, explorerUrl: _e, description: _d, ...rest} = full;
+    void [_w, _e, _d];
+    return {
+      ...rest,
+      kind: 'person',
+      publicId: personView.publicId,
+      name: personView.displayName,
+      profileId: personView.publicId,
+      ...(personView.showAccount
+        ? {walletAddress: agent.walletAddress, ownerAddress: agent.ownerAddress}
+        : {}),
     };
   });
 
@@ -295,6 +313,9 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
     if (!/^[1-9]\d{0,15}$/.test(id)) throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
     const agent = await db.query.agents.findFirst({where: eq(agents.id, Number(id))});
     if (!agent) throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
+    if ((await personPublicView(db, agent.id)) === 'hidden') {
+      throw new PactoraError(ErrorCode.NOT_FOUND, `no agent ${id}`);
+    }
     const chain = chains[agent.chainId];
     if (!chain) throw new PactoraError(ErrorCode.CHAIN_NOT_ENABLED, `chain ${agent.chainId} is not enabled`);
 
@@ -573,6 +594,32 @@ function floorOf(chain: ChainConfig): number {
 }
 
 /** Every response states its chain, so a client never has to infer it. */
+/**
+ * For a person's row: `hidden` until their profile is published, else what
+ * the profile shows; null for an agent (always public).
+ */
+async function personPublicView(
+  db: Db,
+  agentId: number,
+): Promise<'hidden' | null | {publicId: string; displayName: string; showAccount: boolean}> {
+  const [row] = (await db.execute(sql`
+    SELECT a.kind, a.public_id, p.published, p.display_name, p.show_account
+      FROM agents a LEFT JOIN public_profiles p ON p.agent_id = a.id WHERE a.id = ${agentId}`)) as unknown as {
+    kind: string;
+    public_id: string;
+    published: boolean | null;
+    display_name: string | null;
+    show_account: boolean | null;
+  }[];
+  if (!row || row.kind !== 'person') return null;
+  if (!row.published) return 'hidden';
+  return {
+    publicId: row.public_id,
+    displayName: row.display_name ?? 'a person',
+    showAccount: Boolean(row.show_account),
+  };
+}
+
 function present(a: AgentRow, chain: ChainConfig) {
   const completed = Number(a.completed ?? 0);
   const failed = Number(a.failed ?? 0);

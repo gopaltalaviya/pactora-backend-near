@@ -116,19 +116,29 @@ export function rulingOf(kind: unknown, pactora: string): {jobId: number; forWor
 export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRouteDeps): Promise<void> {
   const {db} = deps;
   const cacheMs = deps.councilCacheMs ?? 30_000;
-  const councilCache = new Map<string, {at: number; dao: string | null; members: string[]}>();
+  const councilCache = new Map<
+    string,
+    {at: number; dao: string | null; arbiter: string | null; members: string[]}
+  >();
 
-  /** The arbiter DAO and its council, from the chain. A plain-account arbiter has no council. */
-  async function council(chainId: string): Promise<{dao: string | null; members: string[]}> {
+  /** The arbiter and, when it is a DAO, its council, from the chain. A plain-account arbiter has no council. */
+  async function council(
+    chainId: string,
+  ): Promise<{dao: string | null; arbiter: string | null; members: string[]}> {
     const hit = councilCache.get(chainId);
     if (hit && Date.now() - hit.at < cacheMs) return hit;
     const chain = deps.chains[chainId];
-    let out: {dao: string | null; members: string[]} = {dao: null, members: []};
+    let out: {dao: string | null; arbiter: string | null; members: string[]} = {
+      dao: null,
+      arbiter: null,
+      members: [],
+    };
     if (chain && deps.view) {
       const roles = (await deps.view(chainId, chain.contracts.Pactora, 'get_roles').catch(() => null)) as {
         arbiter?: string;
       } | null;
       const dao = roles?.arbiter ?? null;
+      out = {...out, arbiter: dao};
       if (dao) {
         const policy = (await deps.view(chainId, dao, 'get_policy').catch(() => null)) as DaoPolicy | null;
         // Council is whoever may approve a FUNCTION CALL proposal — the kind
@@ -143,7 +153,7 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
             ? (g as string[])
             : [];
         });
-        out = {dao: policy ? dao : null, members: [...new Set(members)]};
+        out = {dao: policy ? dao : null, arbiter: dao, members: [...new Set(members)]};
       }
     }
     councilCache.set(chainId, {...out, at: Date.now()});
@@ -292,11 +302,27 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
 
   app.get('/v1/admin/me', async (request) => {
     const a = await admin(request, 'any');
-    return {account: a.person.account, chainId: a.person.chainId, roles: a.roles, arbiterDao: a.council.dao};
+    return {
+      account: a.person.account,
+      chainId: a.person.chainId,
+      roles: a.roles,
+      arbiterDao: a.council.dao,
+      /** The arbiter account, DAO or not (null when the chain could not be read). */
+      arbiter: a.council.arbiter,
+    };
   });
 
+  /**
+   * The disputed jobs. The council's desk; when the arbiter is a plain
+   * account (no DAO, so no council), compliance reviewers may still read the
+   * list — read-only, nothing to propose — rather than nobody at all.
+   */
   app.get('/v1/admin/disputes', async (request) => {
-    const a = await admin(request, 'council');
+    const a = await admin(request, 'any');
+    const readOnly = !a.roles.includes('council');
+    if (readOnly && a.council.dao) {
+      throw new PactoraError(ErrorCode.FORBIDDEN, 'only the arbiter council may do this');
+    }
     const rows = await db
       .select()
       .from(jobs)
@@ -305,6 +331,9 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
       .limit(100);
     return {
       arbiterDao: a.council.dao,
+      arbiter: a.council.arbiter,
+      /** True for a reviewer reading while the arbiter is not a DAO: the desk builds no proposal. */
+      readOnly,
       disputes: rows.map((j) => ({
         jobId: j.publicId,
         chainJobId: j.chainJobId,

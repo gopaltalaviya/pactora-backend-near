@@ -477,6 +477,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     bus,
     submit: deps.submit,
     ...(deps.readBudget ? {readBudget: deps.readBudget} : {}),
+    ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
   });
 
   // Expired sessions and sign-in challenges authenticate nobody; deleting

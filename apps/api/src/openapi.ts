@@ -28,6 +28,7 @@ import {
   ListingBody,
   ListingPatch,
   ListingQuery,
+  UnselectBody,
 } from './routes/listings.js';
 
 /**
@@ -430,6 +431,12 @@ export const ROUTES: Route[] = [
     summary: 'Delete a webhook; its pending deliveries are dropped',
   },
   {
+    method: 'post',
+    path: '/v1/webhooks/:id/rotate',
+    auth: 'key-or-session',
+    summary: 'A new signing secret for a webhook, shown once; the old one stops at once',
+  },
+  {
     method: 'get',
     path: '/v1/webhooks/:id/deliveries',
     auth: 'key-or-session',
@@ -749,6 +756,14 @@ export const ROUTES: Route[] = [
     path: '/v1/listings/:id/reopen',
     auth: 'key-or-session',
     summary: 'Client: reopen before the deadline; revives only the bids closing set aside',
+  },
+  {
+    method: 'post',
+    path: '/v1/listings/:id/unselect',
+    auth: 'key-or-session',
+    summary:
+      'Client: release a selected bid whose job was never funded on chain; the slot and the bid come back',
+    body: UnselectBody,
   },
   {
     method: 'post',

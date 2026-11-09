@@ -142,6 +142,25 @@ export async function kycSweep(db: Db, provider: IdentityProvider | undefined, n
     );
 }
 
+/**
+ * A verification held by screening, on an account the reviewers have since
+ * cleared: closed as `expired` (the statuses the table allows), so it no
+ * longer stands in the way of a new check. Any other row is returned as is.
+ */
+async function closeClearedHold(
+  db: Db,
+  row: typeof identityVerifications.$inferSelect,
+  standing: Awaited<ReturnType<typeof standingOf>>,
+): Promise<typeof identityVerifications.$inferSelect> {
+  if (row.status !== 'held' || standing === 'hold') return row;
+  const [closed] = await db
+    .update(identityVerifications)
+    .set({status: 'expired', decidedAt: new Date()})
+    .where(and(eq(identityVerifications.id, row.id), eq(identityVerifications.status, 'held')))
+    .returning();
+  return closed ?? row;
+}
+
 const PEOPLE_ONLY =
   'identity checks are for people: an agent API key cannot call this route; sign in as a person (POST /v1/session)';
 
@@ -177,9 +196,11 @@ export async function registerKycRoutes(app: FastifyInstance, deps: KycRouteDeps
       .where(eq(identityVerifications.agentId, actor.agent.id))
       .orderBy(desc(identityVerifications.id))
       .limit(1);
-    const row = latest && deps.provider ? await refreshVerification(db, deps.provider, latest) : latest;
+    const standing = await standingOf(db, actor.agent.id);
+    const current = latest ? await closeClearedHold(db, latest, standing) : latest;
+    const row = current && deps.provider ? await refreshVerification(db, deps.provider, current) : current;
     return {
-      standing: await standingOf(db, actor.agent.id),
+      standing,
       provider: deps.provider ? {name: deps.provider.name, simulated: deps.provider.simulated} : null,
       screening: deps.screening,
       // What wallet screening covers, said plainly rather than faked.
@@ -199,14 +220,19 @@ export async function registerKycRoutes(app: FastifyInstance, deps: KycRouteDeps
     if (standing === 'blocked')
       throw new PactoraError(ErrorCode.FORBIDDEN, 'this account is blocked after a compliance review');
 
-    const current = await db.query.identityVerifications.findFirst({
+    const open = await db.query.identityVerifications.findFirst({
       where: and(
         eq(identityVerifications.agentId, actor.agent.id),
         inArray(identityVerifications.status, ['pending', 'approved', 'held']),
       ),
       orderBy: [desc(identityVerifications.id)],
     });
-    if (current) return reply.status(200).send({...view(current), replayed: true});
+    // A `held` row counts as open only while the account IS on hold; once
+    // the reviewers cleared it, that row is closed and a fresh check starts
+    // (live UI audit: the cleared account could never do the identity check).
+    const current = open ? await closeClearedHold(db, open, standing) : open;
+    if (current && current.status !== 'expired')
+      return reply.status(200).send({...view(current), replayed: true});
 
     // Screening first. With it on and no list loaded, nothing proceeds: an
     // empty list is not a clean result.

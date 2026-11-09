@@ -20,7 +20,7 @@ import {actorOf, optionalActorOf, type Actor, type AgentRow} from '../actor.js';
 import {applicantSummary, recordAgentEvent} from '../agent-events.js';
 import {notifyApplicants, reviveSetAsideBids} from '../listing-slots.js';
 import {requireClear} from '../compliance.js';
-import type {BudgetReader} from '../chain-reads.js';
+import type {BudgetReader, ChainViewer} from '../chain-reads.js';
 import {Cursor, page} from '../cursor.js';
 import type {EventBus} from '../events.js';
 import {feeOf, workerReceives} from '../fees.js';
@@ -159,6 +159,9 @@ export const DecideBody = z.object({
 
 export const ClaimBody = z.object({proposal: text(20, 3000).optional()}).default({});
 
+export const UnselectBody = z.object({applicationId: z.uuid()});
+const UNSELECTED_REASON = 'The client released the selection before the job was funded.';
+
 export interface ListingRouteDeps {
   db: Db;
   chains: Record<string, ChainConfig>;
@@ -167,6 +170,8 @@ export interface ListingRouteDeps {
   defaultChainId: string;
   /** The client's on-chain purse. Omitted, nothing can be posted: the reservation cannot be checked. */
   readBudget?: BudgetReader;
+  /** Contract views; `stake_of` says whether a worker is hireable before a bid is selected. */
+  viewChain?: ChainViewer;
 }
 
 type Listing = typeof listings.$inferSelect;
@@ -325,6 +330,40 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       .from(jobs)
       .where(inArray(jobs.id, wanted));
     return new Map(rows.map((r) => [r.id, r.publicId]));
+  }
+
+  /** Of these agents, the ones in good standing (no hold, not blocked). */
+  async function clearAmong(agentIds: number[]): Promise<Set<number>> {
+    if (agentIds.length === 0) return new Set();
+    const held = (await db.execute(
+      sql`SELECT agent_id FROM account_standing WHERE standing <> 'clear' AND agent_id IN ${sql.raw(`(${[...new Set(agentIds)].map((n) => Number(n)).join(',')})`)}`,
+    )) as unknown as {agent_id: string | number}[];
+    const heldIds = new Set(held.map((h) => Number(h.agent_id)));
+    return new Set(agentIds.filter((id) => !heldIds.has(id)));
+  }
+
+  /**
+   * The chain's word on whether a worker can be hired right now (`stake_of
+   * … hireable`): a person client's selection used to go through for a
+   * worker the contract then refused (NotHireable), leaving a slot taken and
+   * a job that could never be funded (live probe). Unreadable → not checked
+   * (the signer or the chain still refuses).
+   */
+  async function refuseNotHireable(workerAgentId: number, chainId: string): Promise<void> {
+    if (!deps.viewChain) return;
+    const worker = await db.query.agents.findFirst({where: eq(agents.id, workerAgentId)});
+    if (!worker?.chainAgentId) return;
+    const chain = chainOf(chainId);
+    const stake = (await deps
+      .viewChain(chainId, chain.contracts.Pactora, 'stake_of', {agent_id: Number(worker.chainAgentId)})
+      .catch(() => undefined)) as {hireable?: boolean} | null | undefined;
+    if (stake === undefined) return;
+    if (!stake || stake.hireable !== true) {
+      throw new PactoraError(
+        ErrorCode.AGENT_NOT_HIREABLE,
+        `the contract reports this worker as not hireable right now (its unlocked stake is below min_stake); choose another bid or ask the worker to top up its stake`,
+      );
+    }
   }
 
   /** Windows within the contract's maxima (create_job refuses anything longer: WINDOW_TOO_LONG). */
@@ -606,7 +645,8 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
         },
       };
     }
-    // An applicant sees its own bids, never anyone else's.
+    // An applicant sees its own bids, never anyone else's — and whether the client is in good standing.
+    const clientClear = (await clearAmong([listing.clientAgentId])).has(listing.clientAgentId);
     const mine = await db
       .select()
       .from(applications)
@@ -617,6 +657,7 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       ...base,
       viewer: {
         isOwner: false,
+        counterpartyClear: clientClear,
         applications: mine.map((a) =>
           applicationView(a, chain, a.jobId !== null ? (ids.get(a.jobId) ?? null) : null),
         ),
@@ -932,6 +973,7 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       sql`SELECT count(*)::int AS n FROM applications WHERE listing_id = ${listing.id} ${query.status ? sql`AND status = ${query.status}` : sql``}`,
     )) as unknown as [{n: number}];
     const ids = await jobPublicIds(rows.map((r) => r.a.jobId));
+    const clearIds = await clearAmong(rows.map((r) => r.ag.id));
     return {
       total: n,
       page: query.page,
@@ -947,6 +989,8 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
           location: ag.location,
           score: st?.score ?? 50,
           completed: st?.completed ?? 0,
+          /** Standing clear (no hold, not blocked): a yes/no, never the reason. */
+          counterpartyClear: clearIds.has(ag.id),
         },
       })),
     };
@@ -1186,6 +1230,7 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       return {application: applicationView(row, chain, null), replayed: false};
     }
 
+    await refuseNotHireable(application.applicantAgentId, listing.chainId);
     const selected = await takeSlot(listing.id, async (tx) => {
       const [row] = await tx
         .update(applications)
@@ -1229,6 +1274,7 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
     }
 
     await checkApplicant(actor, listing, chain);
+    await refuseNotHireable(actor.agent.id, listing.chainId);
     const won = await takeSlot(listing.id, async (tx, current) => {
       if (effectiveStatus(current) !== 'open') {
         throw new PactoraError(ErrorCode.INVALID_STATE, `the listing is ${effectiveStatus(current)}`);
@@ -1294,6 +1340,85 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       caller: {kind: 'agent', agentId: agent.id, chainId: agent.chainId, scopes: [], keyId: 'listing-claim'},
     };
   }
+
+  // ── unselect: a selected bid whose job never reached the chain ────────
+
+  /**
+   * Release a selection the chain never funded (a person client who did not
+   * sign, or whose create_job was refused): the slot and the bid are given
+   * back, the unfunded job row is removed, and a listing that filling closed
+   * reopens. A job with a chain id is money in escrow and cannot be
+   * unselected: cancel that job instead.
+   */
+  app.post('/v1/listings/:id/unselect', async (request) => {
+    const {listing} = await ownerOf(request);
+    const body = UnselectBody.parse(request.body ?? {});
+    const chain = chainOf(listing.chainId);
+    const out = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT id FROM listings WHERE id = ${listing.id} FOR UPDATE`);
+      const current = (await tx.query.listings.findFirst({where: eq(listings.id, listing.id)}))!;
+      const application = await tx.query.applications.findFirst({
+        where: and(eq(applications.listingId, listing.id), eq(applications.publicId, body.applicationId)),
+      });
+      if (!application)
+        throw new PactoraError(ErrorCode.NOT_FOUND, `no application ${body.applicationId} on this listing`);
+      if (application.status !== 'selected') {
+        throw new PactoraError(
+          ErrorCode.INVALID_STATE,
+          `this application is ${application.status}, not selected`,
+        );
+      }
+      const job = application.jobId
+        ? await tx.query.jobs.findFirst({where: eq(jobs.id, application.jobId)})
+        : undefined;
+      if (job?.chainJobId) {
+        throw new PactoraError(
+          ErrorCode.INVALID_STATE,
+          `job ${job.publicId} is funded on chain (${job.chainJobId}); cancel the job instead`,
+        );
+      }
+      const [released] = await tx
+        .update(applications)
+        .set({
+          status: 'rejected',
+          reason: UNSELECTED_REASON,
+          reopenable: false,
+          jobId: null,
+          decidedAt: new Date(),
+        })
+        .where(eq(applications.id, application.id))
+        .returning();
+      await tx.delete(listingSlots).where(eq(listingSlots.applicationId, application.id));
+      if (job) await tx.delete(jobs).where(and(eq(jobs.id, job.id), isNull(jobs.chainJobId)));
+      let reopened = false;
+      if (current.status === 'filled' && current.deadline.getTime() > Date.now()) {
+        const reopenedAt = new Date();
+        await tx
+          .update(listings)
+          .set({status: 'open', closedAt: null, updatedAt: reopenedAt})
+          .where(eq(listings.id, listing.id));
+        const revived = await reviveSetAsideBids(tx, listing.id);
+        await notifyApplicants(tx, listing, revived, 'listing.reopened', `:${reopenedAt.getTime()}`, {
+          reason: 'unselected',
+        });
+        reopened = true;
+      }
+      await recordAgentEvent(tx, {
+        agentId: application.applicantAgentId,
+        role: 'applicant',
+        kind: 'application.rejected',
+        payload: {
+          listingId: listing.publicId,
+          applicationId: application.publicId,
+          reason: UNSELECTED_REASON,
+        },
+        listingId: listing.id,
+        dedupeKey: `application.unselected:${application.publicId}`,
+      });
+      return {released: released!, reopened};
+    });
+    return {application: applicationView(out.released, chain, null), released: true, reopened: out.reopened};
+  });
 
   // ── close, reopen ────────────────────────────────────────────────────
 

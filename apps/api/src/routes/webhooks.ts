@@ -139,6 +139,26 @@ export async function registerWebhookRoutes(app: FastifyInstance, deps: WebhookR
     return {webhookId: hook.publicId, deleted: true};
   });
 
+  /** A new signing secret, shown once; the old one stops signing at once (the notifier reads the row per delivery). */
+  app.post('/v1/webhooks/:id/rotate', async (request) => {
+    const actor = await actorOf(db, request);
+    // Whose hook first: another tenant's is hidden (404) whatever the server's configuration.
+    const hook = await ownHook(actor.agent.id, (request.params as {id: string}).id);
+    if (!deps.secretKey) {
+      throw new PactoraError(ErrorCode.UPSTREAM_UNAVAILABLE, 'webhooks are not configured on this server');
+    }
+    const secret = `whsec_${randomBytes(32).toString('base64url')}`;
+    await db
+      .update(webhooks)
+      .set({secretEnc: seal(deps.secretKey, secret, secretAad(hook.publicId))})
+      .where(eq(webhooks.id, hook.id));
+    return {
+      ...hookView(hook),
+      secret,
+      note: 'The new secret is shown only now; deliveries from here on are signed with it.',
+    };
+  });
+
   app.get('/v1/webhooks/:id/deliveries', async (request) => {
     const actor = await actorOf(db, request);
     const hook = await ownHook(actor.agent.id, (request.params as {id: string}).id);
