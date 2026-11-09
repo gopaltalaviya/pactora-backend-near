@@ -13,6 +13,7 @@ import {
   jobs,
   agents,
   agentStats,
+  lockAgentEventSeqs,
   payments,
   reputationScoreSql,
   tokenTransfers,
@@ -272,6 +273,14 @@ export class Indexer {
       .filter((x): x is {ev: ChainEvent; d: DecodedJobEvent} => x.d !== null);
 
     await this.deps.db.transaction(async (tx) => {
+      // Every party's event counter, locked in agent-id order before the
+      // first event is written: in event order, the batch deadlocked with
+      // the API's own event writes (pnpm swarm:local, 2026-11-09).
+      if (decoded.length > 0)
+        await this.lockParties(
+          tx,
+          decoded.map((x) => x.d),
+        );
       for (const {ev, d} of decoded) await this.handleEvent(tx, ev, d);
       await this.recordTransfers(tx, token);
       await this.recordFunding(tx, protocol);
@@ -698,6 +707,37 @@ export class Indexer {
       'seeded the cursor at the final head; history before this block is not indexed',
     );
     return final;
+  }
+
+  /** The agents these events will write feed rows for: the jobs' parties, and a linking event's named ones. */
+  private async lockParties(tx: Tx, events: DecodedJobEvent[]): Promise<void> {
+    const {chain} = this.deps;
+    const arr = (xs: string[]) =>
+      sql`ARRAY[${sql.join(
+        xs.map((x) => sql`${x}`),
+        sql`, `,
+      )}]::text[]`;
+    const jobIds = [...new Set(events.map((e) => e.chainJobId))];
+    const named = [
+      ...new Set(
+        events
+          .filter((e) => LINKING_KINDS.has(e.kind))
+          .flatMap((e) => [e.payload['clientAgentId'], e.payload['workerAgentId']])
+          .filter((x): x is string | number => typeof x === 'string' || typeof x === 'number')
+          .map(String),
+      ),
+    ];
+    const rows = (await tx.execute(sql`
+      SELECT p.id FROM jobs j CROSS JOIN LATERAL (VALUES (j.client_agent_id), (j.worker_agent_id)) AS p(id)
+       WHERE j.chain_id = ${chain.chainId} AND j.chain_job_id::text = ANY(${arr(jobIds)})
+      UNION
+      SELECT a.id FROM agents a WHERE a.chain_id = ${chain.chainId} AND a.chain_agent_id::text = ANY(${arr(named)})`)) as unknown as {
+      id: string | number;
+    }[];
+    await lockAgentEventSeqs(
+      tx,
+      rows.map((r) => Number(r.id)),
+    );
   }
 
   private async readCursor() {

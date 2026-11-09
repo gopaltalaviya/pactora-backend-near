@@ -1,5 +1,6 @@
 export * from './schema.js';
 export {createDb, closeDb, type Db} from './client.js';
+export {lockAgentEventSeqs} from './event-locks.js';
 export {createLockPool, closeLockPool, withAdvisoryLock, type LockPool} from './locks.js';
 export {OUTCOME_SUCCESS, WORKER_FAULT, WORKER_FAULT_VALUES, reputationScoreSql} from './reputation.js';
 export * from './trust.js';

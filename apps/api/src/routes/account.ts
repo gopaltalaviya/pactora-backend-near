@@ -18,6 +18,7 @@ import {
   jobs,
   linkCodes,
   listings,
+  lockAgentEventSeqs,
   partyReviews,
   publicProfiles,
   reports,
@@ -411,6 +412,7 @@ export async function registerAccountRoutes(app: FastifyInstance, deps: AccountR
           .select()
           .from(listings)
           .where(and(eq(listings.clientAgentId, me.id), inArray(listings.status, ['open', 'closed'])));
+        const told: {l: (typeof mine)[number]; set: {publicId: string; applicantAgentId: number}[]}[] = [];
         for (const l of mine) {
           await tx
             .update(listings)
@@ -426,8 +428,14 @@ export async function registerAccountRoutes(app: FastifyInstance, deps: AccountR
             })
             .where(and(eq(applications.listingId, l.id), eq(applications.status, 'pending')))
             .returning({publicId: applications.publicId, applicantAgentId: applications.applicantAgentId});
-          await notifyApplicants(tx, l, set, 'listing.cancelled', '');
+          told.push({l, set});
         }
+        // Every bidder of every listing, locked in agent-id order before the first event.
+        await lockAgentEventSeqs(
+          tx,
+          told.flatMap((t) => t.set.map((r) => r.applicantAgentId)),
+        );
+        for (const {l, set} of told) await notifyApplicants(tx, l, set, 'listing.cancelled', '');
         scrubbed.listingsCancelled = mine.length;
         await tx
           .update(listings)

@@ -10,6 +10,7 @@ import {
   jobs,
   listingSlots,
   listings,
+  lockAgentEventSeqs,
   publicProfiles,
   readTrust,
   type Db,
@@ -1447,6 +1448,11 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
           .set({status: 'open', closedAt: null, updatedAt: reopenedAt})
           .where(eq(listings.id, listing.id));
         const revived = await reviveSetAsideBids(tx, listing.id);
+        // Everyone this transaction writes an event for, in agent-id order, first.
+        await lockAgentEventSeqs(tx, [
+          ...revived.map((r) => r.applicantAgentId),
+          application.applicantAgentId,
+        ]);
         await notifyApplicants(tx, listing, revived, 'listing.reopened', `:${reopenedAt.getTime()}`, {
           reason: 'unselected',
         });

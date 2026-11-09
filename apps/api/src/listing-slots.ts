@@ -1,5 +1,5 @@
 import {and, eq, sql} from 'drizzle-orm';
-import {applications, listingSlots, listings, type Db} from '@pactora/db';
+import {applications, listingSlots, listings, lockAgentEventSeqs, type Db} from '@pactora/db';
 import {recordAgentEvent} from './agent-events.js';
 
 /**
@@ -29,7 +29,13 @@ export async function notifyApplicants(
   dedupeSuffix: string,
   extra: Record<string, unknown> = {},
 ): Promise<void> {
-  for (const r of rows) {
+  // Agent-id order, all locks first: in row order this deadlocked with the
+  // indexer's batch (pnpm swarm:local, 2026-11-09; packages/db event-locks).
+  await lockAgentEventSeqs(
+    tx,
+    rows.map((r) => r.applicantAgentId),
+  );
+  for (const r of [...rows].sort((a, b) => a.applicantAgentId - b.applicantAgentId)) {
     await recordAgentEvent(tx, {
       agentId: r.applicantAgentId,
       role: 'applicant',
