@@ -12,7 +12,9 @@ agents themselves.
 > The first commit, tagged `pre-hackathon`, imports that prototype as the
 > baseline; everything after it is the NEAR work. The diff:
 > `git diff pre-hackathon hackathon-submission`, or
-> [compare on GitHub](https://github.com/gopaltalaviya/pactora-backend-near/compare/pre-hackathon...hackathon-submission).
+> [compare on GitHub](https://github.com/gopaltalaviya/pactora-backend-near/compare/pre-hackathon...hackathon-submission)
+> (the `hackathon-submission` tag is added after the testnet run; until then
+> compare against `human-work`).
 > Sibling repos, same split:
 > [contracts](https://github.com/gopaltalaviya/pactora-contracts-near) (the
 > Rust contract and the 2-of-3 Sputnik DAO arbiter),
@@ -36,20 +38,25 @@ other rather than compete.
 
 | Do | See |
 |---|---|
-| `pnpm install && pnpm demo:local` (Docker running, the contracts repo cloned beside this one) | `Demo passed.` — every line a check against the local NEAR chain; exit code 0 |
-| `pnpm swarm:local` (after `pnpm demo:local`, sandbox still up) | an agent swarm on the sandbox: 20 buyer agents post listings, 5 seller agents bid by price rules (no model), buyers pick by price and reputation over two rounds; every job funded, delivered and settled on chain; a report (listings, bids, fills, median price, settlements, reputation per seller) and the checks — caps kept, balances reconcile, I1 — then `Swarm passed.`, exit 0, in about 3 minutes |
-| `pnpm check` (Postgres up: `docker compose up -d`, then `pnpm db:migrate`) | typecheck, lint, format and every test pass |
+| `pnpm install && pnpm demo:local` (Docker running, the contracts repo cloned beside this one, both on the `human-work` branch) | `Demo passed.` — every line a check against the local NEAR chain; exit code 0. The DAO dispute-desk section runs only when `pactora-contracts-near/dao.wasm` exists (see below) |
+| `pnpm swarm:local` (after `pnpm demo:local`, sandbox still up) | an agent swarm on the sandbox: 20 buyer agents post listings, 5 seller agents bid by price rules (no model), buyers pick by price and reputation over two rounds; every job funded, delivered and settled on chain; a report (listings, bids, fills, median price, settlements, reputation per seller) and the checks — caps kept, balances reconcile, I1 — then `Swarm passed.`, exit 0, in about 2½ minutes |
+| `pnpm check` (Postgres up: `docker compose up -d`, then `DATABASE_URL=postgres://pactora:pactora@127.0.0.1:5443/pactora_near pnpm db:migrate`, and the same `DATABASE_URL` for `pnpm check`) | typecheck, lint, format and every test pass, in about 10 minutes |
 | `node scripts/test-startup.mjs` (after `pnpm -r build`) | every bad configuration refused at boot, by name |
-| `curl http://127.0.0.1:8098/v1/openapi.json` while `DEMO_HOLD=1 pnpm demo:local` runs | the API, generated from the same schemas the handlers validate with |
-| `git diff pre-hackathon hackathon-submission` | the NEAR work, and only it |
+| `curl http://127.0.0.1:8098/v1/openapi.json` while `DEMO_HOLD=1 pnpm demo:local` runs (it prints the verdict, then `holding — API http://127.0.0.1:8098`) | the API, generated from the same schemas the handlers validate with |
+| `git diff pre-hackathon hackathon-submission` (`git diff pre-hackathon human-work` until the tag exists) | the NEAR work, and only it |
 
 ## Run it — one command, no keys
 
-Needs Docker, Node 22+, pnpm 9, and the contracts repo cloned beside this one.
+Needs Docker (running), Node ≥ 22.12, pnpm 9.12 (`corepack enable`), and the
+contracts repo cloned beside this one.
+Both on the `human-work` branch: that is the submission.
 
 ```bash
-git clone https://github.com/gopaltalaviya/pactora-contracts-near
-git clone https://github.com/gopaltalaviya/pactora-backend-near
+git clone -b human-work https://github.com/gopaltalaviya/pactora-contracts-near
+git clone -b human-work https://github.com/gopaltalaviya/pactora-backend-near
+# optional, for the DAO dispute-desk section (fetches the Sputnik DAO code
+# the testnet factory deploys; needs internet):
+(cd pactora-contracts-near && npm ci && node scripts/create-dao.mjs --fetch-wasm dao.wasm)
 cd pactora-backend-near
 pnpm install
 pnpm demo:local
@@ -59,8 +66,10 @@ What it does: starts Postgres, MinIO and a fresh local NEAR node (Docker),
 deploys the contracts from the contracts repo's committed wasm
 (hash-checked), runs the migrations and the build, then `scripts/demo.mjs`
 with `AGENT_MODE=cached` — the models' answers are replayed from
-`.agent-cache/`, so no API key and no quota. About 3 minutes after the images
-are built.
+`.agent-cache/`, so no API key and no quota. About 10 minutes after the
+images are built. If it stops with `postgres … is unhealthy`, Postgres is
+still recovering its volume from an earlier run: wait a minute and run it
+again.
 
 What you see — every line a check against the chain, not a log message:
 

@@ -1504,6 +1504,8 @@ try {
     );
   }
   if (process.env.DEMO_HOLD) {
+    // The verdict first: a reader of a held run sees it before the wait.
+    console.log(failures === 0 ? '\nDemo passed.\n' : `\nDemo FAILED: ${failures} check(s).\n`);
     console.log(`  holding — API ${base}. Ctrl+C stops.`);
     await new Promise((r) => process.once('SIGINT', r));
   }
