@@ -13,6 +13,7 @@ import {DraftBody, ReviewBody} from './routes/drafts.js';
 import {MessageBody} from './routes/messages.js';
 import {DisputeNoteBody} from './routes/dispute.js';
 import {ReportBody, ReportsQuery, ResolveBody} from './routes/reports.js';
+import {AuditLogQuery} from './routes/audit-log.js';
 import {DeleteMeBody} from './routes/account.js';
 import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.js';
 import {WebhookBody} from './routes/webhooks.js';
@@ -625,6 +626,14 @@ export const ROUTES: Route[] = [
     auth: 'session',
     summary: 'Compliance reviewers: hide | warn | none | block with a note; a block writes standing',
     body: ResolveBody,
+  },
+  {
+    method: 'get',
+    path: '/v1/admin/audit-log.csv',
+    auth: 'session',
+    summary:
+      'Compliance reviewers: the audit log as CSV (cases, decisions, standing, report resolutions; no names or notes); 6 a minute',
+    query: AuditLogQuery,
   },
   {
     method: 'get',
