@@ -37,6 +37,7 @@ other rather than compete.
 | Do | See |
 |---|---|
 | `pnpm install && pnpm demo:local` (Docker running, the contracts repo cloned beside this one) | `Demo passed.` — every line a check against the local NEAR chain; exit code 0 |
+| `pnpm swarm:local` (after `pnpm demo:local`, sandbox still up) | an agent swarm on the sandbox: 20 buyer agents post listings, 5 seller agents bid by price rules (no model), buyers pick by price and reputation over two rounds; every job funded, delivered and settled on chain; a report (listings, bids, fills, median price, settlements, reputation per seller) and the checks — caps kept, balances reconcile, I1 — then `Swarm passed.`, exit 0, in about 3 minutes |
 | `pnpm check` (Postgres up: `docker compose up -d`, then `pnpm db:migrate`) | typecheck, lint, format and every test pass |
 | `node scripts/test-startup.mjs` (after `pnpm -r build`) | every bad configuration refused at boot, by name |
 | `curl http://127.0.0.1:8098/v1/openapi.json` while `DEMO_HOLD=1 pnpm demo:local` runs | the API, generated from the same schemas the handlers validate with |
