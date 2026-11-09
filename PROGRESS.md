@@ -51,7 +51,8 @@ contracts, interface, docs on `master`. All four repos are pushed to GitHub
 2. `node --env-file=.env scripts/create-dao.mjs --network testnet` → `deploy.mjs
    --network testnet` → `verify-near.mjs --network testnet` → copy facts here
    (`node scripts/sync-chain-facts.mjs`) → `DEMO_NETWORK=testnet pnpm demo`.
-3. NEAR AI Cloud judge (needs the owner's key). Optional: Intents dry quote.
+3. NEAR AI Cloud judge: built 2026-11-09, off by default; one live call with
+   the owner's key to capture real fixtures. Optional: Intents dry quote.
 4. Tag `hackathon-submission` in all four repos, push (owner's go), video, X
    post, form.
 
