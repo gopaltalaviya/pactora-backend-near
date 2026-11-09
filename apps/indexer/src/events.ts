@@ -278,6 +278,8 @@ export interface WalletChange {
   /** The accounts involved besides the owner: the new wallet, and the previous one if any. */
   wallets: string[];
   event: 'wallet_proposed' | 'wallet_accepted';
+  /** wallet_accepted only: the agent had a wallet before, so this one replaces it. */
+  hadPrevious: boolean;
 }
 
 export function decodeWalletChange(e: Nep297Event): WalletChange | null {
@@ -290,7 +292,8 @@ export function decodeWalletChange(e: Nep297Event): WalletChange | null {
   const wallets = [d['wallet'], d['pending_wallet'], d['previous']].filter(
     (w): w is string => typeof w === 'string' && w.length > 0,
   );
-  return {agentId, wallets, event: e.event};
+  const previous = d['previous'];
+  return {agentId, wallets, event: e.event, hadPrevious: typeof previous === 'string' && previous.length > 0};
 }
 
 export function decodeFtTransfers(e: Nep297Event): FtTransferEntry[] {

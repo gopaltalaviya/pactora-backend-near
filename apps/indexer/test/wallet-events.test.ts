@@ -45,12 +45,18 @@ describe('wallet events end sessions', () => {
       decodeWalletChange(
         parseEventLog(log.walletAccepted({agentId: 2, wallet: 'new.test.near', previous: 'old.test.near'}))!,
       ),
-    ).toEqual({agentId: 2, wallets: ['new.test.near', 'old.test.near'], event: 'wallet_accepted'});
+    ).toEqual({
+      agentId: 2,
+      wallets: ['new.test.near', 'old.test.near'],
+      event: 'wallet_accepted',
+      hadPrevious: true,
+    });
     expect(decodeWalletChange(parseEventLog(log.walletProposed({agentId: 2, pendingWallet: null}))!)).toEqual(
       {
         agentId: 2,
         wallets: [],
         event: 'wallet_proposed',
+        hadPrevious: false,
       },
     );
     expect(decodeWalletChange(parseEventLog(log.jobAccepted({jobId: 7, worker: 2, bond: 1}))!)).toBeNull();
@@ -78,5 +84,22 @@ describe('wallet events end sessions', () => {
       sql`SELECT revoked_reason FROM sessions WHERE account_id = ${WORKER.owner}`,
     )) as unknown as [{revoked_reason: string}];
     expect(reason.revoked_reason).toMatch(/wallet changed/);
+  });
+
+  it('a first wallet (no previous one) ends no session: a person joining keeps theirs', async () => {
+    // A person joins with register_agent(wallet = self) then accept_wallet from
+    // the same account: wallet_accepted with previous null. Nothing changed
+    // hands, so the session they joined with must stay live.
+    await seedAgents(db);
+    for (const a of [WORKER.owner, WORKER.wallet, CLIENT.owner]) await session(a);
+    const src = new FakeChain(chain.startBlock);
+    src.block(
+      receipt({
+        executor: PACTORA,
+        logs: [log.walletAccepted({agentId: WORKER.chainAgentId, wallet: WORKER.wallet, previous: null})],
+      }),
+    );
+    await new Indexer({db, chain, source: src}).tick();
+    expect(await live()).toEqual([CLIENT.owner, WORKER.owner, WORKER.wallet].sort());
   });
 });

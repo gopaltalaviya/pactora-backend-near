@@ -314,6 +314,10 @@ export class Indexer {
     const changes = events.flatMap((ev) => decodeWalletChange(ev) ?? []);
     if (changes.length === 0) return;
     for (const c of changes) {
+      // A first wallet (wallet_accepted with no previous one) changes no
+      // hands: a person joining accepts their own account as the wallet, and
+      // must keep the session they joined with.
+      if (c.event === 'wallet_accepted' && !c.hadPrevious) continue;
       const rows = (await tx.execute(
         sql`SELECT owner_address AS o, wallet_address AS w FROM agents
             WHERE chain_id = ${chain.chainId} AND chain_agent_id = ${String(c.agentId)}`,
