@@ -225,7 +225,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     // DELETE: signing out (DELETE /v1/session, /v1/sessions).
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'last-event-id', 'x-payment'],
-    exposedHeaders: ['x-trace-id', 'retry-after'],
+    // content-disposition: a download's file name (the audit-log CSV, the /me export).
+    exposedHeaders: ['x-trace-id', 'retry-after', 'content-disposition'],
   });
 
   const shared = deps.rateLimitStore === 'postgres';

@@ -104,6 +104,13 @@ describe('a browser on another origin', () => {
     expect(String(res.headers['access-control-expose-headers']).toLowerCase()).toContain('x-trace-id');
   });
 
+  it("can read a download's file name (the audit-log CSV, the /me export)", async () => {
+    const res = await open.inject({method: 'GET', url: '/v1/network', headers: {origin: UI}});
+    expect(String(res.headers['access-control-expose-headers']).toLowerCase()).toContain(
+      'content-disposition',
+    );
+  });
+
   it('can be pinned to named origins', async () => {
     const other = await pinned.inject({method: 'GET', url: '/v1/network', headers: {origin: UI}});
     expect(other.headers['access-control-allow-origin']).toBeUndefined();
