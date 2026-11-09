@@ -1083,6 +1083,19 @@ export const publicProfiles = pgTable(
     headline: text('headline').notNull().default(''),
     bio: text('bio').notNull().default(''),
     showAccount: boolean('show_account').notNull().default(false),
+    /** Lower-case tags, at most 20 (0026). */
+    skills: text('skills')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    /** "City" or "City, Region"; mirrored to agents.location, which matching reads. */
+    location: text('location').notNull().default(''),
+    /** "Open to work": shown, filterable, and a condition for listing.match alerts. */
+    available: boolean('available').notNull().default(false),
+    /** Show open listings and job counts on the public profile. */
+    showTaskList: boolean('show_task_list').notNull().default(false),
+    /** Receive a listing.match feed event for a new listing that matches. */
+    alerts: boolean('alerts').notNull().default(false),
     publishedAt: timestamp('published_at', {withTimezone: true}),
     updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
   },

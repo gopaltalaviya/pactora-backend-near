@@ -10,6 +10,7 @@ import {
   jobs,
   listingSlots,
   listings,
+  publicProfiles,
   readTrust,
   type Db,
 } from '@pactora/db';
@@ -67,7 +68,7 @@ const text = (min: number, max: number) =>
     .transform((s) => s.trim())
     .pipe(z.string().min(min).max(max));
 
-const Skill = z
+export const Skill = z
   .string()
   .transform((s) => s.replace(/\s+/g, ' ').trim().toLowerCase())
   .pipe(z.string().min(2, 'a skill is 2-50 characters').max(50, 'a skill is 2-50 characters'));
@@ -509,6 +510,7 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       }
       return reply.status(200).send(await view(won));
     }
+    await alertMatches(db, row);
     return reply.status(201).send(await view(row));
   });
 
@@ -532,13 +534,19 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
 
     let matchMe: SQL | undefined;
     if (query.match === 'me' && actor) {
+      // The caller's capabilities and profile skills together (0026), and
+      // the agent's location (the profile's is mirrored there).
       const caps = await db
         .select({c: agentCapabilities.capability})
         .from(agentCapabilities)
         .where(eq(agentCapabilities.agentId, actor.agent.id));
+      const profile = await db.query.publicProfiles.findFirst({
+        where: eq(publicProfiles.agentId, actor.agent.id),
+      });
+      const mine = [...new Set([...caps.map((c) => c.c.toLowerCase()), ...(profile?.skills ?? [])])];
       matchMe = listingMatchesSql(
         {skills: sql`${listings.skills}`, location: sql`${listings.location}`},
-        {skills: textArray(caps.map((c) => c.c.toLowerCase())), location: sql`${actor.agent.location}`},
+        {skills: textArray(mine), location: sql`${actor.agent.location}`},
       );
     }
 
@@ -1335,6 +1343,52 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
     });
     return view((await db.query.listings.findFirst({where: eq(listings.id, listing.id)}))!);
   });
+}
+
+/** The most people one new listing alerts. */
+export const MAX_MATCH_ALERTS = 200;
+
+/**
+ * Tell the people a new listing is for (docs/26 F18, 0026): every published
+ * profile that is open to work, asked for alerts, is in good standing, has a
+ * skill the listing names (a listing naming none alerts nobody) and is at a
+ * matching location — never the client. One `listing.match` event each,
+ * exactly once per listing (the dedupe key names the listing).
+ */
+export async function alertMatches(db: Db, listing: Listing): Promise<number> {
+  if (listing.skills.length === 0) return 0;
+  const mySkills = sql`(SELECT coalesce(array_agg(DISTINCT x), '{}'::text[]) FROM (SELECT unnest(p.skills) AS x UNION SELECT lower(c.capability) FROM agent_capabilities c WHERE c.agent_id = a.id) u)`;
+  const people = (await db.execute(sql`
+    SELECT a.id
+      FROM public_profiles p JOIN agents a ON a.id = p.agent_id
+     WHERE p.published AND p.available AND p.alerts
+       AND a.chain_id = ${listing.chainId} AND a.id <> ${listing.clientAgentId}
+       AND NOT EXISTS (SELECT 1 FROM account_standing s WHERE s.agent_id = a.id AND s.standing <> 'clear')
+       AND ${listingMatchesSql(
+         {skills: textArray(listing.skills), location: sql`${listing.location}`},
+         {skills: mySkills, location: sql`a.location`},
+       )}
+     ORDER BY a.id LIMIT ${MAX_MATCH_ALERTS}
+  `)) as unknown as {id: string | number}[];
+  let n = 0;
+  for (const p of people) {
+    const seq = await recordAgentEvent(db, {
+      agentId: Number(p.id),
+      role: 'match',
+      kind: 'listing.match',
+      payload: {
+        listingId: listing.publicId,
+        title: listing.title,
+        skills: listing.skills,
+        location: listing.location,
+        maxPriceBaseUnits: listing.maxPrice,
+      },
+      listingId: listing.id,
+      dedupeKey: `listing.match:${listing.publicId}`,
+    });
+    if (seq !== null) n++;
+  }
+  return n;
 }
 
 /**

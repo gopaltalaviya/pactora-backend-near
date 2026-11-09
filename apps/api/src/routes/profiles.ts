@@ -1,10 +1,11 @@
 import type {FastifyInstance} from 'fastify';
 import {and, eq, sql} from 'drizzle-orm';
 import {z} from 'zod';
-import {jobs, partyReviews, publicProfiles, type Db} from '@pactora/db';
+import {agents, jobs, partyReviews, publicProfiles, type Db} from '@pactora/db';
 import {ErrorCode, PactoraError} from '@pactora/shared';
 import {actorOf} from '../actor.js';
 import {isPublicId} from './jobs.js';
+import {Location, Skill} from './listings.js';
 
 /**
  * Public profiles and two-way reviews (docs/26 F16, F17).
@@ -37,11 +38,29 @@ export const ProfileBody = z.object({
   bio: z.string().trim().max(2000, 'bio is at most 2000 characters').default(''),
   showAccount: z.boolean().default(false),
   published: z.boolean().default(false),
+  /** Up to 20 lower-case tags (2-50 chars each); matched against listings' skills. */
+  skills: z
+    .array(Skill)
+    .max(20, 'at most 20 skills')
+    .transform((s) => [...new Set(s)])
+    .default([]),
+  /** "City" or "City, Region" (docs/26 F18); also the agent's matching location. */
+  location: Location.default(''),
+  /** "Open to work." */
+  availability: z.boolean().default(false),
+  /** Show open listings and job counts on the public profile. */
+  showTaskList: z.boolean().default(false),
+  /** A listing.match feed event for each new listing that matches (needs availability). */
+  alerts: z.boolean().default(false),
 });
 
 export const DirectoryQuery = z.object({
   q: z.string().trim().max(100).optional(),
   kind: z.enum(['person', 'agent']).optional(),
+  /** `true`: only profiles open to work. */
+  available: z.enum(['true', 'false']).optional(),
+  /** One skill the profile (or the agent's capabilities) must name. */
+  skill: Skill.optional(),
   sort: z.enum(['rating', 'recent', 'name']).default('rating'),
   page: z.coerce.number().int().min(1).max(500).default(1),
 });
@@ -77,6 +96,11 @@ interface ProfileRow {
   headline: string;
   bio: string;
   show_account: boolean;
+  skills: string[] | null;
+  profile_location: string;
+  available: boolean;
+  show_task_list: boolean;
+  alerts: boolean;
   published_at: Date | string | null;
   rating_avg: string | null;
   rating_count: string | number;
@@ -94,7 +118,9 @@ function profileView(r: ProfileRow, opts: {bio?: boolean} = {}) {
     ...(opts.bio ? {bio: r.bio} : {}),
     // A person's account is their wallet; an agent's is its wallet account.
     account: r.show_account ? (r.kind === 'person' ? r.owner_address : r.wallet_address) : null,
-    location: r.location || null,
+    location: r.profile_location || r.location || null,
+    skills: r.skills ?? [],
+    availability: r.available,
     capabilities: r.capabilities ?? [],
     rating: {
       average: count > 0 && r.rating_avg !== null ? Number(Number(r.rating_avg).toFixed(2)) : null,
@@ -111,6 +137,7 @@ function profileView(r: ProfileRow, opts: {bio?: boolean} = {}) {
 const PROFILE_SELECT = sql`
   SELECT a.id AS agent_id, a.public_id, a.kind, a.chain_agent_id, a.owner_address, a.wallet_address, a.location,
          p.display_name, p.headline, p.bio, p.show_account, p.published, p.published_at,
+         p.skills, p.location AS profile_location, p.available, p.show_task_list, p.alerts,
          (SELECT avg(r.rating) FROM party_reviews r JOIN jobs j ON j.id = r.job_id
             WHERE r.subject_agent_id = a.id AND ${VISIBLE}) AS rating_avg,
          (SELECT count(*) FROM party_reviews r JOIN jobs j ON j.id = r.job_id
@@ -173,6 +200,16 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileR
       [
         sql`p.published`,
         ...(q.kind ? [sql`a.kind = ${q.kind}`] : []),
+        ...(q.available === 'true'
+          ? [sql`p.available`]
+          : q.available === 'false'
+            ? [sql`NOT p.available`]
+            : []),
+        ...(q.skill
+          ? [
+              sql`(${q.skill} = ANY(p.skills) OR EXISTS (SELECT 1 FROM agent_capabilities c WHERE c.agent_id = a.id AND c.capability = ${q.skill}))`,
+            ]
+          : []),
         ...(q.q
           ? [
               sql`(p.display_name ILIKE ${`%${likeEscape(q.q)}%`} OR p.headline ILIKE ${`%${likeEscape(q.q)}%`})`,
@@ -204,8 +241,32 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileR
 
   app.get('/v1/profiles/:id', async (request) => {
     const row = await publishedProfile((request.params as {id: string}).id);
-    return {...profileView(row, {bio: true}), reviews: await visibleReviews(Number(row.agent_id), 1, 10)};
+    return {
+      ...profileView(row, {bio: true}),
+      reviews: await visibleReviews(Number(row.agent_id), 1, 10),
+      // Their open listings and job counts, only if they chose to show them.
+      taskList: row.show_task_list ? await taskListOf(Number(row.agent_id)) : null,
+    };
   });
+
+  /** What `showTaskList` shows: the agent's open listings, and how many jobs are open and settled. */
+  async function taskListOf(agentId: number) {
+    const open = await rows<{public_id: string; title: string; status: string}>(sql`
+      SELECT public_id, title, status FROM listings
+       WHERE client_agent_id = ${agentId} AND status = 'open' AND deadline > now()
+       ORDER BY id DESC LIMIT 20`);
+    const [counts = {open: 0, settled: 0}] = await rows<{
+      open: string | number;
+      settled: string | number;
+    }>(sql`
+      SELECT count(*) FILTER (WHERE state IN ('created', 'accepted', 'submitted', 'disputed')) AS open,
+             count(*) FILTER (WHERE state = 'settled') AS settled
+        FROM jobs WHERE client_agent_id = ${agentId} OR worker_agent_id = ${agentId}`);
+    return {
+      listings: open.map((l) => ({listingId: l.public_id, title: l.title, status: l.status})),
+      jobs: {open: Number(counts.open), settled: Number(counts.settled)},
+    };
+  }
 
   app.get('/v1/profiles/:id/reviews', async (request) => {
     const row = await publishedProfile((request.params as {id: string}).id);
@@ -232,6 +293,11 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileR
         headline: '',
         bio: '',
         showAccount: false,
+        skills: [],
+        location: actor.agent.location || null,
+        availability: false,
+        showTaskList: false,
+        alerts: false,
       };
     }
     return {
@@ -239,6 +305,8 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileR
       published: row.published,
       ...profileView(row, {bio: true}),
       showAccount: row.show_account,
+      showTaskList: row.show_task_list,
+      alerts: row.alerts,
     };
   });
 
@@ -246,14 +314,24 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileR
     const actor = await actorOf(db, request);
     const body = ProfileBody.parse(request.body ?? {});
     const now = new Date();
+    const fields = {
+      displayName: body.displayName,
+      headline: body.headline,
+      bio: body.bio,
+      showAccount: body.showAccount,
+      skills: body.skills,
+      location: body.location,
+      available: body.availability,
+      showTaskList: body.showTaskList,
+      alerts: body.alerts,
+    };
+    // One location per agent: matching (apps/api matching.ts) reads agents.location.
+    await db.update(agents).set({location: body.location}).where(eq(agents.id, actor.agent.id));
     await db
       .insert(publicProfiles)
       .values({
         agentId: actor.agent.id,
-        displayName: body.displayName,
-        headline: body.headline,
-        bio: body.bio,
-        showAccount: body.showAccount,
+        ...fields,
         published: body.published,
         publishedAt: body.published ? now : null,
         updatedAt: now,
@@ -261,10 +339,7 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileR
       .onConflictDoUpdate({
         target: publicProfiles.agentId,
         set: {
-          displayName: body.displayName,
-          headline: body.headline,
-          bio: body.bio,
-          showAccount: body.showAccount,
+          ...fields,
           published: body.published,
           // Kept from the first publish; cleared when unpublished.
           publishedAt: body.published
