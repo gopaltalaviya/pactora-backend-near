@@ -1,5 +1,5 @@
 import type {FastifyInstance, FastifyRequest} from 'fastify';
-import {and, asc, desc, eq, inArray, lt, ne, sql, type SQL} from 'drizzle-orm';
+import {and, asc, desc, eq, inArray, isNull, lt, ne, sql, type SQL} from 'drizzle-orm';
 import {z} from 'zod';
 import {sha256Hex} from '@pactora/near';
 import {
@@ -291,6 +291,8 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       workWindowSeconds: listing.workWindowSeconds,
       status: effectiveStatus(listing),
       reservedBaseUnits: listing.reserved,
+      /** Moderation hid it from the public board (0028); the owner still sees it here. */
+      hidden: listing.hiddenAt !== null,
       createdAt: listing.createdAt.toISOString(),
       updatedAt: listing.updatedAt.toISOString(),
     };
@@ -557,6 +559,8 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
         and(
           eq(listings.chainId, chainId),
           status,
+          // A hidden listing (moderation, 0028) is off the public board; its owner still lists it.
+          query.mine === 'true' && actor ? undefined : isNull(listings.hiddenAt),
           query.category ? eq(listings.category, query.category) : undefined,
           query.interactionMode ? eq(listings.interactionMode, query.interactionMode) : undefined,
           query.hiringMode ? eq(listings.hiringMode, query.hiringMode) : undefined,
@@ -581,6 +585,10 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
   app.get('/v1/listings/:id', async (request) => {
     const listing = await loadListing(request);
     const actor = await optionalActorOf(db, request);
+    // Hidden by moderation: gone for everyone but its owner.
+    if (listing.hiddenAt !== null && actor?.agent.id !== listing.clientAgentId) {
+      throw new PactoraError(ErrorCode.NOT_FOUND, `no listing ${listing.publicId}`);
+    }
     const base = await view(listing);
     if (!actor) return base;
     const chain = chainOf(listing.chainId);

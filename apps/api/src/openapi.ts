@@ -12,6 +12,7 @@ import {ConfirmBody, PrepareBody} from './routes/person-actions.js';
 import {DraftBody, ReviewBody} from './routes/drafts.js';
 import {MessageBody} from './routes/messages.js';
 import {DisputeNoteBody} from './routes/dispute.js';
+import {ReportBody, ReportsQuery, ResolveBody} from './routes/reports.js';
 import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.js';
 import {WebhookBody} from './routes/webhooks.js';
 import {DirectoryQuery, PartyReviewBody, ProfileBody, ReviewsQuery} from './routes/profiles.js';
@@ -562,6 +563,29 @@ export const ROUTES: Route[] = [
     auth: 'session',
     summary: 'Moderation: hide a review with a reason (kept, audited)',
     body: HideBody,
+  },
+  {
+    method: 'post',
+    path: '/v1/reports',
+    auth: 'key-or-session',
+    summary:
+      'Report a listing, person, agent or message (reason enum, details <= 1000); 10 an hour per client',
+    body: ReportBody,
+    status: 201,
+  },
+  {
+    method: 'get',
+    path: '/v1/admin/reports',
+    auth: 'session',
+    summary: 'Compliance reviewers: the moderation queue, by status',
+    query: ReportsQuery,
+  },
+  {
+    method: 'post',
+    path: '/v1/admin/reports/:id/resolve',
+    auth: 'session',
+    summary: 'Compliance reviewers: hide | warn | none | block with a note; a block writes standing',
+    body: ResolveBody,
   },
   {
     method: 'get',

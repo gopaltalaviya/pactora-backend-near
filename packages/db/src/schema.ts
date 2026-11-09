@@ -610,6 +610,8 @@ export const listings = pgTable(
     createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
     closedAt: timestamp('closed_at', {withTimezone: true}),
+    /** Moderation (0028): off the public board; the owner still sees it. */
+    hiddenAt: timestamp('hidden_at', {withTimezone: true}),
   },
   (t) => [
     uniqueIndex('listings_public_id_uk').on(t.publicId),
@@ -845,6 +847,8 @@ export const jobMessages = pgTable(
     /** The author's optional key: the same key and body is the same message. */
     idempotencyKey: text('idempotency_key'),
     createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    /** Moderation (0028): the words were replaced for both parties. */
+    hiddenAt: timestamp('hidden_at', {withTimezone: true}),
   },
   (t) => [
     uniqueIndex('job_messages_public_id_uk').on(t.publicId),
@@ -1292,6 +1296,45 @@ export const complianceAudit = pgTable(
     detail: jsonb('detail').notNull().default({}),
   },
   (t) => [index('compliance_audit_agent_idx').on(t.agentId, t.at)],
+);
+
+// ──────────────── reports and blocks (2026-11-09, 0028) ────────────────
+
+export const REPORT_TARGETS = ['listing', 'person', 'agent', 'message'] as const;
+export const REPORT_REASONS = ['spam', 'scam', 'abuse', 'illegal', 'impersonation', 'other'] as const;
+export const REPORT_ACTIONS = ['hide', 'warn', 'none', 'block'] as const;
+
+/** A report by a signed-in reporter about a listing, person, agent or message; resolved by a reviewer. */
+export const reports = pgTable(
+  'reports',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    reporterAgentId: bigint('reporter_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id, {onDelete: 'cascade'}),
+    targetType: text('target_type').notNull(),
+    targetId: text('target_id').notNull(),
+    /** The account the target belongs to: what a warn or a block acts on. */
+    targetAgentId: bigint('target_agent_id', {mode: 'number'}).references(() => agents.id, {
+      onDelete: 'cascade',
+    }),
+    reason: text('reason').notNull(),
+    details: text('details').notNull().default(''),
+    status: text('status').notNull().default('open'),
+    action: text('action'),
+    note: text('note'),
+    resolvedBy: text('resolved_by'),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    resolvedAt: timestamp('resolved_at', {withTimezone: true}),
+  },
+  (t) => [
+    uniqueIndex('reports_public_id_uk').on(t.publicId),
+    uniqueIndex('reports_open_once_uk')
+      .on(t.reporterAgentId, t.targetType, t.targetId)
+      .where(sql`status = 'open'`),
+    index('reports_status_idx').on(t.status, t.id),
+  ],
 );
 
 // ──────────────── channels: Telegram and email (docs/26 F11, F12) ────────────────

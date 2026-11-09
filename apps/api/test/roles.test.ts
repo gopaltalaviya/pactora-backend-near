@@ -831,6 +831,24 @@ function rows(): Row[] {
       override: ADMIN_ANY,
     },
 
+    // reports and moderation
+    {route: 'POST /v1/reports', url: () => '/v1/reports', body: () => ({}), base: rules.either},
+    {
+      route: 'GET /v1/admin/reports',
+      url: () => '/v1/admin/reports',
+      base: rules.session,
+      only: ['reviewer', 'reviewerOld'],
+      override: STALE_ADMIN,
+    },
+    {
+      route: 'POST /v1/admin/reports/:id/resolve',
+      url: () => `/v1/admin/reports/${U()}/resolve`,
+      body: () => ({}),
+      base: rules.session,
+      only: ['reviewer', 'reviewerOld'],
+      override: STALE_ADMIN,
+    },
+
     // identity, compliance
     {route: 'GET /v1/kyc', url: () => '/v1/kyc', base: rules.people},
     {
