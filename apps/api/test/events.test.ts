@@ -32,7 +32,7 @@ const config = loadConfig({
   contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
   env: {ENABLED_CHAINS: 'near:sandbox'},
 });
-const KEY = parseSecretKey('5a'.repeat(32));
+const KEY = parseSecretKey('541d7050864bc4af3f28b1d952841d30aaecf95c778ab9edd5aae62d6e508a84');
 
 let app: FastifyInstance;
 let noHooks: FastifyInstance;

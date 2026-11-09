@@ -442,7 +442,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.webhookSecretKey ? {secretKey: deps.webhookSecretKey} : {}),
     ...(deps.webhookTargetPolicy ? {targetPolicy: deps.webhookTargetPolicy} : {}),
   });
-  await registerProfileRoutes(app, {db: deps.db});
+  await registerProfileRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
+  });
   await registerKycRoutes(app, {
     db: deps.db,
     chains: deps.chains,

@@ -13,7 +13,7 @@ import {backoffMs, DISABLE_AFTER, MAX_ATTEMPTS, Notifier} from '../src/notifier.
  */
 
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';
-const KEY = parseSecretKey('3c'.repeat(32));
+const KEY = parseSecretKey('5313643a55b27f4c0d4c73f6eed14b9b868db94394795300629cdad4d7419fae');
 const LOCAL = {allowHttp: true, allowPrivate: true};
 
 let db: Db;
@@ -222,7 +222,11 @@ describe('delivery', () => {
     const w = await agentRow();
     const h = await hook(c.id, '/ok');
     await event(c.id, w.id);
-    await new Notifier({db, secretKey: parseSecretKey('99'.repeat(32)), policy: LOCAL}).runOnce();
+    await new Notifier({
+      db,
+      secretKey: parseSecretKey('5df0ddee0e9062d65ba255aaa30e020f76b9eb0b4d1a7f87f3756ef2d24865e0'),
+      policy: LOCAL,
+    }).runOnce();
     expect(hits).toHaveLength(0);
     const [d] = await deliveriesOf(h.publicId);
     expect(d!.status).toBe('pending');

@@ -50,7 +50,7 @@ const ENTRY = {
 };
 
 /** 32 random-looking bytes, hex: a WEBHOOK_SECRET_KEY the check accepts. */
-const GOOD_WEBHOOK_KEY = '7e'.repeat(32);
+const GOOD_WEBHOOK_KEY = '6cfc0d92f0c955451da1eba2e406374a7dc6d27894befff1e298f1a297e626cc';
 
 /** [service, what is wrong, env on top of BASE, what the refusal must say, what it must NOT say] */
 const CASES = [
@@ -152,6 +152,12 @@ const CASES = [
     'api',
     'WEBHOOK_SECRET_KEY too weak',
     {DATABASE_URL: CLOSED_DB, WEBHOOK_SECRET_KEY: 'a passphrase'},
+    /WEBHOOK_SECRET_KEY must be 32/,
+  ],
+  [
+    'api',
+    'WEBHOOK_SECRET_KEY of one repeated byte',
+    {DATABASE_URL: CLOSED_DB, WEBHOOK_SECRET_KEY: '7e'.repeat(32)},
     /WEBHOOK_SECRET_KEY must be 32/,
   ],
   [

@@ -25,7 +25,7 @@ const config = loadConfig({
   env: {ENABLED_CHAINS: 'near:sandbox'},
 });
 const PACTORA = config.chain('near:sandbox').contracts.Pactora;
-const KEY = parseSecretKey('7c'.repeat(32));
+const KEY = parseSecretKey('72464bbd8c9347b2a1c1c7f400e27dd662a5fd36ff4f8ccca97a05d0ad9b965d');
 
 let app: FastifyInstance;
 let db: Db;
@@ -174,6 +174,24 @@ describe("a person's row (live probe 6)", () => {
     expect(shown.json()).toMatchObject({kind: 'person', name: 'Robin R.', profileId: p.publicId});
     expect(shown.body).not.toContain(p.account);
     expect((await app.inject({url: `/v1/agents/${id}/trust`})).statusCode).toBe(200);
+    // The profile says whether they can be hired, from the chain's stake_of (live probe 14b).
+    expect((await app.inject({url: `/v1/profiles/${p.publicId}`})).json()).toMatchObject({
+      hireable: true,
+      stake: '1000000',
+    });
+    stakes.set(p.chainAgentId, null);
+    const q = await person(app, `pf-priv-q${n}`);
+    stakes.set(q.chainAgentId, null);
+    await app.inject({
+      method: 'PUT',
+      url: '/v1/me/profile',
+      headers: bearer(q.token),
+      payload: {displayName: 'Q', published: true},
+    });
+    expect((await app.inject({url: `/v1/profiles/${q.publicId}`})).json()).toMatchObject({
+      hireable: false,
+      stake: '0',
+    });
     await app.inject({
       method: 'PUT',
       url: '/v1/me/profile',

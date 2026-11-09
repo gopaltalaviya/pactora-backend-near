@@ -180,7 +180,7 @@ describe('postPinned', () => {
 });
 
 describe('secretbox', () => {
-  const key = parseSecretKey('ab'.repeat(32));
+  const key = parseSecretKey('c2cc63b9a34ac52d277e6c80d1551a448a2f4ae37ceb730e3aac25fd39755dc5');
 
   it('round-trips, with a fresh IV each time', () => {
     const a = seal(key, 'whsec_abc', 'hook-1');
@@ -191,7 +191,13 @@ describe('secretbox', () => {
 
   it('refuses another key, another row, a changed byte, or another format', () => {
     const sealed = seal(key, 'whsec_abc', 'hook-1');
-    expect(() => open(parseSecretKey('cd'.repeat(32)), sealed, 'hook-1')).toThrow();
+    expect(() =>
+      open(
+        parseSecretKey('0bc769401abed5b5040d714d678cfc2bb949e3f97c95a110428e60a6519d6706'),
+        sealed,
+        'hook-1',
+      ),
+    ).toThrow();
     expect(() => open(key, sealed, 'hook-2')).toThrow();
     const parts = sealed.split('.');
     const ct = Buffer.from(parts[3]!, 'base64url');
@@ -211,9 +217,14 @@ describe('secretbox', () => {
   });
 
   it('takes a key as 64 hex or 44 base64 characters, and nothing weaker', () => {
-    expect(parseSecretKey(Buffer.alloc(32, 7).toString('base64'))).toHaveLength(32);
-    expect(parseSecretKey(Buffer.alloc(32, 7).toString('base64url'))).toHaveLength(32);
+    const random = Buffer.from(Array.from({length: 32}, (_, i) => (i * 37 + 11) % 256));
+    expect(parseSecretKey(random.toString('base64'))).toHaveLength(32);
+    expect(parseSecretKey(random.toString('base64url'))).toHaveLength(32);
     for (const bad of [
+      // The right length and no secret: one byte, repeated (2026-11-09).
+      Buffer.alloc(32, 7).toString('base64'),
+      '7e'.repeat(32),
+      '0'.repeat(64),
       '',
       'short',
       'ab'.repeat(31),

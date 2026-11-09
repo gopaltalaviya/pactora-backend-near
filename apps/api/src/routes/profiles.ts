@@ -6,6 +6,8 @@ import {ErrorCode, PactoraError} from '@pactora/shared';
 import {actorOf} from '../actor.js';
 import {isPublicId} from './jobs.js';
 import {Location, Skill} from './listings.js';
+import type {ChainViewer} from '../chain-reads.js';
+import type {ChainConfig} from '@pactora/config';
 
 /**
  * Public profiles and two-way reviews (docs/26 F16, F17).
@@ -150,6 +152,9 @@ const PROFILE_SELECT = sql`
 
 export interface ProfileRouteDeps {
   db: Db;
+  /** Contract views: a person's `stake_of`, so a client and the UI need not call the chain. */
+  viewChain?: ChainViewer;
+  chains?: Record<string, ChainConfig>;
 }
 
 export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileRouteDeps): Promise<void> {
@@ -246,8 +251,31 @@ export async function registerProfileRoutes(app: FastifyInstance, deps: ProfileR
       reviews: await visibleReviews(Number(row.agent_id), 1, 10),
       // Their open listings and job counts, only if they chose to show them.
       taskList: row.show_task_list ? await taskListOf(Number(row.agent_id)) : null,
+      ...(await stakeOf(row)),
     };
   });
+
+  /** Read from the chain (`stake_of`), 30 s cache: whether this person or agent can be hired now. */
+  const stakeCache = new Map<string, {at: number; v: {hireable: boolean | null; stake: string | null}}>();
+  async function stakeOf(row: ProfileRow): Promise<{hireable: boolean | null; stake: string | null}> {
+    const none = {hireable: null, stake: null};
+    if (!deps.viewChain || !deps.chains || !row.chain_agent_id) return none;
+    const [a] = await rows<{chain_id: string}>(
+      sql`SELECT chain_id FROM agents WHERE id = ${Number(row.agent_id)}`,
+    );
+    const chain = a ? deps.chains[a.chain_id] : undefined;
+    if (!chain) return none;
+    const key = `${a!.chain_id}:${row.chain_agent_id}`;
+    const hit = stakeCache.get(key);
+    if (hit && Date.now() - hit.at < 30_000) return hit.v;
+    const s = (await deps
+      .viewChain(a!.chain_id, chain.contracts.Pactora, 'stake_of', {agent_id: Number(row.chain_agent_id)})
+      .catch(() => undefined)) as {unlocked?: string; hireable?: boolean} | null | undefined;
+    if (s === undefined) return none;
+    const v = {hireable: s ? s.hireable === true : false, stake: s?.unlocked ?? '0'};
+    stakeCache.set(key, {at: Date.now(), v});
+    return v;
+  }
 
   /** What `showTaskList` shows: the agent's open listings, and how many jobs are open and settled. */
   async function taskListOf(agentId: number) {

@@ -37,7 +37,7 @@ beforeAll(async () => {
     bus: new EventBus(),
     readBudget: fakeReadBudget,
     rateLimitPerMinute: 100_000,
-    webhookSecretKey: parseSecretKey('6b'.repeat(32)),
+    webhookSecretKey: parseSecretKey('82b95cfbbe6aa5b2e304db50d5828fb51ff0803069d84d6103a19919912abacd'),
     listingExpirySweepMs: 0,
     submit: async () => ({
       txHash: '4yJxShz8HXfTyoTMXP9rQSoQUZE8uihkDmnpRrynZeZz',

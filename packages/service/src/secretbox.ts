@@ -24,6 +24,13 @@ export function parseSecretKey(raw: string): Buffer {
   if (!bytes || bytes.length !== 32) {
     throw new Error('must be 32 random bytes: 64 hex characters or 44 base64 characters');
   }
+  // 32 copies of one byte is the right length and no secret at all (`'7e'.repeat(32)`,
+  // `'0'.repeat(64)`): refused, as is anything with fewer than 8 distinct bytes.
+  if (new Set(bytes).size < 8) {
+    throw new Error(
+      'must be 32 random bytes: this value repeats too few distinct bytes to be random (openssl rand -hex 32)',
+    );
+  }
   return bytes;
 }
 
