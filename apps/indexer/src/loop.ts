@@ -51,7 +51,12 @@ export async function runIndexerLoop(tick: () => Promise<unknown>, opts: LoopOpt
       }
     } catch (err) {
       failures++;
-      delay = backoff(opts.pollMs, failures, maxBackoff, random);
+      // A stall only the operator can fix (a pruned start block) waits the
+      // longest backoff every time: retrying faster cannot help.
+      delay =
+        (err as {stalled?: unknown})?.stalled === true
+          ? maxBackoff
+          : backoff(opts.pollMs, failures, maxBackoff, random);
       opts.onError?.(err, failures, delay);
     }
 

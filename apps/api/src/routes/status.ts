@@ -1,6 +1,6 @@
 import type {FastifyInstance} from 'fastify';
 import {desc, eq, ne} from 'drizzle-orm';
-import {indexerCursor, runs, type Db} from '@pactora/db';
+import {indexerCursor, indexerState, runs, type Db} from '@pactora/db';
 import type {ChainConfig} from '@pactora/config';
 import {withTimeout, type BuildInfo} from '@pactora/service';
 
@@ -56,6 +56,12 @@ interface ChainStatus {
     lagBlocks: number | null;
     lastIndexedAt: string | null;
     secondsSinceIndexed: number | null;
+    /**
+     * `indexing`, or a stall the indexer recorded that only the operator can
+     * fix — `stalled: start block pruned` — with `fix` saying how.
+     */
+    state: string;
+    fix: string | null;
   };
 }
 
@@ -166,7 +172,7 @@ export function registerStatusRoutes(
   async function compute(): Promise<StatusReport> {
     const chainIds = Object.keys(deps.chains);
 
-    const [cursors, signer, heads, model] = await Promise.all([
+    const [cursors, signer, heads, model, stalls] = await Promise.all([
       probe('database', () =>
         deps.db.select().from(indexerCursor).where(eq(indexerCursor.contract, 'Pactora')),
       ),
@@ -177,6 +183,7 @@ export function registerStatusRoutes(
         ),
       ),
       probe('model', () => modelStatus(deps.db)),
+      probe('indexer-state', () => deps.db.select().from(indexerState)),
     ]);
 
     const now = Date.now();
@@ -198,8 +205,10 @@ export function registerStatusRoutes(
       // alone is not a fault.
       const stalled =
         lagBlocks !== null && lagBlocks > FINAL_SLACK && silentFor !== null && silentFor > maxSilence;
-      const indexer: ComponentStatus =
-        lagBlocks === null
+      const stall = stalls.ok ? stalls.value.find((x) => x.chainId === chainId) : undefined;
+      const indexer: ComponentStatus = stall
+        ? 'down'
+        : lagBlocks === null
           ? 'unknown'
           : stalled
             ? 'down'
@@ -219,6 +228,8 @@ export function registerStatusRoutes(
           lagBlocks,
           lastIndexedAt: updated ? updated.toISOString() : null,
           secondsSinceIndexed: silentFor,
+          state: stall ? stall.state : 'indexing',
+          fix: stall ? stall.fix : null,
         },
       };
     });

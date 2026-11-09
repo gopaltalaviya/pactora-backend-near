@@ -32,6 +32,28 @@ export interface BlockSource {
   finalHeight(): Promise<number>;
   /** The block at `height`, or null when no block was produced there. */
   blockAt(height: number): Promise<BlockRead | null>;
+  /**
+   * The oldest height the source still holds, when it can say (an RPC node's
+   * `sync_info.earliest_block_height`); null or absent: everything (archival).
+   */
+  earliestHeight?(): Promise<number | null>;
+}
+
+/**
+ * A height the node once had and has garbage-collected (a non-archival RPC
+ * keeps a few epochs). Not the same as a skipped height, which never had a
+ * block: reading this as "empty" would silently skip the history.
+ */
+export class BlockPrunedError extends Error {
+  override name = 'BlockPrunedError';
+  constructor(
+    readonly height: number,
+    readonly earliest: number,
+  ) {
+    super(
+      `UNKNOWN_BLOCK: block ${height} has been garbage collected by this RPC (its earliest block is ${earliest})`,
+    );
+  }
 }
 
 type FetchLike = (
@@ -113,6 +135,8 @@ export interface BlockRpc {
   } | null>;
   /** RPC `chunk`: its transactions' hashes and signers. */
   chunkTxs(chunkHash: string): Promise<Array<{hash: string; signer_id: string}>>;
+  /** RPC `status` `sync_info.earliest_block_height`: the oldest block the node keeps. */
+  earliestHeight?(): Promise<number | null>;
 }
 
 export function rpcSource(rpc: BlockRpc): BlockSource {
@@ -121,6 +145,7 @@ export function rpcSource(rpc: BlockRpc): BlockSource {
     async finalHeight() {
       return (await rpc.finalBlock()).height;
     },
+    ...(rpc.earliestHeight ? {earliestHeight: () => rpc.earliestHeight!()} : {}),
     async blockAt(height) {
       const b = await rpc.block(height);
       if (b === null) return null;
@@ -150,7 +175,18 @@ export function blockRpc(rpcUrl: string): BlockRpc {
   const rpc = <T>(method: string, params: unknown): Promise<T> =>
     provider.sendJsonRpc<never, never, T>(method as never, params as never);
   const missing = (err: unknown) =>
-    /UNKNOWN_BLOCK|DB Not Found|does not exist/i.test(`${(err as Error).message} ${JSON.stringify(err)}`);
+    /UNKNOWN_BLOCK|DB Not Found|does not exist|garbage collected|never been observed/i.test(
+      `${(err as Error).message} ${JSON.stringify(err)}`,
+    );
+  /** Cached for a minute: it moves once an epoch, and is read only on a missing block. */
+  let earliestCache: {at: number; v: number | null} | null = null;
+  const earliestHeight = async (): Promise<number | null> => {
+    if (earliestCache && Date.now() - earliestCache.at < 60_000) return earliestCache.v;
+    const st = await rpc<{sync_info?: {earliest_block_height?: number | null}}>('status', []);
+    const v = st.sync_info?.earliest_block_height ?? null;
+    earliestCache = {at: Date.now(), v};
+    return v;
+  };
   return {
     async finalBlock() {
       const b = await provider.viewBlock({finality: 'final'});
@@ -169,10 +205,15 @@ export function blockRpc(rpcUrl: string): BlockRpc {
       try {
         return await rpc('block', {block_id: height});
       } catch (err) {
-        if (missing(err)) return null;
-        throw err;
+        if (!missing(err)) throw err;
+        // UNKNOWN_BLOCK is both "no block at this height" and "garbage
+        // collected"; the node's earliest height tells them apart.
+        const earliest = await earliestHeight().catch(() => null);
+        if (earliest !== null && height < earliest) throw new BlockPrunedError(height, earliest);
+        return null;
       }
     },
+    earliestHeight,
     async chunkTxs(chunkHash) {
       const c = await rpc<{transactions: Array<{hash: string; signer_id: string}>}>('chunk', {
         chunk_id: chunkHash,

@@ -13,7 +13,7 @@ export const SPEC = 'aa'.repeat(32);
 
 export async function reset(db: Db): Promise<void> {
   await db.execute(
-    sql`TRUNCATE indexer_cursor, agents, jobs, job_events, agent_stats, agent_capabilities, api_keys,
+    sql`TRUNCATE indexer_cursor, indexer_state, agents, jobs, job_events, agent_stats, agent_capabilities, api_keys,
         payments, token_transfers, runs, run_events, disputes, signer_txs, spend_policies, key_challenges, x402_redemptions RESTART IDENTITY CASCADE`,
   );
 }

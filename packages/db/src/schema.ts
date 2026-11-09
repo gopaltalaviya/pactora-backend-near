@@ -890,6 +890,15 @@ export const indexerCursor = pgTable(
   (t) => [primaryKey({columns: [t.chainId, t.contract]})],
 );
 
+/** Why an indexer cannot move, while it cannot (0032). Deleted on its next good tick. */
+export const indexerState = pgTable('indexer_state', {
+  chainId: text('chain_id').primaryKey(),
+  state: text('state').notNull(),
+  fix: text('fix').notNull().default(''),
+  since: timestamp('since', {withTimezone: true}).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
+});
+
 // ─────────────────────────── runs ───────────────────────────
 
 export const runState = pgEnum('run_state', ['running', 'done', 'failed']);

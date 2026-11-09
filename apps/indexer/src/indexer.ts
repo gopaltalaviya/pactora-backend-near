@@ -8,6 +8,7 @@ import {
   WORKER_FAULT,
   revokeSessionsOf,
   indexerCursor,
+  indexerState,
   jobEvents,
   jobs,
   agents,
@@ -64,6 +65,37 @@ const FETCH_CONCURRENCY = 5;
 
 /** `indexer_cursor.contract`: one cursor per chain, for everything this worker reads. */
 export const CURSOR_CONTRACT = 'Pactora';
+
+/** What an indexer stuck on a pruned start block reports (`/health`, `/v1/status`). */
+export const STALLED_START_PRUNED = 'stalled: start block pruned';
+export const START_PRUNED_FIX =
+  'set INDEXER_START_AT_HEAD=1 (a first start begins at the head) or use an archival RPC';
+
+/**
+ * The start block is older than anything the RPC keeps (a non-archival node
+ * keeps a few epochs). Retrying cannot help: the indexer used to read the
+ * pruned heights as empty, or fail on them, forever. Only the operator can
+ * fix it, so it says how, once, and waits.
+ */
+export class StartBlockPrunedError extends Error {
+  override name = 'StartBlockPrunedError';
+  readonly state = STALLED_START_PRUNED;
+  readonly fix = START_PRUNED_FIX;
+  /** The loop waits its longest backoff between attempts: no tight loop. */
+  readonly stalled = true;
+  constructor(
+    readonly chainId: string,
+    readonly startBlock: number,
+    readonly earliest: number | null,
+  ) {
+    super(
+      `chain ${chainId}: start block ${startBlock} has been garbage collected by the RPC` +
+        `${earliest !== null ? ` (its earliest block is ${earliest})` : ''}; ${START_PRUNED_FIX}`,
+    );
+  }
+}
+
+const PRUNED = /garbage.collected|BlockPrunedError/i;
 
 /** A block that does not follow the last one read. The indexer does not move past it. */
 export class ChainLinkError extends Error {
@@ -145,9 +177,32 @@ export class Indexer {
 
   /** Process one batch. Returns the height it has indexed up to. */
   async tick(): Promise<number> {
-    const to = await this.step();
+    let to: number;
+    try {
+      to = await this.step();
+    } catch (err) {
+      if (err instanceof StartBlockPrunedError) await this.writeState(err.state, err.fix);
+      throw err;
+    }
     this.lastIndexed = to;
+    // A stall recorded by this process or an earlier one ends with a good tick.
+    if (!this.stateClear) {
+      await this.deps.db.delete(indexerState).where(eq(indexerState.chainId, this.deps.chain.chainId));
+      this.stateClear = true;
+    }
     return to;
+  }
+
+  /** False until a good tick has cleared any recorded stall. */
+  private stateClear = false;
+
+  private async writeState(state: string, fix: string): Promise<void> {
+    const {db, chain} = this.deps;
+    await db
+      .insert(indexerState)
+      .values({chainId: chain.chainId, state, fix})
+      .onConflictDoUpdate({target: indexerState.chainId, set: {state, fix, updatedAt: new Date()}});
+    this.stateClear = false;
   }
 
   private async step(): Promise<number> {
@@ -157,10 +212,27 @@ export class Indexer {
 
     const cursor = await this.readCursor();
     const from = cursor ? cursor.lastBlock + 1 : chain.startBlock;
+    if (!cursor && source.earliestHeight) {
+      // A first start: is the start block still on the node at all?
+      const earliest = await source.earliestHeight();
+      if (earliest !== null && chain.startBlock < earliest) {
+        throw new StartBlockPrunedError(chain.chainId, chain.startBlock, earliest);
+      }
+    }
     if (from > final) return from - 1;
     const to = Math.min(final, from + MAX_BLOCKS_PER_TICK - 1);
 
-    const blocks = await this.readBlocks(from, to);
+    const blocks = await this.readBlocks(from, to).catch((err: unknown) => {
+      // The node answered "garbage collected" for the start block itself.
+      if (!cursor && PRUNED.test(`${(err as Error)?.name} ${(err as Error)?.message}`)) {
+        throw new StartBlockPrunedError(
+          chain.chainId,
+          chain.startBlock,
+          (err as {earliest?: number}).earliest ?? null,
+        );
+      }
+      throw err;
+    });
 
     // Every block must follow the one before it, the first one the cursor's.
     // Checked for the whole batch before anything is written. A height with

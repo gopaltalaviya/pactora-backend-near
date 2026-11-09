@@ -14,7 +14,7 @@ import {
   serviceLogger,
   serviceOptions,
 } from '@pactora/service';
-import {ChainLinkError, Indexer} from './indexer.js';
+import {ChainLinkError, Indexer, StartBlockPrunedError} from './indexer.js';
 import {runIndexerLoop} from './loop.js';
 import {openSource} from './source.js';
 
@@ -67,6 +67,8 @@ const lagBlocks = metrics.gauge('indexer_lag_blocks', 'Blocks between the chain 
   'chain',
 ]);
 const lastSuccess = new Map<string, number>();
+/** Per chain: a stall only the operator can fix, until a good tick clears it. */
+const stalled = new Map<string, {state: string; fix: string}>();
 const build = buildInfo({service: 'indexer', packageJsonUrl: new URL('../package.json', import.meta.url)});
 
 const health = cfg.INDEXER_HEALTH_PORT ? Fastify({...serviceOptions(), logger: false}) : null;
@@ -103,6 +105,7 @@ const workersDone = Promise.all(
         if (indexed !== null) indexedBlock.labels(label).set(indexed);
         if (head !== null && indexed !== null) lagBlocks.labels(label).set(head - indexed);
         const now = Date.now();
+        if (stalled.delete(chain.chainId)) logger.info({chainId: chain.chainId}, 'indexer no longer stalled');
         lastSuccess.set(chain.chainId, now);
         lastOk.labels(String(chain.chainId)).set(Math.floor(now / 1000));
         ticks.labels(String(chain.chainId), 'ok').inc();
@@ -113,6 +116,23 @@ const workersDone = Promise.all(
         signal: shutdown.signal,
         onError: (err, failures, nextDelayMs) => {
           ticks.labels(String(chain.chainId), 'failed').inc();
+          if (err instanceof StartBlockPrunedError) {
+            // One clear error naming the fix; then quiet, at the longest backoff.
+            if (!stalled.has(chain.chainId)) {
+              logger.error(
+                {
+                  chainId: chain.chainId,
+                  startBlock: err.startBlock,
+                  earliest: err.earliest,
+                  fix: err.fix,
+                  retryingInMs: nextDelayMs,
+                },
+                `indexer ${err.state}: ${err.message}`,
+              );
+            }
+            stalled.set(chain.chainId, {state: err.state, fix: err.fix});
+            return;
+          }
           // Escalate with persistence. One failed tick is noise on any public
           // RPC; twenty in a row is an outage someone needs to see.
           const line = {
@@ -139,13 +159,24 @@ if (health) {
   // Ready = the database answers AND every chain indexed successfully within
   // the backoff ceiling. Behind that, the indexer is failing, not waiting.
   registerHealth(health, {
-    info: () => ({build}),
+    info: () => ({
+      build,
+      // Per chain: `indexing`, or the stall and its fix.
+      indexer: Object.fromEntries(
+        Object.values(config.chains).map((c) => [
+          c.chainId,
+          stalled.get(c.chainId) ?? {state: 'indexing', fix: null},
+        ]),
+      ),
+    }),
     checks: {
       database: () => db.execute(sql`SELECT 1`),
       ...Object.fromEntries(
         Object.values(config.chains).map((chain) => [
           `chain-${chain.chainId}`,
           async () => {
+            const stall = stalled.get(chain.chainId);
+            if (stall) throw new Error(`${stall.state}: ${stall.fix}`);
             const at = lastSuccess.get(chain.chainId);
             const limit = cfg.INDEXER_MAX_BACKOFF_MS + cfg.INDEXER_POLL_MS * 5;
             if (!at || Date.now() - at > limit) {

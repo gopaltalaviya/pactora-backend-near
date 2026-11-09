@@ -33,7 +33,7 @@ afterAll(async () => {
   await closeDb(db);
 });
 beforeEach(async () => {
-  await db.execute(sql`TRUNCATE indexer_cursor`);
+  await db.execute(sql`TRUNCATE indexer_cursor, indexer_state`);
 });
 
 const cursorAt = (block: number, secondsAgo = 1) =>
@@ -94,6 +94,8 @@ describe('GET /v1/status', () => {
           lagBlocks: 10,
           lastIndexedAt: expect.any(String),
           secondsSinceIndexed: expect.any(Number),
+          state: 'indexing',
+          fix: null,
         },
       },
     ]);
@@ -143,8 +145,28 @@ describe('GET /v1/status', () => {
       lagBlocks: null,
       lastIndexedAt: null,
       secondsSinceIndexed: null,
+      state: 'indexing',
+      fix: null,
     });
     expect(body.status).toBe('degraded');
+    await app.close();
+  });
+
+  // Round 3: a start block the RPC has garbage-collected. The indexer records
+  // the stall (apps/indexer StartBlockPrunedError); the status page says so
+  // and how to fix it, instead of a silent "unknown".
+  it('says the indexer is stalled on a pruned start block, with the fix', async () => {
+    await db.execute(sql`INSERT INTO indexer_state (chain_id, state, fix)
+      VALUES ('near:sandbox', 'stalled: start block pruned', 'set INDEXER_START_AT_HEAD=1 (a first start begins at the head) or use an archival RPC')`);
+    const app = await build();
+    const body = (await app.inject({url: '/v1/status'})).json();
+    expect(body.components.indexer).toBe('down');
+    expect(body.status).toBe('degraded');
+    expect(body.chains[0].indexer).toMatchObject({
+      status: 'down',
+      state: 'stalled: start block pruned',
+      fix: expect.stringMatching(/INDEXER_START_AT_HEAD=1.*archival RPC/),
+    });
     await app.close();
   });
 
