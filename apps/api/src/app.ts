@@ -23,7 +23,7 @@ import {registerKeyRoutes} from './routes/keys.js';
 import {registerMetaRoutes} from './routes/meta.js';
 import {registerRunRoutes} from './routes/runs.js';
 import {registerPeopleRoutes} from './routes/people.js';
-import {registerListingRoutes} from './routes/listings.js';
+import {registerListingRoutes, sweepExpiredListings} from './routes/listings.js';
 import {registerMeRoutes} from './routes/me.js';
 import {registerPersonActionRoutes} from './routes/person-actions.js';
 import {registerSessionRoutes} from './routes/session.js';
@@ -137,6 +137,8 @@ export interface AppDeps {
   draftSettleSweepMs?: number;
   /** How often a waiting GET /v1/events looks again; default 500 ms. */
   eventsPollMs?: number;
+  /** How often open listings past their deadline are announced as expired (feed events); default 60 s, 0 = never. */
+  listingExpirySweepMs?: number;
   /** WEBHOOK_SECRET_KEY's 32 bytes; omitted, POST /v1/webhooks answers 503. */
   webhookSecretKey?: Buffer;
   /** Local development only: allow http and private webhook targets. */
@@ -485,6 +487,26 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   app.addHook('onClose', async () => {
     clearTimeout(settleTimer);
     settleTimer = undefined;
+  });
+
+  // Listings whose deadline passed: the client and its bidders are told once
+  // (dedupe keys), through the same feed as every other event.
+  let expiryTimer: NodeJS.Timeout | undefined;
+  const expiryEvery = deps.listingExpirySweepMs ?? 60_000;
+  const expirySweep = () => {
+    expiryTimer = setTimeout(() => {
+      sweepExpiredListings(deps.db)
+        .catch((err: unknown) => app.log.warn({err}, 'listing expiry sweep failed'))
+        .finally(() => {
+          if (expiryTimer) expirySweep();
+        });
+    }, expiryEvery);
+    expiryTimer.unref();
+  };
+  if (expiryEvery > 0) expirySweep();
+  app.addHook('onClose', async () => {
+    clearTimeout(expiryTimer);
+    expiryTimer = undefined;
   });
 
   await registerRunRoutes(app, {

@@ -938,6 +938,10 @@ export const agentEventSeq = pgTable('agent_event_seq', {
  * Every job event, once per party (client and worker), numbered per agent.
  * Written by the trigger in the same transaction as the job_events row, by
  * the API and the indexer alike. `GET /v1/events?after=<seq>` reads it.
+ *
+ * Since 0024 a row may name a LISTING instead of a job (a bid, a selection,
+ * a closed or expired listing, a match), written by `pactora_agent_event()`
+ * with the same numbering; `dedupe_key` makes each such event exactly once.
  */
 export const agentEvents = pgTable(
   'agent_events',
@@ -946,21 +950,26 @@ export const agentEvents = pgTable(
       .notNull()
       .references(() => agents.id, {onDelete: 'cascade'}),
     seq: bigint('seq', {mode: 'number'}).notNull(),
-    jobEventId: bigint('job_event_id', {mode: 'number'})
-      .notNull()
-      .references(() => jobEvents.id, {onDelete: 'cascade'}),
-    jobId: bigint('job_id', {mode: 'number'})
-      .notNull()
-      .references(() => jobs.id, {onDelete: 'cascade'}),
-    /** The agent's side of the job: 'client' or 'worker'. */
+    /** Null for a listing or account event. */
+    jobEventId: bigint('job_event_id', {mode: 'number'}).references(() => jobEvents.id, {
+      onDelete: 'cascade',
+    }),
+    jobId: bigint('job_id', {mode: 'number'}).references(() => jobs.id, {onDelete: 'cascade'}),
+    listingId: bigint('listing_id', {mode: 'number'}).references(() => listings.id, {onDelete: 'cascade'}),
+    /** The agent's side: 'client' or 'worker' of a job; 'applicant', 'match' or 'account' otherwise. */
     role: text('role').notNull(),
     kind: text('kind').notNull(),
     payload: jsonb('payload').notNull().default({}),
+    /** Writer-chosen; unique per agent, so a retried write is a no-op. */
+    dedupeKey: text('dedupe_key'),
     createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
   },
   (t) => [
     primaryKey({columns: [t.agentId, t.seq]}),
     uniqueIndex('agent_events_once_uk').on(t.agentId, t.jobEventId),
+    uniqueIndex('agent_events_dedupe_uk')
+      .on(t.agentId, t.dedupeKey)
+      .where(sql`dedupe_key IS NOT NULL`),
   ],
 );
 

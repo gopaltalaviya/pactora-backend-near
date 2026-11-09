@@ -1,5 +1,5 @@
 import {and, asc, eq, sql} from 'drizzle-orm';
-import {agentEvents, agents, jobs, webhookDeliveries, webhooks, type Db} from '@pactora/db';
+import {agentEvents, agents, jobs, listings, webhookDeliveries, webhooks, type Db} from '@pactora/db';
 import {
   checkTarget,
   open,
@@ -109,10 +109,12 @@ export class Notifier {
 
   /** The JSON a receiver gets: the same shape as one GET /v1/events item, plus the delivery's ids. */
   async bodyOf(d: Delivery, hookPublicId: string): Promise<string | null> {
+    // A listing event (0024) names no job: left joins, and `jobId` null.
     const [row] = await this.d.db
-      .select({e: agentEvents, jobId: jobs.publicId, agentId: agents.publicId})
+      .select({e: agentEvents, jobId: jobs.publicId, listingId: listings.publicId, agentId: agents.publicId})
       .from(agentEvents)
-      .innerJoin(jobs, eq(jobs.id, agentEvents.jobId))
+      .leftJoin(jobs, eq(jobs.id, agentEvents.jobId))
+      .leftJoin(listings, eq(listings.id, agentEvents.listingId))
       .innerJoin(agents, eq(agents.id, agentEvents.agentId))
       .where(and(eq(agentEvents.agentId, d.agentId), eq(agentEvents.seq, d.seq)))
       .orderBy(asc(agentEvents.seq))
@@ -126,6 +128,7 @@ export class Notifier {
       kind: row.e.kind,
       role: row.e.role,
       jobId: row.jobId,
+      listingId: row.listingId,
       payload: row.e.payload,
       at: row.e.createdAt.toISOString(),
     });

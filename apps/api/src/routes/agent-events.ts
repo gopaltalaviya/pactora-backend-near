@@ -1,7 +1,7 @@
 import type {FastifyInstance, FastifyRequest} from 'fastify';
 import {and, asc, desc, eq, gt, lte, sql} from 'drizzle-orm';
 import {z} from 'zod';
-import {agentEventReads, agentEventSeq, agentEvents, jobs, type Db} from '@pactora/db';
+import {agentEventReads, agentEventSeq, agentEvents, jobs, listings, type Db} from '@pactora/db';
 import {actorOf} from '../actor.js';
 
 /**
@@ -34,15 +34,29 @@ export const ReadBody = z.object({
   upTo: z.coerce.number().int().min(0),
 });
 
-type Row = typeof agentEvents.$inferSelect & {jobPublicId: string};
+type Row = typeof agentEvents.$inferSelect & {jobPublicId: string | null; listingPublicId: string | null};
 
+/** One feed item. `jobId` or `listingId` (or neither, for an account event) says what it is about. */
 const view = (r: Row) => ({
   seq: r.seq,
   kind: r.kind,
   role: r.role,
   jobId: r.jobPublicId,
+  listingId: r.listingPublicId,
   payload: r.payload,
   at: r.createdAt.toISOString(),
+});
+
+/** The feed rows with the public ids of what they are about: a job, a listing, or neither. */
+const SELECT = {e: agentEvents, jobPublicId: jobs.publicId, listingPublicId: listings.publicId};
+const withIds = (r: {
+  e: typeof agentEvents.$inferSelect;
+  jobPublicId: string | null;
+  listingPublicId: string | null;
+}) => ({
+  ...r.e,
+  jobPublicId: r.jobPublicId,
+  listingPublicId: r.listingPublicId,
 });
 
 export interface AgentEventRouteDeps {
@@ -60,13 +74,14 @@ export async function registerAgentEventRoutes(
 
   const read = (agentId: number, after: number, limit: number) =>
     db
-      .select({e: agentEvents, jobPublicId: jobs.publicId})
+      .select(SELECT)
       .from(agentEvents)
-      .innerJoin(jobs, eq(jobs.id, agentEvents.jobId))
+      .leftJoin(jobs, eq(jobs.id, agentEvents.jobId))
+      .leftJoin(listings, eq(listings.id, agentEvents.listingId))
       .where(and(eq(agentEvents.agentId, agentId), gt(agentEvents.seq, after)))
       .orderBy(asc(agentEvents.seq))
       .limit(limit + 1)
-      .then((rows) => rows.map((r) => ({...r.e, jobPublicId: r.jobPublicId})));
+      .then((rows) => rows.map(withIds));
 
   const lastSeq = async (agentId: number) =>
     (await db.query.agentEventSeq.findFirst({where: eq(agentEventSeq.agentId, agentId)}))?.last ?? 0;
@@ -99,9 +114,10 @@ export async function registerAgentEventRoutes(
     const actor = await actorOf(db, request);
     const q = NotificationsQuery.parse(request.query ?? {});
     const rows = await db
-      .select({e: agentEvents, jobPublicId: jobs.publicId})
+      .select(SELECT)
       .from(agentEvents)
-      .innerJoin(jobs, eq(jobs.id, agentEvents.jobId))
+      .leftJoin(jobs, eq(jobs.id, agentEvents.jobId))
+      .leftJoin(listings, eq(listings.id, agentEvents.listingId))
       .where(
         and(
           eq(agentEvents.agentId, actor.agent.id),
@@ -121,7 +137,7 @@ export async function registerAgentEventRoutes(
       latest,
       before: oldest !== undefined && oldest > 1 ? oldest : null,
       notifications: rows.map((r) => ({
-        ...view({...r.e, jobPublicId: r.jobPublicId}),
+        ...view(withIds(r)),
         read: r.e.seq <= readSeq,
       })),
     };

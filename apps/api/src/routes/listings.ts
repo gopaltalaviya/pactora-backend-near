@@ -16,6 +16,7 @@ import {
 import {BaseUnits, ChainId, ErrorCode, PactoraError, canonicalize, type JobSpec} from '@pactora/shared';
 import type {ChainConfig} from '@pactora/config';
 import {actorOf, optionalActorOf, type Actor, type AgentRow} from '../actor.js';
+import {applicantSummary, recordAgentEvent} from '../agent-events.js';
 import {requireClear} from '../compliance.js';
 import type {BudgetReader} from '../chain-reads.js';
 import {Cursor, page} from '../cursor.js';
@@ -700,10 +701,12 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
         .update(listings)
         .set({status: 'cancelled', closedAt: new Date(), reserved: '0', updatedAt: new Date()})
         .where(eq(listings.id, listing.id));
-      await tx
+      const set = await tx
         .update(applications)
         .set({status: 'rejected', reason: CANCELLED_REASON, reopenable: false, decidedAt: new Date()})
-        .where(and(eq(applications.listingId, listing.id), eq(applications.status, 'pending')));
+        .where(and(eq(applications.listingId, listing.id), eq(applications.status, 'pending')))
+        .returning({publicId: applications.publicId, applicantAgentId: applications.applicantAgentId});
+      await notifyApplicants(tx, listing, set, 'listing.cancelled', '');
     });
     return view((await db.query.listings.findFirst({where: eq(listings.id, listing.id)}))!);
   });
@@ -864,6 +867,20 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
           proposal: body.proposal,
         })
         .returning();
+      // The client learns of the bid the way it learns of a job event (docs/26 F9).
+      await recordAgentEvent(tx, {
+        agentId: listing.clientAgentId,
+        role: 'client',
+        kind: 'listing.bid',
+        payload: {
+          listingId: listing.publicId,
+          applicationId: inserted!.publicId,
+          priceBaseUnits: inserted!.price,
+          applicant: applicantSummary(actor.agent),
+        },
+        listingId: listing.id,
+        dedupeKey: `listing.bid:${inserted!.publicId}`,
+      });
       return inserted!;
     });
     return reply.status(201).send(applicationView(row, chain, null));
@@ -957,23 +974,54 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       while (used.has(slot)) slot++;
       await tx.insert(listingSlots).values({listingId, slot, applicationId: application.id});
       if (taken.length + 1 >= current.maxWorkers) {
+        const closedAt = new Date();
         await tx
           .update(listings)
-          .set({status: 'filled', closedAt: new Date(), updatedAt: new Date()})
+          .set({status: 'filled', closedAt, updatedAt: closedAt})
           .where(eq(listings.id, listingId));
-        await tx
+        const set = await tx
           .update(applications)
-          .set({status: 'rejected', reason: FILLED_REASON, reopenable: true, decidedAt: new Date()})
+          .set({status: 'rejected', reason: FILLED_REASON, reopenable: true, decidedAt: closedAt})
           .where(
             and(
               eq(applications.listingId, listingId),
               eq(applications.status, 'pending'),
               ne(applications.id, application.id),
             ),
-          );
+          )
+          .returning({publicId: applications.publicId, applicantAgentId: applications.applicantAgentId});
+        await notifyApplicants(tx, current, set, 'listing.closed', `:${closedAt.getTime()}`, {
+          reason: 'filled',
+        });
       }
       return application;
     });
+  }
+
+  /**
+   * One feed event per applicant about their bid: set aside by a close or a
+   * fill, revived by a reopen, dropped by a cancel. The dedupe suffix tells
+   * one close from a later one; the application id alone would let a listing
+   * closed, reopened and closed again notify its bidders once.
+   */
+  async function notifyApplicants(
+    tx: Pick<Db, 'execute'>,
+    listing: Pick<Listing, 'id' | 'publicId'>,
+    rows: {publicId: string; applicantAgentId: number}[],
+    kind: 'listing.closed' | 'listing.reopened' | 'listing.cancelled' | 'listing.expired',
+    dedupeSuffix: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    for (const r of rows) {
+      await recordAgentEvent(tx, {
+        agentId: r.applicantAgentId,
+        role: 'applicant',
+        kind,
+        payload: {listingId: listing.publicId, applicationId: r.publicId, ...extra},
+        listingId: listing.id,
+        dedupeKey: `${kind}:${r.publicId}${dedupeSuffix}`,
+      });
+    }
   }
 
   /**
@@ -1036,6 +1084,21 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
             confirm: `/v1/jobs/${job.publicId}/person-actions/confirm`,
           };
     }
+    // Told once the job exists, so the event can name it; a funding retry
+    // under the same application finds the dedupe key and says nothing more.
+    await recordAgentEvent(db, {
+      agentId: application.applicantAgentId,
+      role: 'applicant',
+      kind: 'application.selected',
+      payload: {
+        listingId: listing.publicId,
+        applicationId: application.publicId,
+        jobId: job.publicId,
+        reason: application.reason,
+      },
+      listingId: listing.id,
+      dedupeKey: `application.selected:${application.publicId}`,
+    });
     return {
       job: {
         jobId: job.publicId,
@@ -1121,6 +1184,14 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
         .returning();
       if (!row)
         throw new PactoraError(ErrorCode.INVALID_STATE, 'the application changed meanwhile — read it again');
+      await recordAgentEvent(db, {
+        agentId: row.applicantAgentId,
+        role: 'applicant',
+        kind: 'application.rejected',
+        payload: {listingId: listing.publicId, applicationId: row.publicId, reason: row.reason},
+        listingId: listing.id,
+        dedupeKey: `application.rejected:${row.publicId}`,
+      });
       return {application: applicationView(row, chain, null), replayed: false};
     }
 
@@ -1190,6 +1261,19 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
     // is shown the create_job to sign on the listing (GET as owner).
     const client = await clientActor(listing);
     const out = await fund(client, listing, won, request.id);
+    await recordAgentEvent(db, {
+      agentId: listing.clientAgentId,
+      role: 'client',
+      kind: 'listing.claimed',
+      payload: {
+        listingId: listing.publicId,
+        applicationId: won.publicId,
+        jobId: out.job.jobId,
+        applicant: applicantSummary(actor.agent),
+      },
+      listingId: listing.id,
+      dedupeKey: `listing.claimed:${won.publicId}`,
+    });
     return reply
       .status(201)
       .send({application: applicationView(won, chain, out.job.jobId), ...out, replayed: false});
@@ -1231,14 +1315,19 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       if (current.status !== 'open') {
         throw new PactoraError(ErrorCode.INVALID_STATE, `the listing is ${current.status}`);
       }
+      const closedAt = new Date();
       await tx
         .update(listings)
-        .set({status: 'closed', closedAt: new Date(), updatedAt: new Date()})
+        .set({status: 'closed', closedAt, updatedAt: closedAt})
         .where(eq(listings.id, listing.id));
-      await tx
+      const set = await tx
         .update(applications)
-        .set({status: 'rejected', reason: CLOSED_REASON, reopenable: true, decidedAt: new Date()})
-        .where(and(eq(applications.listingId, listing.id), eq(applications.status, 'pending')));
+        .set({status: 'rejected', reason: CLOSED_REASON, reopenable: true, decidedAt: closedAt})
+        .where(and(eq(applications.listingId, listing.id), eq(applications.status, 'pending')))
+        .returning({publicId: applications.publicId, applicantAgentId: applications.applicantAgentId});
+      await notifyApplicants(tx, listing, set, 'listing.closed', `:${closedAt.getTime()}`, {
+        reason: 'closed',
+      });
     });
     return view((await db.query.listings.findFirst({where: eq(listings.id, listing.id)}))!);
   });
@@ -1261,21 +1350,91 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
           `the listing is ${current.status}; only a closed listing reopens`,
         );
       }
+      const reopenedAt = new Date();
       await tx
         .update(listings)
-        .set({status: 'open', closedAt: null, updatedAt: new Date()})
+        .set({status: 'open', closedAt: null, updatedAt: reopenedAt})
         .where(eq(listings.id, listing.id));
-      // Exactly the bids hiring-closed set aside — by the flag, never by the reason text.
-      await tx.execute(sql`
-        UPDATE applications a SET status = 'pending', reopenable = false, reason = NULL, decided_at = NULL
-         WHERE a.listing_id = ${listing.id} AND a.reopenable AND a.status = 'rejected'
-           AND NOT EXISTS (SELECT 1 FROM applications b
-                            WHERE b.listing_id = a.listing_id AND b.applicant_agent_id = a.applicant_agent_id
-                              AND b.status IN ('pending', 'selected'))
-           AND a.id = (SELECT max(c.id) FROM applications c
-                        WHERE c.listing_id = a.listing_id AND c.applicant_agent_id = a.applicant_agent_id AND c.reopenable)
-      `);
+      const revived = await reviveSetAsideBids(tx, listing.id);
+      await notifyApplicants(tx, listing, revived, 'listing.reopened', `:${reopenedAt.getTime()}`);
     });
     return view((await db.query.listings.findFirst({where: eq(listings.id, listing.id)}))!);
   });
+}
+
+/**
+ * Put back exactly the bids a close or a fill set aside — by the flag, never
+ * by the reason text — skipping an applicant who has made a live bid since.
+ * Answers the revived rows, so their applicants can be told.
+ */
+export async function reviveSetAsideBids(
+  tx: Pick<Db, 'execute'>,
+  listingId: number,
+): Promise<{publicId: string; applicantAgentId: number}[]> {
+  const rows = (await tx.execute(sql`
+    UPDATE applications a SET status = 'pending', reopenable = false, reason = NULL, decided_at = NULL
+     WHERE a.listing_id = ${listingId} AND a.reopenable AND a.status = 'rejected'
+       AND NOT EXISTS (SELECT 1 FROM applications b
+                        WHERE b.listing_id = a.listing_id AND b.applicant_agent_id = a.applicant_agent_id
+                          AND b.status IN ('pending', 'selected'))
+       AND a.id = (SELECT max(c.id) FROM applications c
+                    WHERE c.listing_id = a.listing_id AND c.applicant_agent_id = a.applicant_agent_id AND c.reopenable)
+     RETURNING a.public_id, a.applicant_agent_id
+  `)) as unknown as {public_id: string; applicant_agent_id: string | number}[];
+  return rows.map((r) => ({publicId: r.public_id, applicantAgentId: Number(r.applicant_agent_id)}));
+}
+
+/**
+ * Listings whose deadline passed while they were open: tell the client and
+ * every pending bidder, once (`GET /v1/listings` already reads them as
+ * closed; nothing is updated). Run by the API on a timer (app.ts). The
+ * dedupe key carries the deadline, so a listing whose deadline the client
+ * moves out and that lapses again is announced again.
+ */
+export async function sweepExpiredListings(db: Db, limit = 50): Promise<number> {
+  const expired = (await db.execute(sql`
+    SELECT l.id, l.public_id, l.client_agent_id, l.title, l.deadline
+      FROM listings l
+     WHERE l.status = 'open' AND l.deadline <= now()
+       AND NOT EXISTS (SELECT 1 FROM agent_events e
+                        WHERE e.listing_id = l.id AND e.agent_id = l.client_agent_id
+                          AND e.dedupe_key = 'listing.expired:' || l.public_id || ':' || (extract(epoch FROM l.deadline) * 1000)::bigint)
+     ORDER BY l.deadline LIMIT ${limit}
+  `)) as unknown as {
+    id: string | number;
+    public_id: string;
+    client_agent_id: string | number;
+    title: string;
+    deadline: Date | string;
+  }[];
+  let written = 0;
+  for (const l of expired) {
+    const deadlineMs = new Date(l.deadline).getTime();
+    const payload = {listingId: l.public_id, title: l.title};
+    const seq = await recordAgentEvent(db, {
+      agentId: Number(l.client_agent_id),
+      role: 'client',
+      kind: 'listing.expired',
+      payload,
+      listingId: Number(l.id),
+      dedupeKey: `listing.expired:${l.public_id}:${deadlineMs}`,
+    });
+    if (seq !== null) written++;
+    const pending = await db
+      .select({publicId: applications.publicId, applicantAgentId: applications.applicantAgentId})
+      .from(applications)
+      .where(and(eq(applications.listingId, Number(l.id)), eq(applications.status, 'pending')));
+    for (const p of pending) {
+      const s = await recordAgentEvent(db, {
+        agentId: p.applicantAgentId,
+        role: 'applicant',
+        kind: 'listing.expired',
+        payload: {...payload, applicationId: p.publicId},
+        listingId: Number(l.id),
+        dedupeKey: `listing.expired:${p.publicId}:${deadlineMs}`,
+      });
+      if (s !== null) written++;
+    }
+  }
+  return written;
 }

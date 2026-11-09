@@ -64,8 +64,26 @@ const EVENT_WORDS: Record<string, string> = {
   'job.refunded': 'The job was refunded',
   refunded: 'The job was refunded on chain',
   'job.declined': 'The worker declined',
+  'listing.bid': 'New bid on your listing',
+  'application.selected': 'Your bid was selected: a job was created for you',
+  'application.rejected': 'Your bid was declined',
+  'listing.closed': 'The listing closed before your bid was decided',
+  'listing.reopened': 'The listing reopened: your bid is live again',
+  'listing.cancelled': 'The client cancelled the listing',
+  'listing.claimed': 'A worker claimed your listing',
+  'listing.expired': 'The listing reached its deadline',
+  'listing.match': 'New work that matches your skills',
+  'account.warned': 'A moderation warning on your account',
 };
 export const eventText = (kind: string) => EVENT_WORDS[kind] ?? kind;
+
+/** Where a feed item points on the site: its job, else its listing, else the notifications page. */
+export const eventLink = (siteUrl: string, e: {jobId: string | null; listingId: string | null}): string =>
+  e.jobId
+    ? `${siteUrl}/jobs/${e.jobId}`
+    : e.listingId
+      ? `${siteUrl}/jobs/listing/${e.listingId}`
+      : `${siteUrl}/notifications`;
 
 export interface Deps {
   db: Db;
@@ -238,9 +256,10 @@ export async function handleUpdate(
     } else if (text === '/status') {
       const [seq] = await db.select().from(agentEventSeq).where(eq(agentEventSeq.agentId, l.agentId));
       const latest = await db
-        .select({kind: agentEvents.kind, jobId: jobs.publicId})
+        .select({kind: agentEvents.kind, jobId: jobs.publicId, listingId: listings.publicId})
         .from(agentEvents)
-        .innerJoin(jobs, eq(jobs.id, agentEvents.jobId))
+        .leftJoin(jobs, eq(jobs.id, agentEvents.jobId))
+        .leftJoin(listings, eq(listings.id, agentEvents.listingId))
         .where(eq(agentEvents.agentId, l.agentId))
         .orderBy(sql`${agentEvents.seq} DESC`)
         .limit(3);
@@ -251,7 +270,7 @@ export async function handleUpdate(
           ? 'Nothing on your jobs yet.'
           : [
               `${seq?.last ?? 0} events on your jobs. The latest:`,
-              ...latest.map((e) => `• ${eventText(e.kind)}: ${d.siteUrl}/jobs/${e.jobId}`),
+              ...latest.map((e) => `• ${eventText(e.kind)}: ${eventLink(d.siteUrl, e)}`),
             ].join('\n'),
       );
     } else if (text === '/jobs') {
@@ -289,9 +308,15 @@ export async function fanOut(d: Deps, opts: {batch?: number} = {}): Promise<numb
       const [locked] = await tx.select().from(channelLinks).where(eq(channelLinks.id, l.id)).for('update');
       if (!locked) return;
       const events = await tx
-        .select({seq: agentEvents.seq, kind: agentEvents.kind, jobId: jobs.publicId})
+        .select({
+          seq: agentEvents.seq,
+          kind: agentEvents.kind,
+          jobId: jobs.publicId,
+          listingId: listings.publicId,
+        })
         .from(agentEvents)
-        .innerJoin(jobs, eq(jobs.id, agentEvents.jobId))
+        .leftJoin(jobs, eq(jobs.id, agentEvents.jobId))
+        .leftJoin(listings, eq(listings.id, agentEvents.listingId))
         .where(and(eq(agentEvents.agentId, l.agentId), gt(agentEvents.seq, locked.cursorSeq)))
         .orderBy(asc(agentEvents.seq))
         .limit(opts.batch ?? 20);
@@ -300,7 +325,7 @@ export async function fanOut(d: Deps, opts: {batch?: number} = {}): Promise<numb
         await tx.insert(channelOutbox).values({
           channel: l.channel,
           address: l.address,
-          body: `${eventText(e.kind)}: ${d.siteUrl}/jobs/${e.jobId}`,
+          body: `${eventText(e.kind)}: ${eventLink(d.siteUrl, e)}`,
         });
       }
       await tx
