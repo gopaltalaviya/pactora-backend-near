@@ -4,7 +4,14 @@ import {z} from 'zod';
 import {agents, loginChallenges, sessions, type Db} from '@pactora/db';
 import {clientKey} from '@pactora/service';
 import {AccountId, ChainId, ErrorCode, PactoraError} from '@pactora/shared';
-import {authenticatePerson, generateSessionToken, hashApiKey, SESSION_TTL_MS} from '../auth.js';
+import {
+  accessKeysHash,
+  authenticatePerson,
+  generateSessionToken,
+  hashApiKey,
+  SESSION_TTL_MS,
+} from '../auth.js';
+import type {AccessKeysReader} from '../chain-reads.js';
 import {
   CHALLENGE_TTL_MS,
   DEFAULT_SIGN_RECIPIENT,
@@ -55,6 +62,12 @@ export interface SessionRouteDeps {
   signRecipient?: string;
   /** The app-wide per-minute limit; the auth routes never allow more than it. */
   rateLimitPerMinute?: number;
+  /**
+   * The account's full-access keys, recorded at sign-in so a later change
+   * ends the session (0025). Omitted or unreadable: the session is opened
+   * without it, and only the other revocations (keys, wallet) apply.
+   */
+  readAccessKeys?: AccessKeysReader;
 }
 
 /** The person record this account has on this chain, if it registered as one. */
@@ -156,6 +169,10 @@ export async function registerSessionRoutes(app: FastifyInstance, deps: SessionR
 
     const {token, keyId} = generateSessionToken();
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+    const keys = deps.readAccessKeys
+      ? await deps.readAccessKeys({chainId, accountId: body.accountId}).catch(() => null)
+      : null;
+    const keysHash = keys ? accessKeysHash(keys) : null;
     await db.transaction(async (tx) => {
       // Spent with the session, atomically, and only while still live: one
       // signature opens one session.
@@ -177,6 +194,7 @@ export async function registerSessionRoutes(app: FastifyInstance, deps: SessionR
         chainId,
         expiresAt,
         requester: clientKey(request.ip),
+        accessKeysHash: keysHash,
       });
     });
 

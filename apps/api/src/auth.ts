@@ -1,7 +1,15 @@
 import {createHash, randomBytes, timingSafeEqual} from 'node:crypto';
-import {eq, and, isNull, lte} from 'drizzle-orm';
+import {eq, and, isNull, lte, sql} from 'drizzle-orm';
 import type {FastifyRequest} from 'fastify';
-import {type Db, apiKeys, agents, loginChallenges, sessions} from '@pactora/db';
+import {
+  type Db,
+  REVOKED_KEYS_CHANGED,
+  agents,
+  apiKeys,
+  loginChallenges,
+  revokeSessionsOf,
+  sessions,
+} from '@pactora/db';
 import {PactoraError, ErrorCode} from '@pactora/shared';
 
 /**
@@ -158,10 +166,19 @@ export async function authenticatePerson(db: Db, request: FastifyRequest): Promi
   if (!keyId) {
     throw new PactoraError(ErrorCode.UNAUTHORIZED, 'not a Pactora session token (expected ps_<id>_<secret>)');
   }
-  const row = await db.query.sessions.findFirst({
-    where: and(eq(sessions.keyId, keyId), isNull(sessions.revokedAt)),
-  });
-  if (!row || !verifyApiKey(presented, row.secretHash) || row.expiresAt.getTime() <= Date.now()) {
+  const row = await db.query.sessions.findFirst({where: eq(sessions.keyId, keyId)});
+  if (!row || !verifyApiKey(presented, row.secretHash)) {
+    throw new PactoraError(ErrorCode.UNAUTHORIZED, 'unknown, expired or signed-out session — sign in again');
+  }
+  // A session ended for a reason (a key change, migration 0025) says so:
+  // the person should know why they were signed out, not guess.
+  if (row.revokedAt) {
+    throw new PactoraError(
+      ErrorCode.UNAUTHORIZED,
+      row.revokedReason ?? 'unknown, expired or signed-out session — sign in again',
+    );
+  }
+  if (row.expiresAt.getTime() <= Date.now()) {
     throw new PactoraError(ErrorCode.UNAUTHORIZED, 'unknown, expired or signed-out session — sign in again');
   }
   await db.update(sessions).set({lastUsedAt: new Date()}).where(eq(sessions.id, row.id));
@@ -196,6 +213,44 @@ export async function sweepExpiredSessions(db: Db): Promise<{sessions: number; c
     .where(lte(loginChallenges.expiresAt, now))
     .returning({nonce: loginChallenges.nonce});
   return {sessions: s.length, challenges: c.length};
+}
+
+/** sha256 of an account's sorted full-access public keys: what a sign-in records (0025). */
+export function accessKeysHash(keys: readonly string[]): string {
+  return createHash('sha256')
+    .update([...keys].sort().join('\n'))
+    .digest('hex');
+}
+
+/**
+ * End the sessions of every account whose full-access key set changed since
+ * it signed in. Run by the API on a timer (SESSION_KEY_SWEEP_MS, default 5
+ * minutes): a key the owner rotated — or one an attacker added — must not
+ * leave the old session alive for a week. An account the chain cannot read
+ * right now is left for the next pass; a deleted account is signed out.
+ */
+export async function sweepChangedKeySessions(
+  db: Db,
+  readAccessKeys: (args: {chainId: string; accountId: string}) => Promise<string[] | null>,
+): Promise<{checked: number; revoked: number}> {
+  const live = (await db.execute(
+    sql`SELECT DISTINCT account_id, chain_id, access_keys_hash
+          FROM sessions
+         WHERE revoked_at IS NULL AND expires_at > now() AND access_keys_hash IS NOT NULL`,
+  )) as unknown as {account_id: string; chain_id: string; access_keys_hash: string}[];
+  let revoked = 0;
+  for (const s of live) {
+    let keys: string[] | null;
+    try {
+      keys = await readAccessKeys({chainId: s.chain_id, accountId: s.account_id});
+    } catch {
+      continue; // unreadable now: looked at again next pass
+    }
+    const now = keys === null ? 'gone' : accessKeysHash(keys);
+    if (now === s.access_keys_hash) continue;
+    revoked += await revokeSessionsOf(db, [s.account_id], REVOKED_KEYS_CHANGED);
+  }
+  return {checked: live.length, revoked};
 }
 
 /** The chain a request operates on: explicit `?chainId=`, else the caller's. */

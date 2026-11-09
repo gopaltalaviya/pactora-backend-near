@@ -147,6 +147,25 @@ export function makeIdentityReader(config: PactoraConfig, clientFor = clients(co
  * `null` when it cannot be read: the caller then declares no spend and leaves
  * the cap to the contract, which enforces it either way.
  */
+/**
+ * The FULL-ACCESS public keys of an account (sorted), or null when it does
+ * not exist. What a sign-in records and the session sweep re-reads: a change
+ * in this set ends the account's sessions (migration 0025). Unreadable →
+ * throws; the sweep then leaves the sessions alone until the next pass.
+ */
+export type AccessKeysReader = (args: {chainId: string; accountId: string}) => Promise<string[] | null>;
+
+export function makeAccessKeysReader(config: PactoraConfig, clientFor = clients(config)): AccessKeysReader {
+  return async ({chainId, accountId}) => {
+    const keys = await clientFor(chainId).accessKeys(accountId);
+    if (!keys) return null;
+    return keys
+      .filter((k) => k.permission === 'FullAccess')
+      .map((k) => k.publicKey)
+      .sort();
+  };
+}
+
 export type DisputeBondReader = (args: {chainId: string; chainJobId: bigint}) => Promise<bigint | null>;
 
 export function makeDisputeBondReader(config: PactoraConfig, clientFor = clients(config)): DisputeBondReader {

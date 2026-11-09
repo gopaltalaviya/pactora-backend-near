@@ -155,7 +155,8 @@ describe('signing in', () => {
     // Only a hash is stored: the token itself is nowhere in the table.
     const rows = (await db.execute(sql`SELECT * FROM sessions`)) as unknown as Record<string, unknown>[];
     expect(rows).toHaveLength(1);
-    expect(JSON.stringify(rows)).not.toContain(s.token.split('_')[2]);
+    // The whole secret: base64url may itself contain '_', so split('_')[2] was sometimes '' (flaky).
+    expect(JSON.stringify(rows)).not.toContain(s.token.split('_').slice(2).join('_'));
     expect(String(rows[0]!['secret_hash'])).toMatch(/^sha256\$[0-9a-f]{64}$/);
 
     const who = await me(s.token);

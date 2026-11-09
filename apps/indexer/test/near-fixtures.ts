@@ -52,6 +52,11 @@ type Amt = bigint | number | string;
 const s = (a: Amt) => String(a);
 
 export const log = {
+  /** events.rs `wallet_accepted` / `wallet_proposed`: an agent's wallet changing hands. */
+  walletAccepted: (o: {agentId: Id; wallet: string; previous: string | null}) =>
+    pactora('wallet_accepted', {agent_id: o.agentId, wallet: o.wallet, previous: o.previous}),
+  walletProposed: (o: {agentId: Id; pendingWallet: string | null}) =>
+    pactora('wallet_proposed', {agent_id: o.agentId, pending_wallet: o.pendingWallet}),
   /** events.rs `funded`: a deposit into an agent's balance or stake, through ft_transfer_call. */
   funded: (o: {agentId: Id; from: string; amount: Amt; kind: 'balance' | 'stake'}) =>
     pactora('funded', {agent_id: o.agentId, from: o.from, amount: s(o.amount), kind: o.kind}),

@@ -156,6 +156,8 @@ export interface NearClient {
   view<T>(contract: string, method: string, args?: Record<string, unknown>): Promise<T>;
   /** The access key, or null when the account has no such key (or does not exist). */
   accessKey(accountId: string, publicKey: string): Promise<AccessKeyInfo | null>;
+  /** Every access key of the account (public key and permission), or null when it does not exist. */
+  accessKeys(accountId: string): Promise<{publicKey: string; permission: AccessKeyPermission}[] | null>;
   /** The account's liquid balance in yocto, or null when it does not exist. */
   balance(accountId: string): Promise<bigint | null>;
   finalBlock(): Promise<FinalBlock>;
@@ -459,6 +461,19 @@ export function nearClient(rpcUrl: string, opts: NearClientOptions = {}): NearCl
         args,
         blockQuery: {finality: 'final'},
       })) as T;
+    },
+
+    async accessKeys(accountId) {
+      try {
+        const r = await rpc<{keys?: {public_key: string; access_key: {permission: AccessKeyPermission}}[]}>(
+          'query',
+          {request_type: 'view_access_key_list', finality: 'final', account_id: accountId},
+        );
+        return (r.keys ?? []).map((k) => ({publicKey: k.public_key, permission: k.access_key.permission}));
+      } catch (err) {
+        if (isMissing(err, 'UNKNOWN_ACCOUNT', 'does not exist')) return null;
+        throw err;
+      }
     },
 
     async accessKey(accountId, publicKey) {

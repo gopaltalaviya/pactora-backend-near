@@ -16,6 +16,7 @@ import {buildApp} from './app.js';
 import {makeSignerFaucet, makeSignerSubmit, makeSignerWalletKeys} from './submit.js';
 import {SanctionsIndex, SimulatedIdentityProvider} from './compliance.js';
 import {
+  makeAccessKeysReader,
   makeBudgetReader,
   makeChainViewer,
   makeDisputeBondReader,
@@ -53,6 +54,14 @@ const Env = z
     RUNS_PER_DAY: z.coerce.number().int().min(0).default(0),
     /** Agents one owner account may register per chain (docs/26 F25). */
     MAX_AGENTS_PER_OWNER: env.positiveInt(100),
+    /** How often accounts with live sessions have their full-access keys re-read (0025); 0 = never. */
+    SESSION_KEY_SWEEP_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(5 * 60_000),
+    /** How often open listings past their deadline are announced as expired; 0 = never. */
+    LISTING_EXPIRY_SWEEP_MS: z.coerce.number().int().min(0).default(60_000),
     METRICS_TOKEN: z.string().optional(),
     LOG_LEVEL: env.logLevel(),
     DB_POOL_MAX: env.positiveInt(5),
@@ -285,6 +294,9 @@ const app = await buildApp({
   defaultChainId: config.defaultChainId,
   readBudget: makeBudgetReader(config),
   readIdentity: makeIdentityReader(config),
+  readAccessKeys: makeAccessKeysReader(config),
+  sessionKeySweepMs: cfg.SESSION_KEY_SWEEP_MS,
+  listingExpirySweepMs: cfg.LISTING_EXPIRY_SWEEP_MS,
   readPayment: makePaymentReader(config),
   readTxEvents: makeTxEventsReader(config),
   readDisputeBond: makeDisputeBondReader(config),

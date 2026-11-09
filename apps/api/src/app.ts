@@ -43,11 +43,12 @@ import type {FaucetSend} from './submit.js';
 import type {TargetPolicy} from '@pactora/service';
 import {jobsReadyToSettle, settleAcceptedDraft} from './evidence.js';
 import type {ObjectStore} from '@pactora/storage';
-import {sweepExpiredSessions} from './auth.js';
+import {sweepChangedKeySessions, sweepExpiredSessions} from './auth.js';
 import {registerStatusRoutes, type StatusDeps} from './routes/status.js';
 import {registerX402Routes} from './routes/x402.js';
 import {RunService, type RunExecutor} from './runs.js';
 import type {
+  AccessKeysReader,
   BudgetReader,
   DisputeBondReader,
   IdentityReader,
@@ -67,6 +68,10 @@ export interface AppDeps {
   readBudget?: BudgetReader;
   /** Omitted, every registration is refused: it cannot be verified. */
   readIdentity?: IdentityReader;
+  /** An account's full-access keys: recorded at sign-in, re-read by the session sweep (0025). */
+  readAccessKeys?: AccessKeysReader;
+  /** How often accounts with live sessions have their key set re-read; default 5 min, 0 = never. */
+  sessionKeySweepMs?: number;
   /** NEP-413 owner signatures, checked to be full-access keys (challenges.ts). */
   verifyOwner: OwnerVerifier;
   /** The signer's agent keys; omitted, registration cannot create or accept wallets. */
@@ -374,6 +379,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     verifyOwner: deps.verifyOwner,
     ...(deps.signRecipient ? {signRecipient: deps.signRecipient} : {}),
     ...(deps.rateLimitPerMinute ? {rateLimitPerMinute: deps.rateLimitPerMinute} : {}),
+    ...(deps.readAccessKeys ? {readAccessKeys: deps.readAccessKeys} : {}),
   });
   await registerPeopleRoutes(app, {
     db: deps.db,
@@ -490,6 +496,30 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   app.addHook('onClose', async () => {
     clearTimeout(settleTimer);
     settleTimer = undefined;
+  });
+
+  // Sessions of an account whose full-access keys changed end (0025): a
+  // rotated or stolen-and-replaced key must not leave a week-long session.
+  let keySweepTimer: NodeJS.Timeout | undefined;
+  const keySweepEvery = deps.sessionKeySweepMs ?? 5 * 60_000;
+  const readAccessKeys = deps.readAccessKeys;
+  const keySweep = () => {
+    keySweepTimer = setTimeout(() => {
+      sweepChangedKeySessions(deps.db, readAccessKeys!)
+        .then((r) => {
+          if (r.revoked > 0) app.log.info(r, 'sessions ended: account keys changed');
+        })
+        .catch((err: unknown) => app.log.warn({err}, 'session key sweep failed'))
+        .finally(() => {
+          if (keySweepTimer) keySweep();
+        });
+    }, keySweepEvery);
+    keySweepTimer.unref();
+  };
+  if (keySweepEvery > 0 && readAccessKeys) keySweep();
+  app.addHook('onClose', async () => {
+    clearTimeout(keySweepTimer);
+    keySweepTimer = undefined;
   });
 
   // Listings whose deadline passed: the client and its bidders are told once

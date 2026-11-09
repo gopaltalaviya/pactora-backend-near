@@ -4,7 +4,9 @@ import {eventsOf, type BlockRead, type BlockSource, type ChainEvent} from '@pact
 import {
   type Db,
   OUTCOME_SUCCESS,
+  REVOKED_WALLET_CHANGED,
   WORKER_FAULT,
+  revokeSessionsOf,
   indexerCursor,
   jobEvents,
   jobs,
@@ -14,7 +16,13 @@ import {
   reputationScoreSql,
   tokenTransfers,
 } from '@pactora/db';
-import {decodeFtTransfers, decodeFunded, decodePactoraEvent, type DecodedJobEvent} from './events.js';
+import {
+  decodeFtTransfers,
+  decodeFunded,
+  decodePactoraEvent,
+  decodeWalletChange,
+  type DecodedJobEvent,
+} from './events.js';
 
 /**
  * NEAR final blocks → Postgres, one worker per enabled chain
@@ -195,6 +203,7 @@ export class Indexer {
       for (const {ev, d} of decoded) await this.handleEvent(tx, ev, d);
       await this.recordTransfers(tx, token);
       await this.recordFunding(tx, protocol);
+      await this.endSessionsOnWalletChange(tx, protocol);
       await this.writeCursor(tx, to, parent);
     });
 
@@ -293,6 +302,33 @@ export class Indexer {
    * Kept only for agents this indexer knows (the attribution needs the
    * wallet). Keyed by the Pactora receipt, which no token event shares.
    */
+  /**
+   * A wallet proposed or accepted for an agent ends the person sessions of
+   * its owner and of the wallets involved (migration 0025): the account's
+   * signing arrangement changed on chain, so what it signed in with may no
+   * longer be in its hands. Idempotent: a replayed batch finds no live
+   * session to end.
+   */
+  private async endSessionsOnWalletChange(tx: Tx, events: ChainEvent[]): Promise<void> {
+    const {chain} = this.deps;
+    const changes = events.flatMap((ev) => decodeWalletChange(ev) ?? []);
+    if (changes.length === 0) return;
+    for (const c of changes) {
+      const rows = (await tx.execute(
+        sql`SELECT owner_address AS o, wallet_address AS w FROM agents
+            WHERE chain_id = ${chain.chainId} AND chain_agent_id = ${String(c.agentId)}`,
+      )) as unknown as {o: string; w: string}[];
+      const accounts = [...c.wallets, ...rows.flatMap((r) => [r.o, r.w])];
+      const n = await revokeSessionsOf(tx, accounts, REVOKED_WALLET_CHANGED);
+      if (n > 0) {
+        this.log.info(
+          {chainId: chain.chainId, agentId: c.agentId, event: c.event, sessions: n},
+          'sessions ended: wallet changed',
+        );
+      }
+    }
+  }
+
   private async recordFunding(tx: Tx, events: ChainEvent[]): Promise<void> {
     const {chain} = this.deps;
     const funded = events.flatMap((ev) => {

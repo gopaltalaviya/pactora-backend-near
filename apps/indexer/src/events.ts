@@ -267,6 +267,32 @@ export function decodeFunded(e: Nep297Event): FundedEntry | null {
   return {agentId, from, amount};
 }
 
+/**
+ * events.rs `wallet_proposed` / `wallet_accepted`: an agent's wallet is
+ * changing hands. The API ends the owner's and both wallets' person sessions
+ * on it (migration 0025). Anything malformed is ignored, never thrown: these
+ * are not job events and must not stop a batch.
+ */
+export interface WalletChange {
+  agentId: number;
+  /** The accounts involved besides the owner: the new wallet, and the previous one if any. */
+  wallets: string[];
+  event: 'wallet_proposed' | 'wallet_accepted';
+}
+
+export function decodeWalletChange(e: Nep297Event): WalletChange | null {
+  if (e.standard !== 'pactora' || !Array.isArray(e.data)) return null;
+  if (e.event !== 'wallet_proposed' && e.event !== 'wallet_accepted') return null;
+  const d: unknown = e.data[0];
+  if (!isObject(d)) return null;
+  const agentId = d['agent_id'];
+  if (typeof agentId !== 'number' || !Number.isSafeInteger(agentId)) return null;
+  const wallets = [d['wallet'], d['pending_wallet'], d['previous']].filter(
+    (w): w is string => typeof w === 'string' && w.length > 0,
+  );
+  return {agentId, wallets, event: e.event};
+}
+
 export function decodeFtTransfers(e: Nep297Event): FtTransferEntry[] {
   if (e.standard !== 'nep141' || e.event !== 'ft_transfer' || !Array.isArray(e.data)) return [];
   const out: FtTransferEntry[] = [];

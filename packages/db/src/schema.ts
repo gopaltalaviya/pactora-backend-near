@@ -528,6 +528,10 @@ export const sessions = pgTable(
     lastUsedAt: timestamp('last_used_at', {withTimezone: true}),
     /** The client address that signed in. */
     requester: text('requester').notNull().default(''),
+    /** sha256 of the account's full-access public keys at sign-in; a change ends the session (0025). */
+    accessKeysHash: text('access_keys_hash'),
+    /** Why it was revoked, told to the next request that presents it. */
+    revokedReason: text('revoked_reason'),
   },
   (t) => [
     uniqueIndex('sessions_key_id_uk').on(t.keyId),

@@ -1,7 +1,14 @@
 import type {FastifyInstance} from 'fastify';
 import {and, eq, gt, isNull, sql} from 'drizzle-orm';
 import {z} from 'zod';
-import {agents, apiKeys, keyChallenges, type Db} from '@pactora/db';
+import {
+  REVOKED_API_KEY_CHANGED,
+  agents,
+  apiKeys,
+  keyChallenges,
+  revokeSessionsOf,
+  type Db,
+} from '@pactora/db';
 import {clientKey} from '@pactora/service';
 import {PactoraError, ErrorCode} from '@pactora/shared';
 import {authenticate, generateApiKey, hashApiKey} from '../auth.js';
@@ -52,21 +59,46 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: KeyRouteDeps
     },
   };
 
+  /**
+   * Revoke the presented key — only if it is still live. Ten concurrent
+   * rotates of one key used to mint ten live keys, because each revoked
+   * unconditionally and inserted; now only the one whose revoke took a row
+   * may insert, and the rest are told the key is gone (401).
+   */
+  async function revokeLive(tx: Pick<Db, 'update'>, keyId: string): Promise<void> {
+    const gone = await tx
+      .update(apiKeys)
+      .set({revokedAt: new Date()})
+      .where(and(eq(apiKeys.keyId, keyId), isNull(apiKeys.revokedAt)))
+      .returning({id: apiKeys.id});
+    if (gone.length === 0) {
+      throw new PactoraError(ErrorCode.UNAUTHORIZED, 'this key was already rotated or revoked');
+    }
+  }
+
+  /** A changed agent credential ends the owner account's person sessions too (0025). */
+  async function endOwnerSessions(agentId: number): Promise<void> {
+    const owner = await db.query.agents.findFirst({where: eq(agents.id, agentId)});
+    if (owner) await revokeSessionsOf(db, [owner.ownerAddress], REVOKED_API_KEY_CHANGED);
+  }
+
   /** Swap the presented key for a new one. The old one is revoked in the same transaction. */
   app.post('/v1/keys/rotate', async (request) => {
     const caller = await authenticate(db, request);
     const {key, keyId} = generateApiKey();
     await db.transaction(async (tx) => {
-      await tx.update(apiKeys).set({revokedAt: new Date()}).where(eq(apiKeys.keyId, caller.keyId));
+      await revokeLive(tx, caller.keyId);
       await tx.insert(apiKeys).values({agentId: caller.agentId, keyId, keyHash: hashApiKey(key)});
     });
+    await endOwnerSessions(caller.agentId);
     return {agentId: String(caller.agentId), apiKey: key, keyId, revokedKeyId: caller.keyId};
   });
 
   /** The kill switch for a key that leaked. */
   app.post('/v1/keys/revoke', async (request) => {
     const caller = await authenticate(db, request);
-    await db.update(apiKeys).set({revokedAt: new Date()}).where(eq(apiKeys.keyId, caller.keyId));
+    await revokeLive(db, caller.keyId);
+    await endOwnerSessions(caller.agentId);
     return {agentId: String(caller.agentId), revokedKeyId: caller.keyId};
   });
 
