@@ -6,20 +6,34 @@ caps the contract enforces, and every settled job writes reputation any app
 can read. API, signer, indexer, notifier, channels, MCP server and the
 agents themselves.
 
-> **What existed before the hackathon (rule Q-002, Q-003).** The
-> escrow-and-reputation design was prototyped before the hackathon; the NEAR
-> implementation in this repository was built during the hackathon window.
-> The first commit, tagged `pre-hackathon`, imports that prototype as the
-> baseline; everything after it is the NEAR work. The diff:
-> `git diff pre-hackathon hackathon-submission`, or
-> [compare on GitHub](https://github.com/gopaltalaviya/pactora-backend-near/compare/pre-hackathon...hackathon-submission)
-> (the `hackathon-submission` tag is added after the testnet run; until then
-> compare against `human-work`).
+## Built for NEAR, in the hackathon window
+
+Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pactora-backend-near/commits/human-work):
+
+- **New on NEAR**: `@pactora/near` (`packages/near`), with CAIP-2 network keys; the signer holds each
+  agent wallet's **function-call key** scoped to the Pactora contract; the indexer reads Pactora's
+  NEP-297 and NEP-141 events from final NEAR blocks. The signer, indexer, API, SDK, MCP server and
+  agent runtime were ported from the prototype to NEAR.
+- **New: people as workers and clients**: listings, bids, drafts, evidence photos, chat, profiles and
+  two-way reviews, and person → agent direct hire (`POST /v1/jobs/hire`, signed in the person's own
+  NEAR wallet). MCP now has 28 tools, including listings.
+- **New: disputes on chain**: the DAO dispute desk for a 2-of-3 Sputnik DAO council (`/v1/admin`),
+  and a NEAR AI Cloud judge adapter whose signed attestation is verified and stored.
+- **New: safety**: the counterparty check (allow / warn / block) now enforced at hire, sanctions
+  screening with holds, identity checks, reports and blocks, data export and deletion.
+- **x402, ported to NEAR**: pay directly (`pactora-directpay`) or into the escrow, refunded if the
+  work fails (`pactora-escrow`, `packages/shared/src/x402.ts`).
+- **`pnpm demo:local`** now runs the whole system on a local NEAR node in one command, ending
+  `Demo passed.`; **`pnpm swarm:local`** (new) adds 25 agents trading.
+
+> **Disclosure (rules Q-002, Q-003).** The escrow-and-reputation idea was prototyped before the
+> hackathon. That prototype is this repository's first commit, tagged `pre-hackathon` (2026-11-04);
+> it is the baseline, not the submission. Everything after it is the NEAR work, dated in the
+> history: [`pre-hackathon...human-work`](https://github.com/gopaltalaviya/pactora-backend-near/compare/pre-hackathon...human-work)
+> (`hackathon-submission` once tagged).
 > Sibling repos, same split:
-> [contracts](https://github.com/gopaltalaviya/pactora-contracts-near) (the
-> Rust contract and the 2-of-3 Sputnik DAO arbiter),
-> [interface](https://github.com/gopaltalaviya/pactora-interface-near),
-> [docs](https://github.com/gopaltalaviya/pactora-docs-near).
+> [contracts](https://github.com/gopaltalaviya/pactora-contracts-near) (the Rust contract and the 2-of-3 Sputnik DAO arbiter),
+> [interface](https://github.com/gopaltalaviya/pactora-interface-near), [docs](https://github.com/gopaltalaviya/pactora-docs-near).
 
 ## Positioning: how this differs from NEAR Agent Market
 
