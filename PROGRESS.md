@@ -14,7 +14,7 @@
   DAO desk, a held payout, x402, the attack refused), and `pnpm swarm:local`
   runs a 25-agent market on the same sandbox. Testnet deployment waits on
   the owner's funded account.
-- Numbers (2026-11-10): tests 1384 passed, 10 skipped, 0 failed (typecheck, lint and
+- Numbers (2026-11-10): tests 1383 passed, 10 skipped, 0 failed (typecheck, lint and
   format clean); `test:startup` all 42 refused (11-09); `demo:local` "Demo passed.", 80 checks
   with the DAO section (74 without); `swarm:local` "Swarm passed."; contracts `verify-near` 26/28 (the two
   DAO checks need `--dao`).
