@@ -637,6 +637,11 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
           status,
           // A hidden listing (moderation, 0028) is off the public board; its owner still lists it.
           query.mine === 'true' && actor ? undefined : isNull(listings.hiddenAt),
+          // So is every listing of a blocked account (a moderation or compliance block):
+          // it can no longer hire, so the board does not ask for bids on its behalf.
+          query.mine === 'true' && actor
+            ? undefined
+            : sql`NOT EXISTS (SELECT 1 FROM account_standing s WHERE s.agent_id = ${listings.clientAgentId} AND s.standing = 'blocked')`,
           query.category ? eq(listings.category, query.category) : undefined,
           query.interactionMode ? eq(listings.interactionMode, query.interactionMode) : undefined,
           query.hiringMode ? eq(listings.hiringMode, query.hiringMode) : undefined,

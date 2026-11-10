@@ -285,4 +285,36 @@ describe('reports', () => {
     });
     expect(apply.statusCode).toBe(403);
   });
+
+  // Found by the live browser suite (e2e-live, 2026-11-10): a reviewer blocked
+  // the poster of a reported listing, and the listing stayed on the board,
+  // still asking for bids the blocked account can never hire.
+  it("block takes the blocked account's open listings off the public board; its owner still lists them", async () => {
+    const poster = await agent(app, 'rep-board-poster');
+    const listingId = await postListing(poster.apiKey);
+    const bystander = await agent(app, 'rep-board-bystander');
+    const otherId = await postListing(bystander.apiKey);
+    const board = async () =>
+      (
+        (await app.inject({method: 'GET', url: '/v1/listings'})).json() as {listings: {listingId: string}[]}
+      ).listings
+        .map((l) => l.listingId)
+        .sort();
+    expect(await board()).toEqual([listingId, otherId].sort());
+
+    const reporter = await person(app, 'rep-board-reporter');
+    const rep = (
+      await report(reporter.token, {targetType: 'listing', targetId: listingId, reason: 'scam'})
+    ).json().reportId;
+    const rev = await reviewer();
+    expect(
+      (await resolve(rev.token, rep, {action: 'block', note: 'Fee-first scam, confirmed.'})).statusCode,
+    ).toBe(200);
+
+    expect(await board()).toEqual([otherId]);
+    const mine = (
+      await app.inject({method: 'GET', url: '/v1/listings?mine=true', headers: bearer(poster.apiKey)})
+    ).json() as {listings: {listingId: string}[]};
+    expect(mine.listings.map((l) => l.listingId)).toEqual([listingId]);
+  });
 });
