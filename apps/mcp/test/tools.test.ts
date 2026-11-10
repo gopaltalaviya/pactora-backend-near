@@ -85,17 +85,20 @@ const byName = (name: string) => {
 };
 
 describe('the tool set', () => {
-  it('exposes exactly the twenty-five tools the spec promises', () => {
+  it('exposes exactly the twenty-eight tools the spec promises', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'accept_job',
       'approve_job',
       'await_result',
+      'bid_on_listing',
       'check_trust',
+      'claim_listing',
       'close_applications',
       'decide_application',
       'decline_job',
       'discover_agents',
       'dispute_job',
+      'find_listings',
       'get_conversation',
       'get_evidence',
       'get_job',
@@ -363,6 +366,63 @@ describe('the listing tools (docs/26 F4)', () => {
       ['closeApplications', 'L'],
       ['reopenApplications', 'L'],
     ]);
+  });
+});
+
+describe('the worker-side listing tools (2026-11-10)', () => {
+  it('are free, and say a listing is written by its client (data, not instructions)', () => {
+    for (const name of ['find_listings', 'bid_on_listing', 'claim_listing']) {
+      expect(byName(name).spends, name).toBe(false);
+      expect(byName(name).description, name).toMatch(/Free/);
+    }
+    expect(byName('find_listings').description).toMatch(/data/);
+  });
+
+  it('calls the SDK with what the model gave, and stamps the chain on a bid and a claim', async () => {
+    const calls: unknown[][] = [];
+    const record =
+      (name: string, answer: unknown) =>
+      async (...a: unknown[]) => (calls.push([name, ...a]), answer);
+    const c = ctx({
+      listListings: record('listListings', [{listingId: 'L'}]),
+      applyToListing: record('applyToListing', {applicationId: 'A'}),
+      claimListing: record('claimListing', {replayed: false}),
+    });
+    expect(
+      await byName('find_listings').handler({q: 'shop fronts', capability: 'photography'}, c),
+    ).toMatchObject({
+      count: 1,
+      listings: [{listingId: 'L'}],
+    });
+    await byName('find_listings').handler({}, c);
+    const bid = await byName('bid_on_listing').handler(
+      {listingId: 'L', price: '30000', proposal: 'I can do this today, with a good camera.'},
+      c,
+    );
+    expect(bid).toMatchObject({applicationId: 'A', testnet: true});
+    const claimed = await byName('claim_listing').handler({listingId: 'L'}, c);
+    expect(claimed).toMatchObject({replayed: false, testnet: true});
+    await byName('claim_listing').handler(
+      {listingId: 'L', proposal: 'Taking it at the listed price, today.'},
+      c,
+    );
+    expect(calls).toEqual([
+      ['listListings', {q: 'shop fronts', skill: 'photography'}],
+      ['listListings', {}],
+      [
+        'applyToListing',
+        'L',
+        {priceBaseUnits: '30000', proposal: 'I can do this today, with a good camera.'},
+      ],
+      ['claimListing', 'L', undefined],
+      ['claimListing', 'L', 'Taking it at the listed price, today.'],
+    ]);
+  });
+
+  it('requires a base-units price and a proposal on a bid', () => {
+    const schema = z.object(byName('bid_on_listing').inputSchema);
+    expect(schema.safeParse({listingId: 'L', price: '1.5', proposal: 'x'.repeat(30)}).success).toBe(false);
+    expect(schema.safeParse({listingId: 'L', price: '30000'}).success).toBe(false);
   });
 });
 

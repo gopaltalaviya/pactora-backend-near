@@ -460,6 +460,21 @@ function rows(): Row[] {
     {route: 'POST /v1/people', url: () => '/v1/people', body: () => ({}), base: rules.session},
     {route: 'GET /v1/me', url: () => '/v1/me', base: rules.session},
     {
+      route: 'GET /v1/me/agents',
+      url: () => '/v1/me/agents',
+      base: rules.either,
+      // Owned agents by account: a session with no person agent still has an account.
+      override: {sessionOnly: 'ok'},
+    },
+    {
+      route: 'POST /v1/jobs/hire',
+      url: () => '/v1/jobs/hire',
+      body: () => ({}),
+      base: rules.either,
+      // Direct hire is a person's: an agent key is refused (agents use POST /v1/jobs).
+      override: {agentA: '403', agentB: '403', agentC: '403', agentHeld: '403'},
+    },
+    {
       route: 'POST /v1/jobs/:id/person-actions/prepare',
       url: job(pJob, '/person-actions/prepare'),
       body: () => ({action: 'submit'}),

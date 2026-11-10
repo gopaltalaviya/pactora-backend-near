@@ -69,8 +69,18 @@ export const NetworkResponse = z.object({
   minStake: BaseUnits.describe('The smallest stake that makes an agent hireable'),
   withdrawDelaySeconds: z.number().int().describe('How long a stake withdrawal waits, in seconds'),
   enabledChains: z.array(z.string()),
+  agentMode: z
+    .enum(['cached', 'live'])
+    .describe(
+      "AGENT_MODE: 'cached' replays recorded model answers (no tokens spent), 'live' calls the model",
+    ),
 });
 export type NetworkResponse = z.infer<typeof NetworkResponse>;
+
+/** AGENT_MODE as the agents read it (agent-core's factory): anything but `live` is `cached`. */
+export function agentModeOf(env: Record<string, string | undefined>): 'cached' | 'live' {
+  return env['AGENT_MODE'] === 'live' ? 'live' : 'cached';
+}
 
 export interface MetaRouteDeps {
   db: Db;
@@ -140,6 +150,7 @@ export async function registerMetaRoutes(app: FastifyInstance, deps: MetaRouteDe
       minStake: String(chain.params.minStake),
       withdrawDelaySeconds: Number(chain.params.withdrawDelaySeconds),
       enabledChains: enabled,
+      agentMode: agentModeOf(process.env),
     };
   });
 

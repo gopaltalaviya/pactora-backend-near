@@ -235,6 +235,35 @@ export function listingJobSpec(
   };
 }
 
+/**
+ * The chain's word on whether a worker can be hired right now (`stake_of
+ * … hireable`): a person client's selection used to go through for a
+ * worker the contract then refused (NotHireable), leaving a slot taken and
+ * a job that could never be funded (live probe). Unreadable → not checked
+ * (the signer or the chain still refuses). Also used by a direct hire.
+ */
+export async function refuseNotHireableOn(
+  db: Db,
+  viewChain: ChainViewer | undefined,
+  chain: ChainConfig,
+  chainId: string,
+  workerAgentId: number,
+): Promise<void> {
+  if (!viewChain) return;
+  const worker = await db.query.agents.findFirst({where: eq(agents.id, workerAgentId)});
+  if (!worker?.chainAgentId) return;
+  const stake = (await viewChain(chainId, chain.contracts.Pactora, 'stake_of', {
+    agent_id: Number(worker.chainAgentId),
+  }).catch(() => undefined)) as {hireable?: boolean} | null | undefined;
+  if (stake === undefined) return;
+  if (!stake || stake.hireable !== true) {
+    throw new PactoraError(
+      ErrorCode.AGENT_NOT_HIREABLE,
+      `the contract reports this worker as not hireable right now (its unlocked stake is below min_stake); choose another bid or ask the worker to top up its stake`,
+    );
+  }
+}
+
 export async function registerListingRoutes(app: FastifyInstance, deps: ListingRouteDeps): Promise<void> {
   const {db, chains} = deps;
 
@@ -350,28 +379,29 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
   }
 
   /**
-   * The chain's word on whether a worker can be hired right now (`stake_of
-   * … hireable`): a person client's selection used to go through for a
-   * worker the contract then refused (NotHireable), leaving a slot taken and
-   * a job that could never be funded (live probe). Unreadable → not checked
-   * (the signer or the chain still refuses).
+   * Whether a bidder is hireable on chain right now (`stake_of … hireable`),
+   * for the application rows; 30 s cache, as the profile's. null when the
+   * chain cannot be read (or the bidder has no on-chain id).
    */
-  async function refuseNotHireable(workerAgentId: number, chainId: string): Promise<void> {
-    if (!deps.viewChain) return;
-    const worker = await db.query.agents.findFirst({where: eq(agents.id, workerAgentId)});
-    if (!worker?.chainAgentId) return;
-    const chain = chainOf(chainId);
-    const stake = (await deps
-      .viewChain(chainId, chain.contracts.Pactora, 'stake_of', {agent_id: Number(worker.chainAgentId)})
+  const hireableCache = new Map<string, {at: number; v: boolean}>();
+  async function hireableOf(agent: Pick<AgentRow, 'chainId' | 'chainAgentId'>): Promise<boolean | null> {
+    if (!deps.viewChain || !agent.chainAgentId) return null;
+    const chain = chains[agent.chainId];
+    if (!chain) return null;
+    const key = `${agent.chainId}:${agent.chainAgentId}`;
+    const hit = hireableCache.get(key);
+    if (hit && Date.now() - hit.at < 30_000) return hit.v;
+    const s = (await deps
+      .viewChain(agent.chainId, chain.contracts.Pactora, 'stake_of', {agent_id: Number(agent.chainAgentId)})
       .catch(() => undefined)) as {hireable?: boolean} | null | undefined;
-    if (stake === undefined) return;
-    if (!stake || stake.hireable !== true) {
-      throw new PactoraError(
-        ErrorCode.AGENT_NOT_HIREABLE,
-        `the contract reports this worker as not hireable right now (its unlocked stake is below min_stake); choose another bid or ask the worker to top up its stake`,
-      );
-    }
+    if (s === undefined) return null;
+    const v = s?.hireable === true;
+    hireableCache.set(key, {at: Date.now(), v});
+    return v;
   }
+
+  const refuseNotHireable = (workerAgentId: number, chainId: string) =>
+    refuseNotHireableOn(db, deps.viewChain, chainOf(chainId), chainId, workerAgentId);
 
   /** Windows within the contract's maxima (create_job refuses anything longer: WINDOW_TOO_LONG). */
   function checkWindows(chain: ChainConfig, accept: number, work: number) {
@@ -665,9 +695,13 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
       viewer: {
         isOwner: false,
         counterpartyClear: clientClear,
-        applications: mine.map((a) =>
-          applicationView(a, chain, a.jobId !== null ? (ids.get(a.jobId) ?? null) : null),
-        ),
+        applications: await (async () => {
+          const hireable = mine.length > 0 ? await hireableOf(actor.agent) : null;
+          return mine.map((a) => ({
+            ...applicationView(a, chain, a.jobId !== null ? (ids.get(a.jobId) ?? null) : null),
+            hireable,
+          }));
+        })(),
       },
     };
   });
@@ -981,13 +1015,16 @@ export async function registerListingRoutes(app: FastifyInstance, deps: ListingR
     )) as unknown as [{n: number}];
     const ids = await jobPublicIds(rows.map((r) => r.a.jobId));
     const clearIds = await clearAmong(rows.map((r) => r.ag.id));
+    const hireable = await Promise.all(rows.map((r) => hireableOf(r.ag)));
     return {
       total: n,
       page: query.page,
       pageSize: LIMITS.pageSize,
       sort: query.sort,
-      applications: rows.map(({a, ag, st}) => ({
+      applications: rows.map(({a, ag, st}, i) => ({
         ...applicationView(a, chain, a.jobId !== null ? (ids.get(a.jobId) ?? null) : null),
+        /** The chain's `stake_of … hireable` for the bidder now; null when it cannot be read. */
+        hireable: hireable[i]!,
         applicant: {
           agentId: String(ag.id),
           publicId: ag.publicId,

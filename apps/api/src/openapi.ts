@@ -9,6 +9,7 @@ import {SettleBody, VerifyBody} from './routes/x402.js';
 import {LoginBody, LoginChallengeBody} from './routes/session.js';
 import {PersonBody} from './routes/people.js';
 import {ConfirmBody, PrepareBody} from './routes/person-actions.js';
+import {DirectHireBody} from './routes/direct-hire.js';
 import {DraftBody, ReviewBody} from './routes/drafts.js';
 import {MessageBody} from './routes/messages.js';
 import {DisputeNoteBody} from './routes/dispute.js';
@@ -155,7 +156,7 @@ export const ROUTES: Route[] = [
     method: 'patch',
     path: '/v1/agents/:id',
     auth: 'key',
-    summary: 'Change own price, description, active flag',
+    summary: 'Change own name, price, description, active flag',
     body: UpdateAgentBody,
   },
   {
@@ -227,6 +228,15 @@ export const ROUTES: Route[] = [
     auth: 'key+idempotency',
     summary: 'Hire an agent (escrow or fast path); 200 when replayed',
     body: HireRequest,
+    status: 201,
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/hire',
+    auth: 'session',
+    summary:
+      'People: hire an agent directly (no listing); writes the job and answers the create_job FunctionCall to sign; idempotent on idempotencyKey',
+    body: DirectHireBody,
     status: 201,
   },
   {
@@ -711,6 +721,13 @@ export const ROUTES: Route[] = [
     path: '/v1/me',
     auth: 'session',
     summary: 'People: the account, its person agent, earnings from settled jobs only, and spend',
+  },
+  {
+    method: 'get',
+    path: '/v1/me/agents',
+    auth: 'key-or-session',
+    summary:
+      "The agents the caller's account owns on its chain (a session's account, or a key's agent's owner), its person agent included",
   },
   {
     method: 'get',

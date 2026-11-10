@@ -928,6 +928,161 @@ try {
       : fail('the faucet is the token owner');
   }
 
+  // ── 8f. person → agent: direct hire (POST /v1/jobs/hire) ──────────────
+  // A person — their own account as their agent's wallet, signed in with
+  // NEP-413 like the website — hires an agent directly, with no listing.
+  // The API writes the job and hands back create_job; the person's own key
+  // signs it (as their wallet would) and person-actions confirms it from the
+  // chain. The agent accepts and delivers through its key and the signer;
+  // the person approves the same way they funded. Settled on chain, and the
+  // worker's on-chain record moves.
+  {
+    const hirer = await createPerson(root, `${run}-hirer`, '3', {save: keep});
+    await mintTo(root, TOKEN, hirer, 20_000_000);
+    const reg = await call(
+      hirer.account,
+      PACTORA,
+      'register_agent',
+      {wallet: hirer.id, card_uri: 'data:,Direct Hirer'},
+      {deposit: nearToYocto('0.1')},
+    );
+    const hirerChainId = String(reg.value);
+    await call(hirer.account, PACTORA, 'accept_wallet', {agent_id: Number(hirerChainId)});
+    const ch = await post('/v1/session/challenge', {accountId: hirer.id});
+    const signed = await signNep413({
+      accountId: hirer.id,
+      keyPair: hirer.keyPair,
+      message: ch.message,
+      recipient: ch.recipient,
+      nonce: new Uint8Array(Buffer.from(ch.nonce, 'hex')),
+    });
+    const {token: session} = await post('/v1/session', {
+      accountId: hirer.id,
+      nonce: ch.nonce,
+      publicKey: signed.publicKey,
+      signature: signed.signature,
+    });
+    const as = async (bearer, method, path, body) => {
+      const res = await fetch(`${base}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${bearer}`,
+          ...(body !== undefined ? {'content-type': 'application/json'} : {}),
+        },
+        ...(body !== undefined ? {body: JSON.stringify(body)} : {}),
+      });
+      return {status: res.status, body: await res.json().catch(() => ({}))};
+    };
+    const me = await as(session, 'POST', '/v1/people', {chainAgentId: hirerChainId, name: 'Direct Hirer'});
+    me.status === 201
+      ? ok(`a person registered on chain (agent ${hirerChainId}, wallet = their own account) and signed in`)
+      : fail(`POST /v1/people: ${me.status} ${JSON.stringify(me.body)}`);
+    await deposit(hirer, TOKEN, PACTORA, 1_000_000, {Fund: {agent_id: Number(hirerChainId)}});
+
+    const dOwner = await createPerson(root, `${run}-direct`, '3', {save: keep});
+    await mintTo(root, TOKEN, dOwner, 20_000_000);
+    const dw = await registerAgent(dOwner, {
+      name: 'Direct Translator',
+      capability: 'translation',
+      price: '30000',
+    });
+    await deposit(dOwner, TOKEN, PACTORA, BigInt(params.min_stake) + 1_000_000n, {
+      Stake: {agent_id: Number(dw.chainAgentId)},
+    });
+    const dsdk = new PactoraClient({baseUrl: base, apiKey: dw.apiKey, chainId: CHAIN_ID});
+    const recordBefore = (await view(root.provider, PACTORA, 'worker_record', {
+      agent_id: Number(dw.chainAgentId),
+    })) ?? {completed: 0};
+
+    const hireBody = {
+      workerAgentId: String(dw.agentId),
+      amount: '30000',
+      task: 'Translate "escrow keeps both sides honest" into French.',
+      capability: 'translation',
+      idempotencyKey: `${run}-direct-hire`,
+    };
+    const byKey = await as(orchestratorAgent.apiKey, 'POST', '/v1/jobs/hire', hireBody);
+    byKey.status === 403
+      ? ok('an agent key is refused direct hire (403: agents use POST /v1/jobs)')
+      : fail(`direct hire with a key: ${byKey.status} ${JSON.stringify(byKey.body)}`);
+    const hired = await as(session, 'POST', '/v1/jobs/hire', hireBody);
+    const fc = hired.body.funding?.functionCall;
+    hired.status === 201 && fc?.methodName === 'create_job' && fc.receiverId === PACTORA
+      ? ok(
+          `the person hired "Direct Translator" (agent ${dw.agentId}) directly for ${hired.body.job.amountDisplay}: the API wrote job ${hired.body.job.jobId} and answered create_job to sign`,
+        )
+      : fail(`POST /v1/jobs/hire: ${hired.status} ${JSON.stringify(hired.body)}`);
+    const jobId = hired.body.job.jobId;
+    const again = await as(session, 'POST', '/v1/jobs/hire', hireBody);
+    again.status === 201 && again.body.job?.jobId === jobId
+      ? ok('the same idempotencyKey again answers the same job')
+      : fail(`direct hire replay: ${again.status} ${JSON.stringify(again.body)}`);
+
+    // The person's wallet signs what the API prepared; person-actions confirms it from the chain.
+    const signAndConfirm = async (action, fnCall) => {
+      const out = await hirer.account.signAndSendTransaction({
+        receiverId: fnCall.receiverId,
+        actions: [
+          actions.functionCall(fnCall.methodName, fnCall.args, BigInt(fnCall.gas), BigInt(fnCall.deposit)),
+        ],
+        waitUntil: 'FINAL',
+      });
+      let r;
+      for (let i = 0; i < 20; i++) {
+        r = await as(session, 'POST', `/v1/jobs/${jobId}/person-actions/confirm`, {
+          action,
+          txHash: out.transaction.hash,
+        });
+        if (r.status !== 409 || !r.body.retryAfter) break;
+        await sleep(1000);
+      }
+      return r;
+    };
+    const created = await signAndConfirm('create', fc);
+    created.status === 200 && created.body.chainJobId
+      ? ok(
+          `the person signed create_job in their own wallet; confirmed from the chain as job ${created.body.chainJobId}`,
+        )
+      : fail(`confirm create: ${created.status} ${JSON.stringify(created.body)}`);
+
+    // The worker: offered the job, accepts and delivers through its key.
+    let offered = false;
+    for (let i = 0; i < 20 && !offered; i++) {
+      offered = (await dsdk.listJobs({role: 'worker'})).some((j) => j.jobId === jobId);
+      if (!offered) await sleep(500);
+    }
+    offered
+      ? ok('the worker was offered the job (GET /v1/jobs?role=worker)')
+      : fail('the worker never saw the job');
+    const stateOf = async () => (await dsdk.getJob(jobId)).state;
+    await dsdk.accept(jobId);
+    for (let i = 0; i < 60 && (await stateOf()) !== 'accepted'; i++) await sleep(500);
+    await dsdk.submitResult(jobId, {output: {translation: "l'entiercement garde les deux parties honnêtes"}});
+    for (let i = 0; i < 60 && (await stateOf()) !== 'submitted'; i++) await sleep(500);
+    (await stateOf()) === 'submitted'
+      ? ok('the worker accepted and delivered through its key and the signer')
+      : fail(`worker side: job is ${await stateOf()}`);
+
+    // The person approves the same way they funded.
+    const prep = await as(session, 'POST', `/v1/jobs/${jobId}/person-actions/prepare`, {action: 'approve'});
+    const approved =
+      prep.status === 200
+        ? await signAndConfirm('approve', prep.body.functionCall)
+        : {status: prep.status, body: prep.body};
+    approved.status === 200 && approved.body.state === 'settled'
+      ? ok('the person approved in their own wallet; the API confirmed it from the chain')
+      : fail(`approve: ${approved.status} ${JSON.stringify(approved.body)}`);
+    const onChain = await view(root.provider, PACTORA, 'get_job', {job_id: Number(created.body.chainJobId)});
+    const recordAfter = await view(root.provider, PACTORA, 'worker_record', {
+      agent_id: Number(dw.chainAgentId),
+    });
+    onChain?.state === 'Settled' && Number(recordAfter?.completed ?? 0) === Number(recordBefore.completed) + 1
+      ? ok(
+          `on chain: job ${created.body.chainJobId} is Settled, and the worker's record moved to ${recordAfter.completed} completed`,
+        )
+      : fail(`on chain: ${JSON.stringify(onChain?.state)}, record ${JSON.stringify(recordAfter)}`);
+  }
+
   // ── 8g. the DAO dispute desk (docs/26 F15) ───────────────────────────
   // A real Sputnik DAO becomes Pactora's arbiter on the sandbox. A job is
   // disputed; a council member's proposal and votes are the calls the

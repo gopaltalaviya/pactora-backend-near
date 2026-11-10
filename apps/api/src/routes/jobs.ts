@@ -17,6 +17,7 @@ import {
   validateShape,
 } from '@pactora/shared';
 import type {ChainConfig} from '@pactora/config';
+import type {ChainViewer} from '../chain-reads.js';
 import {authenticate, authenticateCaller, resolveChainId, type Caller} from '../auth.js';
 import {personAgentOf} from '../actor.js';
 import {Cursor, page} from '../cursor.js';
@@ -79,11 +80,80 @@ export interface JobRouteDeps {
   }) => Promise<{txHash: string; chainJobId?: string}>;
   /** v3: a job's dispute bond, read from the chain. Omitted or null: spend 0. */
   readDisputeBond?: (args: {chainId: string; chainJobId: bigint}) => Promise<bigint | null>;
+  /** Contract views: `get_job`, for a job's deadlines. Omitted, they read as null. */
+  viewChain?: ChainViewer;
+}
+
+export interface JobDeadlines {
+  acceptBy: string | null;
+  workBy: string | null;
+  reviewBy: string | null;
+  disputeBy: string | null;
+}
+
+const NO_DEADLINES: JobDeadlines = {acceptBy: null, workBy: null, reviewBy: null, disputeBy: null};
+
+/**
+ * The deadline that applies in each state, from the contract's own job
+ * (`get_job`; seconds since the epoch): created → accept by (and work by,
+ * already fixed at creation), accepted → work by, submitted → review by
+ * (the client's window to dispute; after it anyone may auto-approve),
+ * disputed → dispute by (the arbiter's window). Closed: none.
+ */
+export function deadlinesOf(
+  state: string,
+  onChain: {
+    accept_deadline?: unknown;
+    work_deadline?: unknown;
+    review_deadline?: unknown;
+    dispute_deadline?: unknown;
+  },
+): JobDeadlines {
+  const at = (v: unknown) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString() : null;
+  };
+  switch (state) {
+    case 'created':
+      return {...NO_DEADLINES, acceptBy: at(onChain.accept_deadline), workBy: at(onChain.work_deadline)};
+    case 'accepted':
+      return {...NO_DEADLINES, workBy: at(onChain.work_deadline)};
+    case 'submitted':
+      return {...NO_DEADLINES, reviewBy: at(onChain.review_deadline)};
+    case 'disputed':
+      return {...NO_DEADLINES, disputeBy: at(onChain.dispute_deadline)};
+    default:
+      return NO_DEADLINES;
+  }
 }
 
 export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps): Promise<void> {
   const {db, chains, bus, submit, readDisputeBond} = deps;
   const enabled = Object.keys(chains);
+
+  /** The job's deadlines from the chain; 10 s cache per job and state. Unreadable → all null. */
+  const deadlineCache = new Map<string, {at: number; v: JobDeadlines}>();
+  async function readDeadlines(job: {chainId: string; chainJobId: string | null; state: string}) {
+    if (!deps.viewChain || !job.chainJobId || ['settled', 'refunded'].includes(job.state))
+      return NO_DEADLINES;
+    const chain = chains[job.chainId];
+    if (!chain) return NO_DEADLINES;
+    const key = `${job.chainId}:${job.chainJobId}:${job.state}`;
+    const hit = deadlineCache.get(key);
+    if (hit && Date.now() - hit.at < 10_000) return hit.v;
+    const onChain = (await deps
+      .viewChain(job.chainId, chain.contracts.Pactora, 'get_job', {job_id: Number(job.chainJobId)})
+      .catch(() => undefined)) as Record<string, unknown> | null | undefined;
+    if (!onChain) return NO_DEADLINES;
+    // The chain's state when it says one: the indexer may not have caught up.
+    const v = deadlinesOf(
+      typeof onChain['state'] === 'string' ? onChain['state'].toLowerCase() : job.state,
+      onChain,
+    );
+    deadlineCache.set(key, {at: Date.now(), v});
+    if (deadlineCache.size > 5_000) deadlineCache.clear();
+    return v;
+  }
 
   /**
    * Hire an agent.
@@ -260,6 +330,8 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       workerAgentId: String(job.workerAgentId),
       createdAt: job.createdAt,
       settledAt: job.settledAt,
+      /** ISO UTC, from the contract's job; null where the state has no such deadline. */
+      deadlines: await readDeadlines(job),
       events: events.map((e) => ({
         kind: e.kind,
         txHash: e.txHash,

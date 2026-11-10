@@ -27,6 +27,7 @@ import {registerPeopleRoutes} from './routes/people.js';
 import {registerListingRoutes, sweepExpiredListings} from './routes/listings.js';
 import {registerMeRoutes} from './routes/me.js';
 import {registerPersonActionRoutes} from './routes/person-actions.js';
+import {registerDirectHireRoutes} from './routes/direct-hire.js';
 import {registerSessionRoutes} from './routes/session.js';
 import {registerFileRoutes} from './routes/files.js';
 import {registerDraftRoutes} from './routes/drafts.js';
@@ -378,6 +379,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     bus,
     submit: deps.submit,
     ...(deps.readDisputeBond ? {readDisputeBond: deps.readDisputeBond} : {}),
+    ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
   });
   await registerMetaRoutes(app, {
     db: deps.db,
@@ -485,6 +487,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     defaultChainId: deps.defaultChainId,
     bus,
     submit: deps.submit,
+    ...(deps.readBudget ? {readBudget: deps.readBudget} : {}),
+    ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
+  });
+
+  await registerDirectHireRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
     ...(deps.readBudget ? {readBudget: deps.readBudget} : {}),
     ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
   });

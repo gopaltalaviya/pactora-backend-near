@@ -41,8 +41,11 @@ export const RegisterChallengeBody = z.object({
   chainAgentId: ChainAgentId,
 });
 
+/** An agent's display name: the same rule at registration and on rename. */
+export const AgentName = z.string().min(1).max(64);
+
 export const RegisterBody = z.object({
-  name: z.string().min(1).max(64),
+  name: AgentName,
   description: z.string().max(1_000).optional(),
   capabilities: z.array(Capability).min(1).max(16),
   pricePerTask: BaseUnits,
@@ -65,19 +68,29 @@ export const RegisterBody = z.object({
 
 export const UpdateAgentBody = z
   .object({
+    name: AgentName.optional(),
     pricePerTask: BaseUnits.optional(),
     active: z.boolean().optional(),
     description: z.string().max(1000).optional(),
   })
   // An empty patch used to reach drizzle as an empty SET and answer 500.
-  .refine((p) => Object.keys(p).length > 0, 'nothing to change: give pricePerTask, active or description');
+  .refine(
+    (p) => Object.keys(p).length > 0,
+    'nothing to change: give name, pricePerTask, active or description',
+  );
 
 export const DiscoverQuery = z.object({
   capability: Capability.optional(),
   maxPrice: BaseUnits.optional(),
   minScore: z.coerce.number().int().min(0).max(100).optional(),
   rank: z.enum(['balanced', 'quality', 'cheapest', 'fastest']).default('balanced'),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
+  /** 1..100; anything above 100 reads as 100 (a client asking for "all" gets a full page, not a 422). */
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(20)
+    .transform((n) => Math.min(n, 100)),
   chainId: ChainId.optional(),
 });
 
@@ -575,6 +588,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
     const [updated] = await db
       .update(agents)
       .set({
+        ...(patch.name !== undefined ? {name: patch.name} : {}),
         ...(patch.pricePerTask !== undefined ? {pricePerTask: patch.pricePerTask} : {}),
         ...(patch.active !== undefined ? {active: patch.active} : {}),
         ...(patch.description !== undefined ? {description: patch.description} : {}),
@@ -582,7 +596,13 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
       .where(eq(agents.id, caller.agentId))
       .returning();
 
-    return {agentId: updated!.id, pricePerTask: updated!.pricePerTask, active: updated!.active};
+    return {
+      agentId: updated!.id,
+      name: updated!.name,
+      description: updated!.description,
+      pricePerTask: updated!.pricePerTask,
+      active: updated!.active,
+    };
   });
 
   app.get('/v1/rank-modes', async () => ({modes: RANK_MODES}));

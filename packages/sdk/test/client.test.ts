@@ -730,3 +730,43 @@ describe('evidence, drafts and chat (docs/26 F6-F8)', () => {
     await expect(refused.getFile('F1')).rejects.toMatchObject({code: 'FORBIDDEN'});
   });
 });
+
+describe('direct hire, my agents, rename (2026-11-10)', () => {
+  it('hireDirect posts the body with a stable idempotency key; myAgents and updateAgent hit their routes', async () => {
+    const {calls, impl} = fakeFetch((_n, url) =>
+      url.endsWith('/v1/jobs/hire')
+        ? {status: 201, body: {job: {jobId: 'J1'}, funding: {by: 'person', done: false}}}
+        : url.endsWith('/v1/me/agents')
+          ? {status: 200, body: {agents: [{agentId: '1', kind: 'agent'}]}}
+          : {status: 200, body: {agentId: 7, name: 'New'}},
+    );
+    const c = client(impl as typeof fetch);
+    const out = await c.hireDirect({workerAgentId: '7', amount: '20000', task: 'Do the thing well.'});
+    expect(out.job.jobId).toBe('J1');
+    expect(out.funding).toMatchObject({by: 'person', done: false});
+    const sent = JSON.parse(String(calls[0]!.init!.body)) as Record<string, unknown>;
+    expect(sent).toMatchObject({workerAgentId: '7', amount: '20000', task: 'Do the thing well.'});
+    expect(String(sent['idempotencyKey']).length).toBeGreaterThanOrEqual(8);
+    expect(calls[0]!.init!.method).toBe('POST');
+
+    await c.hireDirect({
+      workerAgentId: '7',
+      amount: '20000',
+      task: 'Do the thing well.',
+      capability: 'market-research',
+      idempotencyKey: 'my-key-123',
+    });
+    expect(JSON.parse(String(calls[1]!.init!.body))).toMatchObject({
+      capability: 'market-research',
+      idempotencyKey: 'my-key-123',
+    });
+
+    expect((await c.myAgents()).agents[0]!.agentId).toBe('1');
+    expect(calls[2]!.url).toBe('http://api.test/v1/me/agents');
+
+    expect((await c.updateAgent(7, {name: 'New'})).name).toBe('New');
+    expect(calls[3]!.url).toBe('http://api.test/v1/agents/7');
+    expect(calls[3]!.init!.method).toBe('PATCH');
+    expect(JSON.parse(String(calls[3]!.init!.body))).toEqual({name: 'New'});
+  });
+});

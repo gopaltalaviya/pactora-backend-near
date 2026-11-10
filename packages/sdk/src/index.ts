@@ -101,6 +101,54 @@ export interface JobDetail extends Omit<JobReceipt, 'txHash' | 'explorerUrl'> {
   declined?: {reason: string; at: string} | null;
   /** v3: the client's dispute — the reason, and the hash committed on chain (sha256 of canonicalize({reason})). */
   dispute?: {reason: string; reasonHash: string; at: string} | null;
+  /** ISO UTC, from the contract's job; null where the state has none. Absent from an older API. */
+  deadlines?: JobDeadlines;
+}
+
+export interface JobDeadlines {
+  acceptBy: string | null;
+  workBy: string | null;
+  reviewBy: string | null;
+  disputeBy: string | null;
+}
+
+/** `POST /v1/jobs/hire`: a person's direct hire — the job, and the create_job call to sign. */
+export interface DirectHire {
+  job: {
+    jobId: string;
+    chainJobId: string | null;
+    state: JobState;
+    amount: BaseUnits;
+    amountDisplay: string;
+    specHash: string;
+    spec: JobSpec;
+  };
+  funding:
+    | {by: 'person'; done: true}
+    | {
+        by: 'person';
+        done: false;
+        signerId: string;
+        functionCall: {
+          receiverId: string;
+          methodName: string;
+          args: Record<string, unknown>;
+          gas: string;
+          deposit: string;
+        };
+        confirm: string;
+      };
+}
+
+/** One row of `GET /v1/me/agents`. */
+export interface MyAgent {
+  agentId: string;
+  chainAgentId: string | null;
+  name: string;
+  kind: 'agent' | 'person';
+  active: boolean;
+  capabilities: string[];
+  pricePerTask: BaseUnits;
 }
 
 /** `GET /v1/network` (docs/NEAR-PORT.md §4). */
@@ -133,6 +181,8 @@ export interface NetworkInfo {
   minStake?: BaseUnits;
   withdrawDelaySeconds?: number;
   enabledChains: string[];
+  /** `cached` replays recorded model answers; `live` spends tokens. Absent from an older API. */
+  agentMode?: 'cached' | 'live';
 }
 
 export interface Budget {
@@ -305,6 +355,8 @@ export interface Application {
   jobId: string | null;
   createdAt: string;
   decidedAt: string | null;
+  /** The chain's `stake_of … hireable` for the bidder; null when unreadable. On list and detail reads. */
+  hireable?: boolean | null;
   /** On the client's list only. */
   applicant?: {
     agentId: string;
@@ -783,6 +835,8 @@ export class PactoraClient {
       location?: string;
       match?: 'me';
       mine?: boolean;
+      /** Words in the title, description or skills. */
+      q?: string;
       limit?: number;
     } = {},
   ): Promise<Listing[]> {
@@ -843,6 +897,45 @@ export class PactoraClient {
 
   reopenApplications(listingId: string): Promise<Listing> {
     return this.request<Listing>('POST', `/v1/listings/${listingId}/reopen`, {});
+  }
+
+  /**
+   * A person hires an agent directly (`POST /v1/jobs/hire`). Construct the
+   * client with the person's session token (`ps_…`) as `apiKey`; an agent
+   * key is refused (agents use `hire`). Nothing is paid here: sign
+   * `funding.functionCall` in the person's wallet, then confirm it through
+   * person-actions (`funding.confirm`).
+   */
+  hireDirect(args: {
+    workerAgentId: string;
+    amount: BaseUnits;
+    task: string;
+    capability?: string;
+    idempotencyKey?: string;
+  }): Promise<DirectHire> {
+    const {idempotencyKey, ...rest} = args;
+    return this.request<DirectHire>('POST', '/v1/jobs/hire', {
+      body: {...rest, idempotencyKey: idempotencyKey ?? `direct_${globalThis.crypto.randomUUID()}`},
+    });
+  }
+
+  /** The agents your account owns on this chain (a key: its agent's owner's), person agent included. */
+  myAgents(): Promise<{agents: MyAgent[]}> {
+    return this.request<{agents: MyAgent[]}>('GET', '/v1/me/agents', {});
+  }
+
+  /** Change your own agent: name, price, description, active flag. */
+  updateAgent(
+    agentId: number,
+    patch: {name?: string; pricePerTask?: BaseUnits; description?: string; active?: boolean},
+  ): Promise<{
+    agentId: number;
+    name: string;
+    description: string | null;
+    pricePerTask: BaseUnits;
+    active: boolean;
+  }> {
+    return this.request('PATCH', `/v1/agents/${agentId}`, {body: patch});
   }
 
   /** Instant mode: take a worker slot at the listed price. */
