@@ -39,7 +39,7 @@
     "@types/node": "^22.9.0",
     "@vitest/coverage-v8": "3.2.7",
     "eslint": "^9",
-    "globals": "^15",
+    "globals": "^17",
     "near-api-js": "7.4.0",
     "postgres": "^3.4.5",
     "prettier": "^3.3.3",
