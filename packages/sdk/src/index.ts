@@ -181,8 +181,8 @@ export interface NetworkInfo {
   minStake?: BaseUnits;
   withdrawDelaySeconds?: number;
   enabledChains: string[];
-  /** `cached` replays recorded model answers; `live` spends tokens. Absent from an older API. */
-  agentMode?: 'cached' | 'live';
+  /** `cached` replays recorded model answers; `live` and `record` spend tokens (`record` also saves the answers). Absent from an older API. */
+  agentMode?: 'cached' | 'live' | 'record';
 }
 
 export interface Budget {

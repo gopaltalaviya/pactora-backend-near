@@ -300,10 +300,19 @@ describe('GET /v1/network — agentMode', () => {
   it('says whether the agents replay recordings or spend tokens', async () => {
     const res = await app.inject({url: '/v1/network'});
     expect(res.json().agentMode).toBe(agentModeOf(process.env));
-    expect(['cached', 'live']).toContain(res.json().agentMode);
+    expect(['cached', 'live', 'record']).toContain(res.json().agentMode);
     expect(agentModeOf({})).toBe('cached');
     expect(agentModeOf({AGENT_MODE: 'cached'})).toBe('cached');
     expect(agentModeOf({AGENT_MODE: 'live'})).toBe('live');
+  });
+
+  // `record` calls the providers (and saves what they say): it spends
+  // tokens, so it must not be reported as `cached` (2026-11-10).
+  it('reports record as record, and any other value the way the factory reads it', () => {
+    expect(agentModeOf({AGENT_MODE: 'record'})).toBe('record');
+    // agent-core's buildBrain replays only for exactly `cached`; anything
+    // else reaches the providers, as `live` does.
+    expect(agentModeOf({AGENT_MODE: 'something-else'})).toBe('live');
   });
 });
 

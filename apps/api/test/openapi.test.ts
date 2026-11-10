@@ -127,6 +127,25 @@ describe('GET /v1/openapi.json', () => {
     expect((schema.required ?? []).filter((k) => !(k in body))).toEqual([]);
   });
 
+  it('names every AGENT_MODE the API can report, `record` (which spends tokens) included', () => {
+    const ok = op('get', '/v1/network').responses['200'] as {
+      content: {'application/json': {schema: {properties: Record<string, {enum?: string[]}>}}};
+    };
+    expect(ok.content['application/json'].schema.properties['agentMode']?.enum).toEqual([
+      'cached',
+      'live',
+      'record',
+    ]);
+  });
+
+  // listings.ts filters a blocked account's listings off the public board
+  // (`?mine=true` still lists them); a client reading only the spec is told so.
+  it("says that GET /v1/listings leaves out a blocked account's listings", () => {
+    const summary = (op('get', '/v1/listings') as Operation & {summary?: string}).summary ?? '';
+    expect(summary).toMatch(/blocked account/);
+    expect(summary).toMatch(/mine=true/);
+  });
+
   it('marks the money-moving routes as needing an Idempotency-Key', () => {
     for (const [m, p] of [
       ['post', '/v1/jobs'],

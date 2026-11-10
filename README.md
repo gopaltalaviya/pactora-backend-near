@@ -38,7 +38,7 @@ other rather than compete.
 
 | Do | See |
 |---|---|
-| `pnpm install && pnpm demo:local` (Docker running, the contracts repo cloned beside this one, both on the `human-work` branch) | `Demo passed.` — every line a check against the local NEAR chain; exit code 0. The DAO dispute-desk section runs only when `pactora-contracts-near/dao.wasm` exists (see below) |
+| `pnpm install && pnpm demo:local` (Docker running, the contracts repo cloned beside this one, both on the `human-work` branch) | `Demo passed.` — every line a check against the local NEAR chain (80 checks with the DAO section, 74 without, 2026-11-10); exit code 0. The DAO dispute-desk section runs only when `pactora-contracts-near/dao.wasm` exists (see below) |
 | `pnpm swarm:local` (after `pnpm demo:local`, sandbox still up) | an agent swarm on the sandbox: 20 buyer agents post listings, 5 seller agents bid by price rules (no model), buyers pick by price and reputation over two rounds; every job funded, delivered and settled on chain; a report (listings, bids, fills, median price, settlements, reputation per seller) and the checks — caps kept, balances reconcile, I1 — then `Swarm passed.`, exit 0, in about 2½ minutes |
 | `pnpm check` (Postgres up: `docker compose up -d`, then `DATABASE_URL=postgres://pactora:pactora@127.0.0.1:5443/pactora_near pnpm db:migrate`, and the same `DATABASE_URL` for `pnpm check`) | typecheck, lint, format and every test pass, in about 10 minutes |
 | `node scripts/test-startup.mjs` (after `pnpm -r build`) | every bad configuration refused at boot, by name |
@@ -156,8 +156,10 @@ signer API, events — is [`docs/NEAR-PORT.md`](docs/NEAR-PORT.md).
 **x402.** A worker can sell one HTTP call: `pactora-directpay` (pay first,
 bounded by `fast_path_max`) or `pactora-escrow` (refundable: settlement is a
 `create_job`, a failed call is cancelled for a full refund). SDK:
-`client.payX402(url, {maxAmount, body})`. `pnpm demo:local` pays one of each
-outcome on the sandbox.
+`client.payX402(url, {maxAmount, body})`. `pnpm demo:local` runs the
+`pactora-escrow` scheme on the sandbox: one call paid and settled, one failed
+call refunded in full. `pactora-directpay` is covered by the tests, not the
+demo.
 
 **Prompt injection.** Another agent's result enters a model only as
 delimited, shape-checked data; the judge that reads it has no tools. We do
@@ -176,7 +178,7 @@ AGENT_MODE=live        # call providers every time
 BRAIN_CHAIN=gemini,groq,ollama,claude          # provider order for workers
 BRAIN_CHAIN_ORCHESTRATOR=claude,gemini,groq    # planning and judging
 JUDGE_PROVIDER=near-ai NEAR_AI_API_KEY=...     # optional: judge on NEAR AI Cloud (off by default)
-JUDGE_REQUIRE_ATTESTATION=1                    # with near-ai: a verdict whose response signature does not verify is refused
+JUDGE_REQUIRE_ATTESTATION=0                    # with near-ai the signature check is ON by default (a verdict whose response signature does not verify is refused); =0 turns it off
 ```
 
 In cached mode a goal the recordings do not cover fails loudly rather than

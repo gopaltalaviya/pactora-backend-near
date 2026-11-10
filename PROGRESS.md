@@ -4,7 +4,7 @@
 > terminal: the current state, how to resume, what blocks, what was decided,
 > and a dated log of the NEAR work, newest first.
 
-- Last updated: **2026-11-09, night** (branch `human-work`).
+- Last updated: **2026-11-10** (branch `human-work`).
 - Event: **NEAR Hackathon**, deadline **2026-11-14 23:59 UTC**.
   Track: **Agent Economy** (primary); AI Security & Defense alongside.
   Plan and status: `pactora-docs-near/docs/24-near-hackathon.md` §1.5 and §5.
@@ -14,8 +14,9 @@
   DAO desk, a held payout, x402, the attack refused), and `pnpm swarm:local`
   runs a 25-agent market on the same sandbox. Testnet deployment waits on
   the owner's funded account.
-- Numbers (2026-11-09 night): `pnpm check` 1352 passed, 10 skipped, 0 failed; `test:startup`
-  all 42 refused; `demo:local` "Demo passed.", 71 checks; `swarm:local` "Swarm passed."; contracts `verify-near` 26/28 (the two
+- Numbers (2026-11-10): tests 1384 passed, 10 skipped, 0 failed (typecheck, lint and
+  format clean); `test:startup` all 42 refused (11-09); `demo:local` "Demo passed.", 80 checks
+  with the DAO section (74 without); `swarm:local` "Swarm passed."; contracts `verify-near` 26/28 (the two
   DAO checks need `--dao`).
 
 ## Cold start (local, no keys)
@@ -92,6 +93,34 @@ On Windows: `corepack` does not run from Git Bash; use PowerShell for
 ---
 
 ## Log
+
+### 2026-11-10 (branch human-work): direct hire, blocked listings, audit fixes
+
+- **2ffa24b** — person → agent direct hire (`POST /v1/jobs/hire`: the
+  same guards as selecting a bid, an idempotent job row, `create_job` for
+  the person's wallet); `GET /v1/me/agents` (the owner's agents); bidder
+  `hireable` (stake_of, 30 s cache); job `deadlines` from `get_job`;
+  `/v1/network` `agentMode`; agent rename; MCP `find_listings`,
+  `bid_on_listing`, `claim_listing` (28 tools); SDK `hireDirect`,
+  `myAgents`, `updateAgent`; `demo:local` §8f, a direct hire settled on
+  chain. Gate then: 1379 tests passed; demo 80 checks; swarm passed.
+- **5bf54c7** — a blocked account's listings leave the public board
+  (`GET /v1/listings`; `?mine=true` still lists them). Found by the live
+  browser suite; red first in `reports.test.ts`.
+- Audit fixes (this commit), each test red on the old source first:
+  `/v1/network` `agentMode` reports `record` (it spends tokens; it read as
+  `cached`), and any value but `cached`/`record` as `live`, the way
+  agent-core's factory reads it (`reads.test.ts`, `openapi.test.ts`); the
+  cached brain's hint says `AGENT_MODE=record`, the mode that saves a
+  recording (`fallback.test.ts`); the OpenAPI summary of `GET /v1/listings`
+  names the blocked-account filter (`openapi.test.ts`). README:
+  `JUDGE_REQUIRE_ATTESTATION` is on by default (`=0` turns it off);
+  `demo:local` runs only the `pactora-escrow` x402 scheme (one paid, one
+  refunded); the demo check count.
+- Gate: tests 1384 passed, 10 skipped, 0 failed, on a throwaway database
+  (`pactora_test_auditfix`, dropped after; never the held demo's
+  `pactora_near`); typecheck, lint, format clean. Demo count from the
+  latest full `demo:local` (11-10): 80 check lines, 6 of them the DAO desk.
 
 ### 2026-11-09 (night, branch human-work): round 3 — history, audit export, indexer stall, the swarm
 

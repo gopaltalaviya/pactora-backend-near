@@ -65,7 +65,7 @@ export class CachedBrain implements Brain {
       throw new BrainUnavailable(
         'cached',
         'not_configured',
-        `no recording for this request (key ${key}). Run once with AGENT_MODE=live to record it.`,
+        `no recording for this request (key ${key}). Run once with AGENT_MODE=record to record it.`,
       );
     }
 

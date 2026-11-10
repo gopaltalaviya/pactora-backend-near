@@ -70,16 +70,21 @@ export const NetworkResponse = z.object({
   withdrawDelaySeconds: z.number().int().describe('How long a stake withdrawal waits, in seconds'),
   enabledChains: z.array(z.string()),
   agentMode: z
-    .enum(['cached', 'live'])
+    .enum(['cached', 'live', 'record'])
     .describe(
-      "AGENT_MODE: 'cached' replays recorded model answers (no tokens spent), 'live' calls the model",
+      "AGENT_MODE: 'cached' replays recorded model answers (no tokens spent), 'live' calls the model, 'record' calls the model and saves its answers (tokens spent)",
     ),
 });
 export type NetworkResponse = z.infer<typeof NetworkResponse>;
 
-/** AGENT_MODE as the agents read it (agent-core's factory): anything but `live` is `cached`. */
-export function agentModeOf(env: Record<string, string | undefined>): 'cached' | 'live' {
-  return env['AGENT_MODE'] === 'live' ? 'live' : 'cached';
+/**
+ * AGENT_MODE as the agents read it (agent-core's factory): unset or `cached`
+ * replays, `record` calls the providers and saves, anything else calls them.
+ */
+export function agentModeOf(env: Record<string, string | undefined>): 'cached' | 'live' | 'record' {
+  const mode = env['AGENT_MODE'] ?? 'cached';
+  if (mode === 'cached') return 'cached';
+  return mode === 'record' ? 'record' : 'live';
 }
 
 export interface MetaRouteDeps {

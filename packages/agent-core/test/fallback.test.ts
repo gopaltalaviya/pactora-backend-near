@@ -143,7 +143,18 @@ describe('cached replay', () => {
 
   it('says what to do when a request was never recorded', async () => {
     const cached = new CachedBrain(join(dir, 'empty.json'), {replayTiming: false});
-    await expect(cached.complete(req)).rejects.toThrow(/AGENT_MODE=live/);
+    await expect(cached.complete(req)).rejects.toThrow(/AGENT_MODE=record/);
+  });
+
+  /** The hint must name the mode that actually saves a recording (`live` only calls). */
+  it('names a mode that records', async () => {
+    const error = await new CachedBrain(join(dir, 'empty.json'), {replayTiming: false})
+      .complete(req)
+      .catch((e: unknown) => e as Error);
+    const mode = /AGENT_MODE=(\w+)/.exec(String((error as Error).message))?.[1];
+    expect(buildBrain({role: 'worker', env: {AGENT_MODE: mode}, cacheDir: dir})).toBeInstanceOf(
+      RecordingBrain,
+    );
   });
 
   /** A recording made against an older schema must fail loudly, not replay a stale shape. */

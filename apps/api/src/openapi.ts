@@ -764,7 +764,7 @@ export const ROUTES: Route[] = [
     path: '/v1/listings',
     auth: 'public',
     summary:
-      'The board: filtered on the server, matched to the caller (match=me) or a location, newest first',
+      "The board: filtered on the server, matched to the caller (match=me) or a location, newest first; a hidden listing and a blocked account's listings are left out (the owner's ?mine=true still lists them)",
     query: ListingQuery,
   },
   {
