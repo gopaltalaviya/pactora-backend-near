@@ -241,9 +241,9 @@ const CASES = [
   ['api', 'unknown chain', {DATABASE_URL: CLOSED_DB, ENABLED_CHAINS: 'near:nowhere'}, /near:nowhere/],
   [
     'api',
-    'a pre-rename variable',
-    {DATABASE_URL: CLOSED_DB, AGENTX_API_URL: 'x'},
-    /AGENTX_API_URL is an unsupported variable/,
+    'a numeric-network variable',
+    {DATABASE_URL: CLOSED_DB, DEFAULT_CHAIN_ID: '1'},
+    /DEFAULT_CHAIN_ID is an unsupported variable/,
   ],
   [
     'api',

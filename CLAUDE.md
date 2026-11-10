@@ -1,8 +1,7 @@
-# Pactora (formerly AGENTX) — project instructions
+# Pactora — project instructions
 
 Applies to the Pactora-on-NEAR repos: `pactora-contracts-near`,
-`pactora-backend-near`, `pactora-interface-near`, `pactora-docs-near`
-(history before the port: the Monad `agentx-*` repos).
+`pactora-backend-near`, `pactora-interface-near`, `pactora-docs-near`.
 
 ## Deliverables are LOCAL FILES. Never Artifacts.
 
@@ -15,10 +14,10 @@ belongs to:
 
 | Deliverable | Format | Where |
 |---|---|---|
-| Slide decks | `.pptx`, or a self-contained `.html` | `agentx-docs/docs/deck/` |
-| Documents, specs, notes | `.md` | `agentx-docs/docs/` |
+| Slide decks | `.pptx`, or a self-contained `.html` | `pactora-docs-near/docs/deck/` |
+| Documents, specs, notes | `.md` | `pactora-docs-near/docs/` |
 | Pages and prototypes | `.html` | the repo they belong to |
-| Tables, budgets, checklists | `.xlsx` or `.csv` | `agentx-docs/docs/` |
+| Tables, budgets, checklists | `.xlsx` or `.csv` | `pactora-docs-near/docs/` |
 
 Reasons this is the rule, so nobody reverses it by accident:
 
@@ -44,5 +43,5 @@ Reasons this is the rule, so nobody reverses it by accident:
 
 ## Start here
 
-`agentx-backend/PROGRESS.md` — current state, blockers, decisions, and the
+`pactora-backend-near/PROGRESS.md` — current state, blockers, decisions, and the
 cold-start section for resuming after a closed terminal.

@@ -1,14 +1,12 @@
 /**
  * Unsupported environment variables: names an older `.env` may still carry.
  *
- * Such a `.env` would otherwise boot quietly: the service reads
- * `PACTORA_API_URL`, finds nothing, and falls back to a default — talking to
- * the wrong API, or reading the wrong contracts checkout, and failing later
- * with an error about something else. Every entrypoint refuses instead,
- * naming the variable to use. A variable that is set but empty counts too.
+ * Such a `.env` would otherwise boot quietly: the service finds nothing under
+ * the name it reads and falls back to a default — a network nobody chose —
+ * failing later with an error about something else. Every entrypoint refuses
+ * instead, naming the variable to use. A variable that is set but empty counts
+ * too.
  */
-const LEGACY_PREFIX = 'AGENTX_';
-const PREFIX = 'PACTORA_';
 
 /**
  * Networks are keyed by CAIP-2 id (`near:testnet`, docs/NEAR-PORT.md §1),
@@ -22,9 +20,6 @@ const NUMERIC_NETWORK_VARS: Record<string, string> = {
 const NUMERIC_RPC_VAR = /^RPC_URL_\d+$/;
 
 function problemOf(name: string): string | null {
-  if (name.startsWith(LEGACY_PREFIX)) {
-    return `${name} is an unsupported variable — use ${PREFIX}${name.slice(LEGACY_PREFIX.length)}`;
-  }
   const numeric = NUMERIC_NETWORK_VARS[name];
   if (numeric) return `${name} is an unsupported variable — ${numeric}`;
   if (NUMERIC_RPC_VAR.test(name))

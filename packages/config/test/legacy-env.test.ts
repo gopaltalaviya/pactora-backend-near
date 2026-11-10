@@ -2,28 +2,28 @@ import {fileURLToPath} from 'node:url';
 import {describe, expect, it} from 'vitest';
 import {loadConfig} from '../src/index.js';
 
-// An unsupported variable in a `.env` (such as AGENTX_CONTRACTS_ROOT) would
-// otherwise boot on the default path and fail somewhere else, later, with a
-// confusing error.
+// An unsupported variable in a `.env` (such as DEFAULT_CHAIN_ID, a numeric
+// network id) would otherwise boot on the defaults and fail somewhere else,
+// later, with a confusing error.
 const contractsRoot = fileURLToPath(new URL('../../../chain', import.meta.url));
 const base = {ENABLED_CHAINS: 'near:sandbox'};
 
 describe('an unsupported variable refuses to start', () => {
-  it('names the PACTORA_* replacement', () => {
-    expect(() => loadConfig({contractsRoot, env: {...base, AGENTX_CONTRACTS_ROOT: contractsRoot}})).toThrow(
-      /AGENTX_CONTRACTS_ROOT.*unsupported.*PACTORA_CONTRACTS_ROOT/,
+  it('names the replacement', () => {
+    expect(() => loadConfig({contractsRoot, env: {...base, DEFAULT_CHAIN_ID: '1'}})).toThrow(
+      /DEFAULT_CHAIN_ID.*unsupported.*DEFAULT_CHAIN/,
     );
   });
 
   it('lists every stale variable at once, even an empty one', () => {
     let message = '';
     try {
-      loadConfig({contractsRoot, env: {...base, AGENTX_API_KEY: 'ax_x', AGENTX_SELF_URL: ''}});
+      loadConfig({contractsRoot, env: {...base, ENABLED_CHAIN_IDS: '1', RPC_URL_1: ''}});
     } catch (err) {
       message = (err as Error).message;
     }
-    expect(message).toMatch(/AGENTX_API_KEY.*PACTORA_API_KEY/);
-    expect(message).toMatch(/AGENTX_SELF_URL.*PACTORA_SELF_URL/);
+    expect(message).toMatch(/ENABLED_CHAIN_IDS.*ENABLED_CHAINS/);
+    expect(message).toMatch(/RPC_URL_1.*RPC_URL_<SLUG>/);
   });
 
   it('still loads when only the new names are set', () => {
