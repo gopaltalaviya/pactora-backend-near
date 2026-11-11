@@ -21,7 +21,7 @@ import {DB_URL, cursorRow, reset} from './db.js';
  * It TRUNCATEs like every indexer test: the scratch database only.
  */
 const LIVE = process.env['NEAR_LIVE'] === '1';
-const RPC = process.env['RPC_URL_TESTNET'] ?? 'https://rpc.testnet.near.org';
+const RPC = process.env['RPC_URL_TESTNET'] ?? 'https://test.rpc.fastnear.com';
 const NEARDATA = 'https://testnet.neardata.xyz';
 /** How far back to look for an ft_transfer. */
 const SEARCH_BLOCKS = 120;

@@ -93,7 +93,7 @@ describe('POST /v1/runs', () => {
       method: 'POST',
       url: '/v1/runs',
       headers: auth(apiKey),
-      payload: {goal: 'find the deepest ETH/USDC venue'},
+      payload: {goal: 'find the deepest NEAR/USDC venue'},
     });
 
     expect(res.statusCode).toBe(202);

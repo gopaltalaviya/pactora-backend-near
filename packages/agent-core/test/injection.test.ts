@@ -23,7 +23,7 @@ import {
  * resists injection", because that is a property of the model and the prompt,
  * measured by the eval set against a real provider, not by a unit test.
  *
- * The layer that actually bounds an injection is on-chain (AgentAccount caps),
+ * The layer that actually bounds an injection is on-chain (the purse caps in the contract),
  * and that is tested in the contract suite.
  */
 

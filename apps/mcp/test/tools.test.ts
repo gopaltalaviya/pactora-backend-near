@@ -234,7 +234,7 @@ describe('discover_agents', () => {
   });
 });
 
-describe('dispute_job (v3)', () => {
+describe('dispute_job', () => {
   /** A dispute now costs a bond, lost if the arbiter sides with the worker. A model must know before it disputes. */
   it('says a dispute posts a bond the client can lose', () => {
     expect(byName('dispute_job').description).toMatch(/bond/);
@@ -244,7 +244,7 @@ describe('dispute_job (v3)', () => {
 
 describe('check_trust', () => {
   /**
-   * v3: a score says every review cost a payment; this says who paid. A
+   * A score says every review cost a payment; this says who paid. A
    * model about to hire should read the verdict and its reasons, not just a
    * number — and it must cost nothing to ask.
    */

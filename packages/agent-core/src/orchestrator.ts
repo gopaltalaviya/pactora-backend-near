@@ -148,7 +148,7 @@ export type OrchestratorEvent =
   | {kind: 'plan-failed'; reason: string}
   | {kind: 'discovered'; capability: string; candidates: number}
   | {kind: 'selected'; capability: string; agentId: number; price: string; reason: string}
-  /** v3: left out of the pool by the trust check, before the model chose. */
+  /** Left out of the pool by the trust check, before the model chose. */
   | {kind: 'excluded'; capability: string; agentId: number; verdict: string; reason: string}
   | {kind: 'hired'; capability: string; jobId: string; amount: string; explorerUrl: string}
   | {
@@ -172,7 +172,7 @@ export interface OrchestratorOptions {
   judgeBrain?: Brain;
   log?: (event: OrchestratorEvent) => void;
   /**
-   * Trust verdicts that keep an agent out of the pool (v3). The default
+   * Trust verdicts that keep an agent out of the pool. The default
    * refuses only misconduct: an agent that paid for its own reviews, or one
    * that fails too often. `new` and `concentrated` describe thin or narrow
    * history, not bad behaviour — every worker a single orchestrator ever
@@ -318,7 +318,7 @@ export class Orchestrator {
           // It used to ask the planner for the field names a subtask must
           // produce, which is a guess about a worker it has not chosen yet
           // and whose schema it cannot see. The first live run had a planner
-          // answer ["eth","usdc","near"] — topic words — so every worker
+          // answer ["near","usdc","liquidity"] — topic words — so every worker
           // correctly refused work it could not satisfy and nothing was ever
           // hired. The coupling was brittle by construction, not badly
           // prompted: no planner can know what fields an unknown worker
@@ -403,7 +403,7 @@ export class Orchestrator {
       });
     }
 
-    // v3: who paid for each candidate's record decides whether it is in the
+    // Who paid for each candidate's record decides whether it is in the
     // pool at all. The verdicts never enter a prompt — the model chooses among
     // the agents that passed, so recorded replays still match.
     const excluded = await this.trustExclusions(spec.capability, candidates);

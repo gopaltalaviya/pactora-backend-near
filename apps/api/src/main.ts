@@ -44,7 +44,7 @@ const Env = z
     CORS_ORIGINS: env.csv(),
     TRUST_PROXY: env.trustProxy(),
     RATE_LIMIT_PER_MINUTE: env.positiveInt(600),
-    /** v3: `postgres` shares the limit between API replicas. */
+    /** `postgres` shares the limit between API replicas. */
     RATE_LIMIT_STORE: z.enum(['memory', 'postgres']).default('memory'),
     /** Open SSE streams per kind before new ones get 503 + retry-after. Each holds a socket. */
     SSE_MAX_STREAMS: env.positiveInt(1_000),
@@ -80,7 +80,7 @@ const Env = z
     DB_POOL_MAX: env.positiveInt(5),
     /** Blocks the indexer may trail the chain head before /v1/status says 'degraded'. */
     STATUS_MAX_INDEXER_LAG_BLOCKS: env.positiveInt(150),
-    /** NEP-413 `recipient` the owner's wallet signs for (docs/NEAR-PORT.md §5). */
+    /** NEP-413 `recipient` the owner's wallet signs for (docs/NEAR-WIRE.md §5). */
     PACTORA_SIGN_RECIPIENT: z.string().min(1).default(DEFAULT_SIGN_RECIPIENT),
     /** Evidence photo uploads (docs/26 F6): `on` needs the object store below; `off` refuses them. */
     EVIDENCE_UPLOADS: z.enum(['on', 'off']).default('on'),
@@ -228,7 +228,7 @@ const heads = new Map<string, ReturnType<typeof nearClient>>(
 const signerHealth = coalesce<unknown>(async () => {
   const res = await fetch(`${cfg.SIGNER_URL}/health`, {signal: AbortSignal.timeout(2_000)});
   if (!res.ok) throw new Error(`signer /health answered ${res.status}`);
-  // v3: the body carries the signer's gas reading, which /v1/status reports.
+  // The body carries the signer's gas reading, which /v1/status reports.
   return res.json().catch(() => undefined);
 }, 5_000);
 

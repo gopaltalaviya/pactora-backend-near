@@ -22,9 +22,8 @@ import {GAS, refusalOf} from './signer.js';
  * `get_job` on every sweep; the database only says which jobs are worth
  * asking about.
  *
- * An earlier keeper also re-wrote reviews an external registry had refused
- * (`retryFeedback`). NEAR has no counterpart: the contract writes reputation
- * in the same call that settles, so there is nothing left to retry.
+ * There is no review retry: the contract writes reputation in the same call
+ * that settles, so there is nothing left to retry.
  */
 
 /** The contract's `JobState`, as its JSON names it. */
@@ -216,8 +215,7 @@ export function onChainJobOf(v: JobView): OnChainJob {
  * Its nonce: the access key's + 1, but never one it already used — a send
  * whose outcome it never saw may still land, and reusing its nonce would make
  * the next one fail. Sends are sequential (one sweep, one job at a time), so
- * an in-memory high-water mark is enough; one keeper per chain is assumed,
- * as it was on EVM.
+ * an in-memory high-water mark is enough; one keeper per chain is assumed.
  */
 export function keeperSender(near: NearClient, chain: ChainConfig, account: ServiceAccount) {
   let last = 0n;

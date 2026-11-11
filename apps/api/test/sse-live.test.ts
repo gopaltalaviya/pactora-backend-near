@@ -11,7 +11,7 @@ import {listenForEvents} from '../src/live.js';
 import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
- * Live events across processes (v3). An SSE stream used to carry only what
+ * Live events across processes. An SSE stream used to carry only what
  * its own API process published: an event the indexer stored reached a
  * client only on its next reconnect, and a second replica never saw the
  * first one's events. A trigger now NOTIFYs every stored event, and each

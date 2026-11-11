@@ -1,4 +1,4 @@
--- v3: every stored event is announced on one channel, so an SSE stream on any
+-- Every stored event is announced on one channel, so an SSE stream on any
 -- API replica hears it live — the indexer's events as well as another
 -- replica's. Before this a stream carried only what its own process
 -- published, and anything else reached a client only on its next reconnect.

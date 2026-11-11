@@ -105,7 +105,7 @@ describe('a block that does not follow the last one', () => {
     await new Indexer({db, chain, source: a}).tick();
     const before = await cursorRow(db);
 
-    // Another chain from the same height on — a wrong source.
+    // A different network from the same height on — a wrong source.
     const b = new FakeChain(chain.startBlock + 5, 'B');
     b.empty(5);
     const indexer = new Indexer({db, chain, source: b});

@@ -8,7 +8,7 @@ import {buildApp, EventBus} from '../src/app.js';
 import {addr, chainDeps, signedRegistration} from './helpers/register.js';
 
 /**
- * Cursor pagination (v3). docs/17: "bounded `limit` only, no cursor" — past
+ * Cursor pagination. docs/17: "bounded `limit` only, no cursor" — past
  * the first page a caller could not see its own history at all.
  */
 const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.0.1:5443/pactora_near';

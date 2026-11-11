@@ -1,7 +1,7 @@
 import {readFileSync, existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {z} from 'zod';
-import {ACCOUNT_ID_RE, ChainId as ChainIdSchema, legacyEnvProblems, type ChainId} from '@pactora/shared';
+import {ACCOUNT_ID_RE, ChainId as ChainIdSchema, unsupportedEnvProblems, type ChainId} from '@pactora/shared';
 
 /**
  * @pactora/config — the ONE import for chain facts, protocol parameters and
@@ -17,7 +17,7 @@ import {ACCOUNT_ID_RE, ChainId as ChainIdSchema, legacyEnvProblems, type ChainId
  *   env                         secrets and wiring ONLY
  *
  * No chain object is defined anywhere else. No contract account is ever an env
- * var. See docs/NEAR-PORT.md §3.
+ * var. See docs/NEAR-WIRE.md §3.
  */
 
 // ── schemas ──────────────────────────────────────────────────────────────
@@ -35,10 +35,16 @@ const NetworkSchema = z.object({
   testnet: z.boolean(),
   nativeCurrency: z.object({name: z.string(), symbol: z.string(), decimals: z.number().int()}),
   rpcUrls: z.array(z.string().url()).min(1),
-  /** Where the indexer reads final blocks: neardata (testnet, mainnet) or RPC polling (sandbox). */
+  /**
+   * Where the indexer reads final blocks: neardata (every block; needs a paid
+   * key to keep pace with testnet), RPC polling (sandbox), or `accounts`:
+   * FastNEAR's transactions API, only the transactions touching Pactora and
+   * its token (testnet, free; packages/near accountsSource).
+   */
   blockSource: z.discriminatedUnion('kind', [
     z.object({kind: z.literal('neardata'), url: z.string().url()}),
     z.object({kind: z.literal('rpc')}),
+    z.object({kind: z.literal('accounts'), url: z.string().url()}),
   ]),
   blockExplorerUrls: z.array(z.string().url()),
   faucetUrls: z.array(z.string().url()).default([]),
@@ -186,8 +192,8 @@ export function loadConfig(opts: LoadOptions = {}): PactoraConfig {
   const env = opts.env ?? process.env;
   // Before anything else: an unsupported variable would otherwise
   // send the loader to the defaults and report a confusing problem there.
-  const legacy = legacyEnvProblems(env);
-  if (legacy.length > 0) throw new ConfigError(legacy);
+  const unsupported = unsupportedEnvProblems(env);
+  if (unsupported.length > 0) throw new ConfigError(unsupported);
   const root = opts.contractsRoot ?? defaultContractsRoot(env);
 
   const problems: string[] = [];

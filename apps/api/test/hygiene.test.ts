@@ -151,7 +151,7 @@ describe('request hygiene', () => {
   it('the OpenAPI document describes NEAR and its payment token', async () => {
     const doc = (await app.inject({url: '/v1/openapi.json'})).json();
     expect(doc.info.description).toMatch(/NEAR/);
-    expect(JSON.stringify(doc)).not.toMatch(/\bMON\b/);
+    expect(JSON.stringify(doc)).toMatch(/the payment token/);
   });
 });
 

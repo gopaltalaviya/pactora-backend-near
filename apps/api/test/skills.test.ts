@@ -53,7 +53,7 @@ async function register(name: string, capabilities: string[], wallet: string) {
   });
   expect(res.statusCode).toBe(201);
   const id = Number(res.json().agentId);
-  // Stand in for the chain confirming the on-chain agent id: since v3 discovery
+  // Stand in for the chain confirming the on-chain agent id: discovery
   // lists only confirmed agents (an unconfirmed one can never be hired).
   return id;
 }

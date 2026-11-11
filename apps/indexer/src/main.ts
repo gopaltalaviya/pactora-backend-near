@@ -24,8 +24,10 @@ import {openSource} from './source.js';
  * Running testnet and mainnet together is a config value, not a second
  * deployment — `ENABLED_CHAINS=near:testnet,near:mainnet` and both are watched.
  * Each reads final blocks from the network's `blockSource`: neardata on
- * testnet and mainnet, RPC polling on the local sandbox (docs/NEAR-PORT.md §3).
+ * testnet and mainnet, RPC polling on the local sandbox (docs/NEAR-WIRE.md §3).
  */
+/** The fastest a sparse (`accounts`) source is polled. */
+const SPARSE_MIN_POLL_MS = 6_000;
 const Env = z.object({
   DATABASE_URL: env.postgresUrl(),
   INDEXER_POLL_MS: env.positiveInt(2_000),
@@ -111,7 +113,10 @@ const workersDone = Promise.all(
         ticks.labels(String(chain.chainId), 'ok').inc();
       },
       {
-        pollMs: cfg.INDEXER_POLL_MS,
+        // A sparse source is a rate-limited API (FastNEAR's free tx API: fine
+        // at ~40 calls a minute, 429 at ~120, measured 2026-11-11), three
+        // calls a tick: never faster than every SPARSE_MIN_POLL_MS.
+        pollMs: source.blocksIn ? Math.max(cfg.INDEXER_POLL_MS, SPARSE_MIN_POLL_MS) : cfg.INDEXER_POLL_MS,
         maxBackoffMs: cfg.INDEXER_MAX_BACKOFF_MS,
         signal: shutdown.signal,
         onError: (err, failures, nextDelayMs) => {

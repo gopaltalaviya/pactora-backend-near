@@ -9,7 +9,7 @@ import {chainDeps} from './helpers/register.js';
 import {buildApp, EventBus} from '../src/app.js';
 
 /**
- * Resumable streams (v3). docs/17: "no event ids (`Last-Event-ID` ignored)".
+ * Resumable streams. docs/17: "no event ids (`Last-Event-ID` ignored)".
  * A reconnecting EventSource sends the id of the last event it saw; without
  * ids it got the whole history again and a page drew every step twice. Each
  * event's id is its row id — stored first, so ids are unique and ordered.

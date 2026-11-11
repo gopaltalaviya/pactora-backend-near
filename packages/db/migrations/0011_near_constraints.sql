@@ -1,20 +1,20 @@
--- NEAR port (docs/NEAR-PORT.md §1–2). Hand-written; sorts before the
+-- NEAR identifiers (docs/NEAR-WIRE.md §1–2). Hand-written; sorts before the
 -- generated 0011_near_network_keys, which turns every chain_id into text.
 
--- 1. This database must not hold EVM rows. Their chain_id (10143, 31337)
---    would become the text '10143' — a key no NEAR service ever asks for —
---    and their 0x addresses would fail the checks below in a confusing way.
+-- 1. This migration needs an empty database. Rows keyed by a numeric
+--    chain_id would become text no NEAR service ever asks for, and
+--    non-NEAR account ids would fail the checks below in a confusing way.
 --    A NEAR deployment starts from an empty database; say so plainly.
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM agents) OR EXISTS (SELECT 1 FROM jobs) OR EXISTS (SELECT 1 FROM token_transfers) THEN
-    RAISE EXCEPTION 'this database holds EVM-chain rows; the NEAR build needs an empty database (see docs/NEAR-PORT.md)';
+    RAISE EXCEPTION 'this database already holds agents, jobs or transfers; the NEAR schema needs an empty database (see docs/NEAR-WIRE.md)';
   END IF;
 END $$;
 
 -- 2. Accounts are NEAR account ids, not 0x addresses: 2–64 characters,
 --    nearcore's rule. Lower case is part of the rule, which keeps the trust
---    queries' `=` comparisons sound, as the 0x checks did.
+--    queries' `=` comparisons sound.
 ALTER TABLE token_transfers
   DROP CONSTRAINT token_transfers_from_lower,
   DROP CONSTRAINT token_transfers_to_lower,

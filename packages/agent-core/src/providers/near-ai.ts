@@ -24,7 +24,7 @@ import {JudgeAttestationFailed, type CompletionRequest, type CompletionResult} f
  * provider's TEE, and `GET /v1/signature/<response id>` returns the
  * signature. The signed text is `sha256(request bytes):sha256(response
  * bytes)` (a model prefix is tolerated); the algorithm is `ed25519` or
- * `ecdsa` (EIP-191, an Ethereum-style address). With `requireAttestation`
+ * `ecdsa` (a secp256k1 ECDSA (EIP-191) signing address). With `requireAttestation`
  * (the default) a verdict whose signature is missing or does not verify is
  * refused with JudgeAttestationFailed — not retried elsewhere, since a
  * recording cannot stand in for a signed ruling — and the verified
@@ -191,7 +191,7 @@ export function verifyEd25519(text: string, signature: string, signingAddress: s
   }
 }
 
-/** EIP-191 personal_sign: keccak256("\x19Ethereum Signed Message:\n<len><text>"), a 65-byte r‖s‖v signature, an Ethereum address. */
+/** EIP-191 personal_sign: keccak256("\x19Ethereum Signed Message:\n<len><text>"), a 65-byte r‖s‖v signature, a secp256k1 ECDSA (EIP-191) signing address. */
 export function verifyEip191(text: string, signature: string, signingAddress: string): boolean {
   const sig = bytesOf(signature, 65);
   if (!sig || !/^0x[0-9a-fA-F]{40}$/.test(signingAddress)) return false;

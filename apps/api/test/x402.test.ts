@@ -414,7 +414,7 @@ describe('POST /v1/x402/redeem — the worker checks, once', () => {
 });
 
 /**
- * v3: the refundable scheme. `pactora-escrow` settles as an escrow job, so the
+ * The refundable scheme. `pactora-escrow` settles as an escrow job, so the
  * money waits in the escrow while the worker works and a failed job refunds.
  * Not capped at fastPathMax (nothing is paid before the work), only at the
  * escrow's maxJobAmount.

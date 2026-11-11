@@ -3,7 +3,7 @@
  *
  * Every service reaches the chain through `NearClient`, an interface, so tests
  * inject a fake and production uses `nearClient(rpcUrl)` (near-api-js 7.4's
- * `JsonRpcProvider` underneath). Wire shapes are docs/NEAR-PORT.md.
+ * `JsonRpcProvider` underneath). Wire shapes are docs/NEAR-WIRE.md.
  */
 import {createHash} from 'node:crypto';
 import {

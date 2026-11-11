@@ -9,7 +9,7 @@ import {ACCOUNT_ID_RE, ErrorCode, PactoraError} from '@pactora/shared';
  * Where the signer's keys come from, behind one interface.
  *
  * On NEAR an agent's wallet is an account holding a FUNCTION-CALL key scoped
- * to the Pactora contract (docs/NEAR-PORT.md §5): the owner adds it with
+ * to the Pactora contract (docs/NEAR-WIRE.md §5): the owner adds it with
  * `AddKey`, after the signer generated it (`POST /keys`). The key can call the
  * contract and nothing else, and cannot attach a deposit. What it can move is
  * bounded by the contract's purse caps, on chain.
@@ -325,7 +325,7 @@ export class DbKeyStore implements KeyStore {
 
   /**
    * Remove keys nobody claimed (audit M1). A key is handed out BEFORE its
-   * account exists — the owner creates the account with it (NEAR-PORT §5,
+   * account exists — the owner creates the account with it (NEAR-WIRE §5,
    * step 2) — so anyone may leave a row for a made-up account. After the
    * grace period, a row whose account is not on chain and that no agent row
    * names is deleted. A row whose account exists is kept, registered or not:

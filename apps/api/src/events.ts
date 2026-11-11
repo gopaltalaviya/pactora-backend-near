@@ -17,7 +17,7 @@ export interface StreamEvent {
   event: string;
   data: Record<string, unknown>;
   /**
-   * The stored row's id (v3). Sent as the SSE `id:`, so a reconnecting
+   * The stored row's id. Sent as the SSE `id:`, so a reconnecting
    * EventSource says where it got to and is sent only what came after.
    */
   id?: number;
@@ -201,7 +201,7 @@ export async function streamEvents(
     reply.raw.write(`${id}event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`);
   };
 
-  // v3: subscribe BEFORE the replay query, holding live events until the
+  // Subscribe BEFORE the replay query, holding live events until the
   // replay is written. v2 replayed and then subscribed, and an event
   // committed in between was in neither: lost, not late.
   let held: StreamEvent[] | null = [];

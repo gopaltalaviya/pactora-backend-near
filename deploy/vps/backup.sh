@@ -60,7 +60,13 @@ verify_hmac "$db" || {
   exit 1
 }
 # A dump that decrypts but that pg_restore cannot list is not a backup.
-tables="$(decrypt < "$db" | docker exec -i "$PG_CONTAINER" pg_restore --list | awk '$4 == "TABLE" && $5 != "DATA"' | wc -l)"
+# The container reads the whole dump into a file before listing it:
+# `pg_restore --list` reads only the table of contents and closes its stdin,
+# which on Linux made openssl fail ("error writing output file") and, under
+# pipefail, aborted the backup before the evidence archive (VPS, 2026-11-11).
+tables="$(decrypt < "$db" | docker exec -i "$PG_CONTAINER" sh -c \
+  'f=/tmp/pactora-list.dump; cat > "$f" && pg_restore --list "$f"; rc=$?; rm -f "$f"; exit $rc' \
+  | awk '$4 == "TABLE" && $5 != "DATA"' | wc -l)"
 if [ "${tables:-0}" -eq 0 ]; then
   echo "$(date -u +%FT%TZ) backup FAILED: $db lists no tables" >&2
   exit 1

@@ -1,4 +1,4 @@
--- v3: the funding graph. Constraints Drizzle cannot express, applied after
+-- The funding graph. Constraints Drizzle cannot express, applied after
 -- 0006_tiresome_blackheart created the table (this name sorts after it).
 
 -- Lower-case hex only. The trust queries compare addresses with `=`, so one

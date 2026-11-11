@@ -6,7 +6,7 @@ import {DEFAULT_SIGN_RECIPIENT, makeOwnerVerifier, type OwnerVerifier} from '../
 import type {WalletKeys} from '../../src/routes/agents.js';
 
 /**
- * Registering as a real registrant does (audit M1, docs/NEAR-PORT.md §5): the
+ * Registering as a real registrant does (audit M1, docs/NEAR-WIRE.md §5): the
  * agent exists on chain, the owner asks for a challenge, signs it with NEP-413
  * using a FULL-ACCESS key, and registers with the signature.
  *

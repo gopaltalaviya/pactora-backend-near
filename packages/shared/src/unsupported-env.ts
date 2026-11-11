@@ -1,5 +1,5 @@
 /**
- * Unsupported environment variables: names an older `.env` may still carry.
+ * Unsupported environment variables: names a `.env` may carry by mistake.
  *
  * Such a `.env` would otherwise boot quietly: the service finds nothing under
  * the name it reads and falls back to a default — a network nobody chose —
@@ -9,7 +9,7 @@
  */
 
 /**
- * Networks are keyed by CAIP-2 id (`near:testnet`, docs/NEAR-PORT.md §1),
+ * Networks are keyed by CAIP-2 id (`near:testnet`, docs/NEAR-WIRE.md §1),
  * never by number; a numeric-network variable would otherwise boot on the
  * defaults and talk to a network nobody chose.
  */
@@ -28,24 +28,24 @@ function problemOf(name: string): string | null {
 }
 
 /** One message per stale variable, sorted; empty when there are none. */
-export function legacyEnvProblems(env: Record<string, string | undefined>): string[] {
+export function unsupportedEnvProblems(env: Record<string, string | undefined>): string[] {
   return Object.keys(env)
     .sort()
     .map(problemOf)
     .filter((p): p is string => p !== null);
 }
 
-export class LegacyEnvError extends Error {
+export class UnsupportedEnvError extends Error {
   constructor(readonly problems: string[]) {
     super(
       `refusing to start — unsupported environment variables are set:\n${problems.map((p) => `  - ${p}`).join('\n')}`,
     );
-    this.name = 'LegacyEnvError';
+    this.name = 'UnsupportedEnvError';
   }
 }
 
-/** Throw a `LegacyEnvError` if any unsupported variable is set. */
-export function assertNoLegacyEnv(env: Record<string, string | undefined> = process.env): void {
-  const problems = legacyEnvProblems(env);
-  if (problems.length > 0) throw new LegacyEnvError(problems);
+/** Throw a `UnsupportedEnvError` if any unsupported variable is set. */
+export function assertNoUnsupportedEnv(env: Record<string, string | undefined> = process.env): void {
+  const problems = unsupportedEnvProblems(env);
+  if (problems.length > 0) throw new UnsupportedEnvError(problems);
 }

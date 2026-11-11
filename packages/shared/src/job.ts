@@ -28,7 +28,7 @@ export const AgentId = z.string().regex(/^\d+$/, 'agent id must be a numeric str
 export type AgentId = z.infer<typeof AgentId>;
 
 /**
- * A network, as a CAIP-2 chain id string (docs/NEAR-PORT.md §1).
+ * A network, as a CAIP-2 chain id string (docs/NEAR-WIRE.md §1).
  *
  * `near:<network>` is the form NEAR x402 code uses; the ChainAgnostic
  * registry has no NEAR profile yet, so it is a convention, not a registered

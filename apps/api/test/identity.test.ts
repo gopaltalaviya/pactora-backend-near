@@ -9,11 +9,11 @@ import type {IdentityReading} from '../src/chain-reads.js';
 import {accepted, addr, fakeOwnerVerifier, fakeWalletKeys, signedRegistration} from './helpers/register.js';
 
 /**
- * Linking a Pactora record to its on-chain agent (docs/NEAR-PORT.md §5).
+ * Linking a Pactora record to its on-chain agent (docs/NEAR-WIRE.md §5).
  *
- * On EVM nothing did, for a while: the route said `chain_agent_id` "stays NULL
- * until the indexer observes the registration", and the indexer never did —
- * so agents registered through the API could never be hired. On NEAR the id is
+ * Leaving it to the indexer ("`chain_agent_id` stays NULL until the indexer
+ * observes the registration") would mean an agent registered through the API
+ * could never be hired if the indexer missed it. So the id is
  * REQUIRED, and the contract confirms it before it is stored: the agent must
  * exist, belong to the registrant, not be frozen, and name the wallet given —
  * accepted, or proposed and then accepted by the signer with the wallet's own

@@ -4,7 +4,7 @@ import {decodeFtTransfers, decodePactoraEvent} from '../src/events.js';
 import {GOLDEN, log} from './near-fixtures.js';
 
 /**
- * NEP-297 → the indexer's kinds and payloads (docs/NEAR-PORT.md §7).
+ * NEP-297 → the indexer's kinds and payloads (docs/NEAR-WIRE.md §7).
  *
  * Every input here is a log line the contract really emits (GOLDEN, captured
  * from events.rs). The payload keys are the camelCase ones the API and the

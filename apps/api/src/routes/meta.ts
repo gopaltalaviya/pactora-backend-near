@@ -26,7 +26,7 @@ const Bps = z.number().int().min(0).max(10_000).describe('Basis points: 100 = 1%
  * document states exactly: it is what a client reads before it spends, and a
  * test holds the live response to it. The fee and limit fields come from
  * `chain/config/params.<slug>.json`, whose `onchain` half is what the
- * contract was deployed with. Shape: docs/NEAR-PORT.md §4.
+ * contract was deployed with. Shape: docs/NEAR-WIRE.md §4.
  */
 export const NetworkResponse = z.object({
   chainId: z.string().describe('CAIP-2 chain id, e.g. near:testnet'),
@@ -162,7 +162,7 @@ export async function registerMetaRoutes(app: FastifyInstance, deps: MetaRouteDe
   /**
    * What the caller may still spend.
    *
-   * The chain is the authority — `AgentAccount` is what will actually revert —
+   * The chain is the authority — the contract's purse is what will actually refuse —
    * so a live read wins and the cached policy is the fallback. Which one
    * answered is reported in `source`, because "0.20 left" from a stale cache
    * and "0.20 left" from the contract are not the same claim.
@@ -278,9 +278,9 @@ const max0 = (v: bigint) => (v > 0n ? v : 0n);
 const min = (a: bigint, b: bigint) => (a < b ? a : b);
 
 /**
- * Seconds until an `AgentAccount`'s rolling cap next gives capacity back.
+ * Seconds until a purse's rolling cap next gives capacity back.
  *
- * v3: no 24 hours may exceed the cap, so nothing "resets"; the account says
+ * No 24 hours may exceed the cap, so nothing "resets"; the account says
  * when its oldest counted spend leaves the window. An agent told to wait
  * longer sits idle; told shorter, it is refused again.
  */
@@ -290,7 +290,7 @@ function releasesIn(nextReleaseAt: bigint): number {
 }
 
 /**
- * Seconds until a plain-EOA agent's off-chain cap refills: the signer's
+ * Seconds until the cached off-chain cap refills (no purse reading): the signer's
  * cached 24h window, which still opens at a spend.
  */
 function resetsIn(cachedDayStart: Date | undefined, spentToday: bigint): number {

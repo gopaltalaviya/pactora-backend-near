@@ -24,7 +24,7 @@ function copyRoot(file: string, edit: (j: Json) => void): string {
 
 const sandbox = {ENABLED_CHAINS: 'near:sandbox'};
 
-describe('NEAR network config (docs/NEAR-PORT.md §3)', () => {
+describe('NEAR network config (docs/NEAR-WIRE.md §3)', () => {
   it('keys networks by CAIP-2 id and reads files by slug', () => {
     const c = loadConfig({contractsRoot: realRoot, env: sandbox}).chain('near:sandbox');
     expect(c.chainId).toBe('near:sandbox');
@@ -74,7 +74,7 @@ describe('NEAR network config (docs/NEAR-PORT.md §3)', () => {
     ).toThrow(/DEFAULT_CHAIN=near:testnet is not in ENABLED_CHAINS/);
   });
 
-  it('refuses a deployment file that names another chain', () => {
+  it('refuses a deployment file that names another network', () => {
     const root = copyRoot('deployments/sandbox.json', (d) => {
       d['chainId'] = 'near:testnet';
     });

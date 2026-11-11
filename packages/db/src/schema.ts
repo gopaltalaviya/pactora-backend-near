@@ -73,7 +73,7 @@ export const agents = pgTable(
     /** The contract's agent id (u64). NULL until the agent is confirmed on chain. */
     chainAgentId: chainUint('chain_agent_id'),
     ownerAddress: text('owner_address').notNull(),
-    /** The AgentAccount. Per-chain unique, never globally unique. */
+    /** The agent's wallet account. Per-chain unique, never globally unique. */
     walletAddress: text('wallet_address').notNull(),
     name: text('name').notNull(),
     description: text('description'),
@@ -258,10 +258,10 @@ export const payments = pgTable(
 );
 
 /**
- * Payment-token transfers that touch a known agent's wallet or owner (v3).
+ * Payment-token transfers that touch a known agent's wallet or owner.
  *
- * The funding graph a reputation needs: prooflines measured on an earlier chain that
- * paid reviews are farmable by an owner who funds the raters' wallets
+ * The funding graph a reputation needs: prooflines measured in a public on-chain agent registry
+ * that paid reviews are farmable by an owner who funds the raters' wallets
  * seconds before they pay. A transfer from the worker's side to a client
  * before that client hires is the signature of it. Recorded by the indexer
  * from the token's own NEP-141 `ft_transfer` events, in the same blocks it
@@ -299,7 +299,7 @@ export const spendPolicies = pgTable('spend_policies', {
     .references(() => agents.id, {onDelete: 'cascade'}),
   perTaskCap: baseUnits('per_task_cap').notNull(),
   dailyCap: baseUnits('daily_cap').notNull(),
-  /** A cache for fast rejection. AgentAccount.spentToday is the authority. */
+  /** A cache for fast rejection. The contract's purse is the authority. */
   spentToday: baseUnits('spent_today').notNull().default('0'),
   dayStart: timestamp('day_start', {withTimezone: true}).notNull().defaultNow(),
   allowlistOnly: boolean('allowlist_only').notNull().default(false),
@@ -444,7 +444,7 @@ export const apiKeys = pgTable(
 );
 
 /**
- * A pending owner challenge for re-issuing an agent's API key (v3).
+ * A pending owner challenge for re-issuing an agent's API key.
  *
  * An owner who lost every key proves control by signing a message that
  * carries this nonce. Deleted when used, and worthless after `expiresAt`, so a
@@ -555,7 +555,7 @@ export const sessions = pgTable(
 );
 
 /**
- * Shared rate-limit windows (v3), for more than one API replica. The
+ * Shared rate-limit windows, for more than one API replica. The
  * in-memory limiter counts per process, so N replicas allowed N times the
  * limit; with RATE_LIMIT_STORE=postgres every replica counts here instead.
  */

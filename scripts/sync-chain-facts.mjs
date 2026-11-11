@@ -11,7 +11,7 @@
  * exactly those files, and the Dockerfile's default. pactora-contracts-near stays the
  * source of truth: this script is the only writer, and CI runs `--check`
  * against a fresh checkout, so a redeploy that is not synced here fails the
- * build instead of shipping an image that talks to the old contracts.
+ * build instead of shipping an image that talks to stale contracts.
  */
 
 import {existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';

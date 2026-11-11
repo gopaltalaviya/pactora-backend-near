@@ -55,7 +55,7 @@ class FakeBrain implements Brain {
     const reply =
       which === 'triage'
         ? (this.replies.triage ?? {accept: true, reason: 'within my capability'})
-        : (this.replies.result ?? {summary: 'ETH/USDC depth is healthy', confidence: 0.8});
+        : (this.replies.result ?? {summary: 'NEAR/USDC depth is healthy', confidence: 0.8});
 
     return {value: req.schema.parse(reply), provider: 'fake', model: 'fake', cached: false};
   }
@@ -120,7 +120,7 @@ function offer(over: Partial<JobSpec> = {}, jobId = '1'): JobSummary {
     amountDisplay: '0.02 USDC',
     spec: {
       capability: 'market-research',
-      input: {question: 'how deep is ETH/USDC?'},
+      input: {question: 'how deep is NEAR/USDC?'},
       deadlineSeconds: 120,
       ...over,
     },
@@ -700,7 +700,7 @@ describe('judging only its own part of a goal', () => {
   it('tells the model that the rest of the goal belongs to other agents', async () => {
     const brain = new FakeBrain();
     const {worker} = build(
-      [offer({input: {goal: 'research ETH/USDC, then prepare the execution plan', step: '1 of 3'}})],
+      [offer({input: {goal: 'research NEAR/USDC, then prepare the execution plan', step: '1 of 3'}})],
       brain,
     );
     let system = '';

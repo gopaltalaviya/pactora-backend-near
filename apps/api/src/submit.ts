@@ -7,7 +7,7 @@ import type {WalletKeys} from './routes/agents.js';
  * Turn an API action into a policy-checked, signed transaction.
  *
  * The API never holds a key. It names the contract call — a method and its
- * JSON arguments (docs/NEAR-PORT.md §6) — hands it to the signer over private
+ * JSON arguments (docs/NEAR-WIRE.md §6) — hands it to the signer over private
  * networking, and reports what came back. That separation is what makes "the
  * API is compromised" survivable: an attacker gets to *propose* calls, and the
  * signer's policy plus the contract's caps on the agent's purse decide
@@ -129,7 +129,7 @@ export function makeSignerSubmit(deps: SignerSubmitDeps): JobRouteDeps['submit']
   };
 }
 
-/** The signer's agent keys, for registration (docs/NEAR-PORT.md §5–6). */
+/** The signer's agent keys, for registration (docs/NEAR-WIRE.md §5–6). */
 export function makeSignerWalletKeys(deps: SignerSubmitDeps): WalletKeys {
   return {
     async publicKeyFor({walletAddress}) {

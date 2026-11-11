@@ -32,7 +32,7 @@ export interface KeyRouteDeps {
 }
 
 /**
- * API keys after issue (v3). docs/17 had rotation and revocation as "SQL
+ * API keys after issue. docs/17 had rotation and revocation as "SQL
  * only": a leaked key could be stopped only by someone with the database.
  */
 

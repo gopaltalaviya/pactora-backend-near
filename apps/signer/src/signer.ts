@@ -29,7 +29,7 @@ import type {KeySource} from './keystore.js';
  * Key material lives here and nowhere else — the API never touches it. Every
  * request is checked, deduplicated, nonce-ordered, and only then signed.
  *
- * On NEAR (docs/NEAR-PORT.md §6) every call is a single function call to the
+ * On NEAR (docs/NEAR-WIRE.md §6) every call is a single function call to the
  * Pactora contract, signed with the agent wallet's FUNCTION-CALL key, 0
  * deposit, 100 Tgas, sent with `send_tx` and waited on until FINAL. The
  * checks here mirror what the contract enforces — its purse caps, its
@@ -38,7 +38,7 @@ import type {KeySource} from './keystore.js';
  * refuses and the caller gets its error by name.
  */
 
-/** The calls the API makes for an agent, and nothing else (NEAR-PORT §6). */
+/** The calls the API makes for an agent, and nothing else (NEAR-WIRE §6). */
 export const ALLOWED_METHODS = [
   'create_job',
   'direct_pay',
@@ -110,7 +110,7 @@ export interface SignerDeps {
   logger?: Logger;
 }
 
-/** Every call: 100 Tgas (NEAR-PORT §6). */
+/** Every call: 100 Tgas (NEAR-WIRE §6). */
 export const GAS = 100n * TGAS;
 
 const NEAR = 10n ** 24n;
@@ -396,7 +396,7 @@ export class SignerService {
   /**
    * `accept_wallet` for a wallet whose agent row does not exist yet: during
    * registration the wallet must accept BEFORE the API inserts the agent
-   * (NEAR-PORT §5 (d)), so there is no agent id to key `/sign` on.
+   * (NEAR-WIRE §5 (d)), so there is no agent id to key `/sign` on.
    *
    * Idempotent through the chain itself: an already-accepted wallet answers
    * `alreadyAccepted` and nothing is sent. Its transactions are recorded in
@@ -535,7 +535,7 @@ export class SignerService {
           'the owner must add a new key',
       );
     }
-    // An empty list means every method of the receiver (NEAR-PORT §5 adds it so).
+    // An empty list means every method of the receiver (NEAR-WIRE §5 adds it so).
     if (fc.method_names.length > 0 && !fc.method_names.includes(method)) {
       throw new PactoraError(ErrorCode.FORBIDDEN, `the key held for ${wallet} may not call ${method}`);
     }
@@ -583,10 +583,9 @@ export class SignerService {
    * The purse rules, in the contract's order (`spend`, then `budget::charge`):
    * balance, per-task cap, rolling daily cap. Read under the wallet lock and
    * after the previous call from this wallet is FINAL, so the view already
-   * counts it. So the EVM build's off-chain reservation in `spend_policies`
-   * is gone: it bounded plain-EOA wallets that nothing on chain bounded,
-   * and here the contract bounds every wallet; a second, off-chain copy of
-   * the caps could only disagree with it.
+   * counts it. There is no off-chain reservation in `spend_policies`: the
+   * contract bounds every wallet, and a second, off-chain copy of the caps
+   * could only disagree with it.
    */
   private async checkPurse(chainAgentId: number, spend: bigint, nowNs: bigint): Promise<void> {
     const {chain} = this.deps;
@@ -838,8 +837,8 @@ export class SignerService {
 
   /**
    * Serialise per wallet account using a Postgres advisory lock — the unit a
-   * nonce belongs to. One agent has one wallet, so this is the per-agent lock
-   * of the EVM build; keying it on the wallet also covers `acceptWallet`,
+   * nonce belongs to. One agent has one wallet, so this is a per-agent lock;
+   * keying it on the wallet also covers `acceptWallet`,
    * which runs before there is an agent row. A database lock holds across
    * process restarts and replicas; an in-process mutex would not.
    */

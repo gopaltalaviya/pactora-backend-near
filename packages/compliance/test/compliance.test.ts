@@ -21,7 +21,7 @@ import {
 const SDN = [
   '36,"AEROCARIBBEAN AIRLINES",-0- ,"CUBA",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ',
   '2674,"ABBAS, Abu","individual","SDGT","Director of PALESTINE LIBERATION FRONT",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,"DOB 10 Dec 1948; POB Baghdad, Iraq."',
-  '9001,"KARIMOV, Rustam","individual","CYBER2",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,"Digital Currency Address - XBT 1AbcDEF; Digital Currency Address - ETH 0xdeadBEEF; alt. Digital Currency Address - ETH 0x1234;"',
+  '9001,"KARIMOV, Rustam","individual","CYBER2",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,"Digital Currency Address - XBT 1AbcDEF; Digital Currency Address - TRX TdeadBEEF; alt. Digital Currency Address - USDT T1234;"',
   '9002,"OCEAN STAR","vessel","IRAN",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,"Vessel ""quoted"" name."',
 ].join('\r\n');
 const ALT = [
@@ -156,8 +156,8 @@ describe('parseOfac', () => {
   it('reads digital currency addresses from the remarks, by ticker', () => {
     expect(byRef('9001').addresses).toEqual([
       {ticker: 'XBT', address: '1AbcDEF'},
-      {ticker: 'ETH', address: '0xdeadBEEF'},
-      {ticker: 'ETH', address: '0x1234'},
+      {ticker: 'TRX', address: 'TdeadBEEF'},
+      {ticker: 'USDT', address: 'T1234'},
     ]);
     expect(byRef('2674').addresses).toBeUndefined();
   });

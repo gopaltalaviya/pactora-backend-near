@@ -9,7 +9,7 @@ import {AccountId, BaseUnits, Capability, ChainId, TxHash, type JobSpec} from '.
  * client that speaks x402 recognises the conversation. The SCHEME is ours,
  * and it is named for what it is rather than borrowing `exact`:
  *
- * - `exact` has the client sign an EIP-3009 `transferWithAuthorization`,
+ * - `exact` has the client sign a token transfer authorization,
  *   which the facilitator submits. NEP-141 has no such function, and
  *   more to the point a Pactora agent's key lives in the signer, not in the
  *   agent — there is nothing for the agent to sign with.
@@ -22,7 +22,7 @@ import {AccountId, BaseUnits, Capability, ChainId, TxHash, type JobSpec} from '.
  * worker's only question — "was I paid, for this, and not already?" — is one
  * the facilitator answers from the chain and a one-row ledger.
  *
- * - `pactora-escrow` (v3) is the refundable one. The facilitator settles the
+ * - `pactora-escrow` is the refundable one. The facilitator settles the
  *   payment as an escrow job, so the money waits in the escrow while the
  *   worker works. The worker does the work first; only then does it accept
  *   and submit on chain. A worker that cannot deliver declines, and the client
@@ -39,7 +39,7 @@ export type X402Scheme = z.infer<typeof X402Scheme>;
 
 export const PaymentRequirements = z.object({
   scheme: X402Scheme,
-  /** The CAIP-2 network, e.g. `near:testnet`. A payment on another chain is refused. */
+  /** The CAIP-2 network, e.g. `near:testnet`. A payment on another network is refused. */
   network: ChainId,
   /** What this resource costs, in token base units. */
   maxAmountRequired: BaseUnits,
@@ -111,9 +111,9 @@ export type X402InvalidReason =
   | 'payment_pending'
   | 'payment_reverted'
   | 'already_redeemed'
-  /** v3: the payment's scheme is not the one the quote names. */
+  /** The payment's scheme is not the one the quote names. */
   | 'wrong_scheme'
-  /** v3: an escrow payment the client has already cancelled or that has ended. */
+  /** An escrow payment the client has already cancelled or that has ended. */
   | 'payment_withdrawn';
 
 /**
