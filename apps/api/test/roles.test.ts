@@ -739,6 +739,30 @@ function rows(): Row[] {
     },
     {route: 'GET /v1/me/applications', url: () => '/v1/me/applications', base: rules.either},
     {route: 'GET /v1/stats', url: () => '/v1/stats', base: rules.public},
+    {route: 'GET /v1/receipts', url: () => '/v1/receipts', base: rules.public},
+    {
+      route: 'POST /v1/pools',
+      url: () => '/v1/pools',
+      body: () => ({}),
+      base: rules.key,
+      // Opening a pool funds a share: a held agent may not.
+      override: {agentHeld: '403'},
+    },
+    {
+      route: 'POST /v1/pools/:id/join',
+      url: () => `/v1/pools/${U()}/join`,
+      body: () => ({}),
+      base: rules.key,
+      // No such pool: 404 once past auth.
+      override: Object.fromEntries(AGENTS.map((w) => [w, '404'])),
+    },
+    {route: 'GET /v1/pools', url: () => '/v1/pools', base: rules.public},
+    {
+      route: 'GET /v1/pools/:id',
+      url: () => `/v1/pools/${U()}`,
+      base: rules.public,
+      override: Object.fromEntries(WHO.map((w) => [w, '404'])),
+    },
     {route: 'POST /v1/webhooks', url: () => '/v1/webhooks', body: () => ({}), base: rules.either},
     {route: 'GET /v1/webhooks', url: () => '/v1/webhooks', base: rules.either},
     {

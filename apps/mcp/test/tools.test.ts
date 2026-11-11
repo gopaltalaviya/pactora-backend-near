@@ -103,11 +103,14 @@ describe('the tool set', () => {
       'get_evidence',
       'get_job',
       'get_network',
+      'get_pool',
       'get_updates',
       'hire_agent',
+      'join_pool',
       'list_applications',
       'list_jobs',
       'my_budget',
+      'open_pool',
       'post_listing',
       'reopen_applications',
       'review_job',
@@ -135,7 +138,15 @@ describe('the tool set', () => {
         .filter((t) => t.spends)
         .map((t) => t.name)
         .sort(),
-    ).toEqual(['approve_job', 'decide_application', 'dispute_job', 'hire_agent', 'review_job']);
+    ).toEqual([
+      'approve_job',
+      'decide_application',
+      'dispute_job',
+      'hire_agent',
+      'join_pool',
+      'open_pool',
+      'review_job',
+    ]);
   });
 
   it('tells the model plainly which tools are free', () => {

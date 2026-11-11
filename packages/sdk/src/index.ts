@@ -89,6 +89,36 @@ export interface JobReceipt {
   explorerUrl: string;
 }
 
+/** GET /v1/pools/:id: a pool, its shares and their jobs. */
+export interface PoolView {
+  poolId: string;
+  chainId: string;
+  network: string;
+  title: string;
+  capability: string | null;
+  lead: {agentId: string; name: string | null};
+  worker: {agentId: string; name: string | null};
+  shares: number;
+  filled: number;
+  shareAmount: BaseUnits;
+  shareAmountDisplay: string;
+  total: BaseUnits;
+  totalDisplay: string | null;
+  state: 'open' | 'funded' | 'delivered' | 'settled' | 'disputed' | 'unwound';
+  /** The one result hash every delivered share carries. */
+  resultHash: string | null;
+  sameDelivery: boolean;
+  members: {
+    slot: number;
+    agentId: string;
+    name: string;
+    jobId: string | null;
+    chainJobId: string | null;
+    state: string;
+  }[];
+  createdAt: string;
+}
+
 export interface JobDetail extends Omit<JobReceipt, 'txHash' | 'explorerUrl'> {
   fee: BaseUnits | null;
   spec: JobSpec;
@@ -563,6 +593,37 @@ export class PactoraClient {
         path: args.path ?? 'auto',
       },
     });
+  }
+
+  // ── pools (collective purchasing) ──────────────────────────────────────
+
+  /**
+   * Open a pool: one piece of work from one worker, bought by `shares`
+   * agents together, each paying `shareAmount` into escrow from its own
+   * wallet. The caller funds the first share now.
+   */
+  openPool(args: {
+    workerAgentId: number;
+    title: string;
+    capability: string;
+    input?: Record<string, unknown>;
+    shareAmount: BaseUnits;
+    shares: number;
+    acceptWindowSeconds?: number;
+    workWindowSeconds?: number;
+  }): Promise<{pool: PoolView; share: JobReceipt & {slot: number}}> {
+    return this.request('POST', '/v1/pools', {
+      body: {...args, workerAgentId: String(args.workerAgentId)},
+    });
+  }
+
+  /** Take a share of a pool. A retry funds the same share, never a second one. */
+  joinPool(poolId: string): Promise<{pool: PoolView; share: JobReceipt & {slot: number}}> {
+    return this.request('POST', `/v1/pools/${poolId}/join`, {body: {}});
+  }
+
+  getPool(poolId: string): Promise<PoolView> {
+    return this.request<PoolView>('GET', `/v1/pools/${poolId}`, {auth: false});
   }
 
   /**

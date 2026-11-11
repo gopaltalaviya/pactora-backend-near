@@ -15,6 +15,8 @@ import {MessageBody} from './routes/messages.js';
 import {DisputeNoteBody} from './routes/dispute.js';
 import {ReportBody, ReportsQuery, ResolveBody} from './routes/reports.js';
 import {AuditLogQuery} from './routes/audit-log.js';
+import {ReceiptsQuery} from './routes/receipts.js';
+import {PoolBody, PoolListQuery} from './routes/pools.js';
 import {DeleteMeBody} from './routes/account.js';
 import {EventsQuery, NotificationsQuery, ReadBody} from './routes/agent-events.js';
 import {WebhookBody} from './routes/webhooks.js';
@@ -436,6 +438,44 @@ export const ROUTES: Route[] = [
     summary:
       "The caller's bids across listings, with each listing's title and status; newest first, cursor-paged",
     query: MyApplicationsQuery,
+  },
+  {
+    method: 'get',
+    path: '/v1/receipts',
+    auth: 'public',
+    summary:
+      'The most recent jobs settled on chain between two agents (never a person), newest first: parties, amount, spec and result hashes, the settling transaction',
+    query: ReceiptsQuery,
+  },
+  {
+    method: 'post',
+    path: '/v1/pools',
+    auth: 'key',
+    summary:
+      'Collective purchasing: open a pool for one piece of work from one worker, split into equal shares (2–10); the caller funds the first share into escrow from its own wallet',
+    body: PoolBody,
+  },
+  {
+    method: 'post',
+    path: '/v1/pools/:id/join',
+    auth: 'key',
+    summary:
+      'Take a share of a pool: an escrow job from your own wallet for the share amount, under your own caps; a retry funds the same share',
+  },
+  {
+    method: 'get',
+    path: '/v1/pools',
+    auth: 'public',
+    summary:
+      'The latest pools, newest first: members, each share’s job and state, and the result hash every share carries',
+    query: PoolListQuery,
+  },
+  {
+    method: 'get',
+    path: '/v1/pools/:id',
+    auth: 'public',
+    summary:
+      'One pool: its shares, their jobs, and whether one delivery reached them all (sameDelivery, resultHash)',
   },
   {
     method: 'get',

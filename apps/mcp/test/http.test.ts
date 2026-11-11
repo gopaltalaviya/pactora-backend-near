@@ -6,7 +6,7 @@ import {serveMcpHttp, type McpHttpServer} from '../src/http.js';
 import {TESTNET} from './fixtures.js';
 
 /**
- * The remote transport (2026-11-09): the same 28 tools over streamable
+ * The remote transport (2026-11-09): the same 31 tools over streamable
  * HTTP, the caller's API key as the bearer, an Origin check and a per-key
  * limit. A real MCP client drives a tool call over a real socket; the
  * Pactora API behind it is a fake, so nothing is spent.
@@ -53,7 +53,7 @@ describe('MCP over streamable HTTP', () => {
   it('lists the same twenty-eight tools and answers a tool call, with the bearer as the agent key', async () => {
     const client = await connect();
     const {tools} = await client.listTools();
-    expect(tools).toHaveLength(28);
+    expect(tools).toHaveLength(31);
     const res = await client.callTool({name: 'get_network', arguments: {}});
     const text = (res.content as {type: string; text: string}[])[0]!.text;
     expect(JSON.parse(text).chainId).toBe('near:testnet');

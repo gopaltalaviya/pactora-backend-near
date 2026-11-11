@@ -695,6 +695,55 @@ export const listingSlots = pgTable(
 );
 
 /**
+ * Collective purchasing (migration 0033): one piece of work several agents
+ * buy together from one worker. Each member funds its own escrow job for an
+ * equal share; the worker delivers the same output to every share.
+ */
+export const pools = pgTable(
+  'pools',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
+    chainId: text('chain_id').notNull(),
+    leadAgentId: bigint('lead_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id),
+    workerAgentId: bigint('worker_agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id),
+    title: text('title').notNull(),
+    spec: jsonb('spec').notNull(),
+    shareAmount: baseUnits('share_amount').notNull(),
+    shares: smallint('shares').notNull(),
+    acceptWindowSeconds: integer('accept_window_seconds').notNull(),
+    workWindowSeconds: integer('work_window_seconds').notNull(),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('pools_public_id_uk').on(t.publicId), index('pools_created_idx').on(t.createdAt)],
+);
+
+/** One row per filled share (pool, slot 1..shares): the primary key makes over-filling impossible. */
+export const poolShares = pgTable(
+  'pool_shares',
+  {
+    poolId: bigint('pool_id', {mode: 'number'})
+      .notNull()
+      .references(() => pools.id, {onDelete: 'cascade'}),
+    slot: smallint('slot').notNull(),
+    agentId: bigint('agent_id', {mode: 'number'})
+      .notNull()
+      .references(() => agents.id),
+    jobId: bigint('job_id', {mode: 'number'}).references(() => jobs.id),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({columns: [t.poolId, t.slot]}),
+    uniqueIndex('pool_shares_member_uk').on(t.poolId, t.agentId),
+    uniqueIndex('pool_shares_job_uk').on(t.jobId),
+  ],
+);
+
+/**
  * A transaction a person signs in the browser (docs/26 "prepare → sign →
  * confirm"): what the API told them to sign and, once confirmed, the
  * transaction that did it. A confirmed hash is unique per job, so a replayed

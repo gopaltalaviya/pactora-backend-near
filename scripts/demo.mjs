@@ -177,6 +177,40 @@ const WORKERS = [
   },
 ];
 
+/** What DEMO_OPEN_LISTINGS posts: plain tasks a person or an agent could take. */
+const OPEN_LISTINGS = [
+  {
+    title: "Summarise this week's NEAR governance proposals",
+    description:
+      'One paragraph per open proposal on the NEAR governance forum: what it asks, who proposed it, and the vote so far.',
+    category: 'expertise',
+    interactionMode: 'task',
+    skills: ['market-research'],
+    maxPriceBaseUnits: '50000',
+    criteria: 'Every open proposal is covered, each with its link and current vote count.',
+  },
+  {
+    title: 'Photograph the opening hours sign of a café',
+    description: 'One clear photo of the posted opening hours at the entrance of any café in Berlin Mitte.',
+    category: 'physical',
+    interactionMode: 'capture',
+    skills: ['shop-photos'],
+    location: 'Berlin',
+    maxPriceBaseUnits: '40000',
+    criteria: 'The hours are readable and the café name is in the frame.',
+  },
+  {
+    title: 'Check 20 token prices against two sources',
+    description:
+      'For 20 listed tokens, read the price from two public sources and flag any that differ by more than 1%.',
+    category: 'expertise',
+    interactionMode: 'task',
+    skills: ['trade-analysis'],
+    maxPriceBaseUnits: '60000',
+    criteria: 'A table with both prices per token and every difference over 1% flagged.',
+  },
+];
+
 const children = [];
 const stopped = new AbortController();
 async function cleanup() {
@@ -329,7 +363,7 @@ try {
     if (!res.ok) throw new Error(`POST ${path}: ${res.status} ${JSON.stringify(json)}`);
     return json;
   };
-  async function registerAgent(owner, {name, capability, price}) {
+  async function registerAgent(owner, {name, capability, price, description}) {
     const wallet = `bot.${owner.id}`;
     const {walletPublicKey} = await post('/v1/agents/wallet-key', {walletAddress: wallet, chainId: CHAIN_ID});
     const chainAgentId = await registerOnChain(owner, {
@@ -353,6 +387,8 @@ try {
     });
     const agent = await post('/v1/agents', {
       name,
+      // What the marketplace shows under the name; a worker's comes from its role.
+      ...(description ? {description} : {}),
       capabilities: [capability],
       pricePerTask: price,
       walletAddress: wallet,
@@ -369,6 +405,8 @@ try {
     name: 'Orchestrator',
     capability: 'orchestration',
     price: '0',
+    description:
+      'Plans a goal into steps, hires a worker for each through escrow, has every result judged, and pays only for work that passes.',
   });
   const workerAgents = [];
   for (const [i, w] of WORKERS.entries()) {
@@ -377,6 +415,7 @@ try {
         name: titleCase(w.capability),
         capability: w.capability,
         price: w.price,
+        description: `${w.role[0].toUpperCase()}${w.role.slice(1)}.`,
       }),
     );
   }
@@ -1676,6 +1715,25 @@ try {
       `the most a stolen key can ever spend is its caps — ${chain.formatToken(BigInt(leaky.per_task_cap))} per task, ${chain.formatToken(BigInt(leaky.daily_cap))} per rolling day — and only by hiring registered, staked agents; it can never withdraw`,
     );
   }
+  // DEMO_OPEN_LISTINGS=n (seeding a hosted board): leave n listings open for
+  // a week, posted by the orchestrator, so /jobs shows work a visitor can bid
+  // on. Off by default: a rehearsal leaves nothing behind.
+  const openListings = Math.min(Number(process.env.DEMO_OPEN_LISTINGS ?? 0) || 0, OPEN_LISTINGS.length);
+  for (const [i, l] of OPEN_LISTINGS.slice(0, openListings).entries()) {
+    await client.postListing(
+      {
+        ...l,
+        maxWorkers: 1,
+        estimatedMinutes: 45,
+        deadline: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+        // Within testnet's max_accept_window (3000 s) and max_work_window (18000 s).
+        acceptWindowSeconds: 1800,
+        workWindowSeconds: 14_400,
+      },
+      `${run}-open-${i}`,
+    );
+  }
+  if (openListings > 0) ok(`${openListings} listing(s) left open for a week on the board`);
   if (process.env.DEMO_HOLD) {
     // The verdict first: a reader of a held run sees it before the wait.
     console.log(failures === 0 ? '\nDemo passed.\n' : `\nDemo FAILED: ${failures} check(s).\n`);

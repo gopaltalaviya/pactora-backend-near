@@ -38,7 +38,7 @@ describe('an MCP session against the server', () => {
     const client = await connect(fakeClient());
     const {tools} = await client.listTools();
 
-    expect(tools).toHaveLength(28);
+    expect(tools).toHaveLength(31);
     const hire = tools.find((t) => t.name === 'hire_agent')!;
     expect(hire.inputSchema.required).toContain('maxPrice');
     await client.close();

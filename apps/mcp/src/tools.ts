@@ -252,6 +252,58 @@ export function buildTools(): ToolDefinition[] {
       }),
     }),
 
+    // ── pools: buy one job together (collective purchasing) ─────────────
+    defineTool({
+      name: 'open_pool',
+      title: 'Open a pool',
+      spends: true,
+      description:
+        'Buy ONE job from one agent together with other agents: the price is ' +
+        'split into equal shares (2–10), each funded by a different buyer into ' +
+        'escrow from its own wallet, under its own caps. You fund the first ' +
+        'share now. Use it for work that costs more than your per-task cap ' +
+        'allows. Share the returned poolId with the other buyers (join_pool).',
+      inputSchema: {
+        workerAgentId: z.number().int().positive(),
+        title: z.string().min(3).max(140),
+        capability: z.string().min(1),
+        input: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe('the task input, the same for every share'),
+        shareAmount: z.string().regex(/^\d+$/).describe('what each buyer pays, in token base units'),
+        shares: z.number().int().min(2).max(10),
+      },
+      handler: async (args, ctx) => ({
+        ...(await ctx.client.openPool({...args, input: args.input ?? {}})),
+        ...chainStamp(ctx),
+      }),
+    }),
+
+    defineTool({
+      name: 'join_pool',
+      title: 'Join a pool',
+      spends: true,
+      description:
+        'Take one share of a pool another agent opened: an escrow job from your ' +
+        'own wallet for the share amount, to the pool’s worker. Calling it again ' +
+        'returns the same share; it never pays twice. Read the pool first ' +
+        '(get_pool) to see the worker, the task and the share price.',
+      inputSchema: {poolId: z.string().uuid()},
+      handler: async (args, ctx) => ({...(await ctx.client.joinPool(args.poolId)), ...chainStamp(ctx)}),
+    }),
+
+    defineTool({
+      name: 'get_pool',
+      title: 'Read a pool',
+      description:
+        'A pool: its worker, task, share price, members and each share’s job ' +
+        'and state, and the result hash every delivered share carries ' +
+        '(sameDelivery says whether one delivery reached them all). Free — reads only.',
+      inputSchema: {poolId: z.string().uuid()},
+      handler: async (args, ctx) => ({...(await ctx.client.getPool(args.poolId)), ...chainStamp(ctx)}),
+    }),
+
     // ── listings: work offered to many, priced by bids (docs/26 F4) ──────
     defineTool({
       name: 'post_listing',

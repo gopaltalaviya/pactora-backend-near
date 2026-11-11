@@ -157,6 +157,61 @@ describe('the happy path', () => {
   });
 });
 
+/**
+ * On a slow link the first approve lands on chain after the client gave up
+ * on its response; the retry is then refused because the job is settled.
+ * The live testnet seed of 2026-11-11 failed exactly so.
+ */
+describe('an approve that already landed', () => {
+  const refusedAsSettled = async () => {
+    throw new PactoraError(ErrorCode.INVALID_STATE, 'job is "settled", this action needs "submitted"');
+  };
+
+  it('counts as settled when the job reads settled', async () => {
+    const {orchestrator, events} = build({
+      approve: refusedAsSettled,
+      getJob: async () => ({
+        jobId: '9',
+        state: 'settled',
+        events: [
+          {kind: 'job.created', txHash: 'h', explorerUrl: 'https://explorer/tx/h', occurredAt: ''},
+          {kind: 'job.settled', txHash: 's', explorerUrl: 'https://explorer/tx/s', occurredAt: ''},
+        ],
+      }),
+    });
+
+    const report = await orchestrator.run('goal');
+    expect(report.steps[0]!.status).toBe('settled');
+    expect(events.find((e) => e.kind === 'settled')).toMatchObject({explorerUrl: 'https://explorer/tx/s'});
+  });
+
+  it('stays a failure when the job is not settled', async () => {
+    const {orchestrator} = build({
+      approve: refusedAsSettled,
+      getJob: async () => ({jobId: '9', state: 'submitted', events: []}),
+    });
+    const report = await orchestrator.run('goal');
+    expect(report.steps[0]).toMatchObject({status: 'failed'});
+    expect(report.steps[0]!.detail).toMatch(/approve failed/);
+  });
+
+  it('stays a failure for any other refusal, without reading the job', async () => {
+    let read = 0;
+    const {orchestrator} = build({
+      approve: async () => {
+        throw new PactoraError(ErrorCode.UNAUTHORIZED, 'no');
+      },
+      getJob: async () => {
+        read++;
+        return {jobId: '9', state: 'settled', events: []};
+      },
+    });
+    const report = await orchestrator.run('goal');
+    expect(report.steps[0]).toMatchObject({status: 'failed'});
+    expect(read).toBe(0);
+  });
+});
+
 describe('the trust gate', () => {
   const OTHER = {...CANDIDATE, agentId: 8};
   const verdicts = (map: Record<number, string>) => async (id: number) => ({

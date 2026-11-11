@@ -672,7 +672,19 @@ export class Orchestrator {
         const settled = await this.opts.client.approve(receipt.jobId, judge ? {judge} : {});
         this.emit({kind: 'settled', jobId: receipt.jobId, explorerUrl: settled.explorerUrl});
       } catch (err) {
-        return this.skip({...common, status: 'failed', detail: `approve failed: ${message(err)}`});
+        // On a slow link the first approve can land on chain after the
+        // client gave up on its response, and the retry then finds the job
+        // settled. The chain is the record: if the job is settled, it was
+        // this approval that settled it (only the client may approve).
+        const settledBy = await this.settledAfterAll(receipt.jobId, err);
+        if (!settledBy) {
+          return this.skip({...common, status: 'failed', detail: `approve failed: ${message(err)}`});
+        }
+        this.emit({
+          kind: 'settled',
+          jobId: receipt.jobId,
+          explorerUrl: settledBy.explorerUrl ?? receipt.explorerUrl,
+        });
       }
     } else {
       this.emit({kind: 'settled', jobId: receipt.jobId, explorerUrl: receipt.explorerUrl});
@@ -848,6 +860,23 @@ export class Orchestrator {
       return {...common, status: 'failed', detail: `dispute failed: ${message(err)}`};
     }
     return {...common, status: 'disputed', detail: reason};
+  }
+
+  /**
+   * After a refused approve: is the job settled anyway (an earlier attempt
+   * landed)? Only a refusal for the job's state qualifies; anything else, or
+   * a job that cannot be read, stays a failure.
+   */
+  private async settledAfterAll(jobId: string, err: unknown): Promise<{explorerUrl: string | null} | null> {
+    if (!(err instanceof PactoraError) || err.code !== ErrorCode.INVALID_STATE) return null;
+    try {
+      const job = await this.opts.client.getJob(jobId);
+      if (job.state !== 'settled') return null;
+      const tx = [...job.events].reverse().find((e) => e.explorerUrl);
+      return {explorerUrl: tx?.explorerUrl ?? null};
+    } catch {
+      return null;
+    }
   }
 
   private skip(outcome: StepOutcome): StepOutcome {

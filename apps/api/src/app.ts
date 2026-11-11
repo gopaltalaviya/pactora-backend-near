@@ -41,6 +41,8 @@ import {registerWebhookRoutes} from './routes/webhooks.js';
 import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
 import {registerProfileRoutes} from './routes/profiles.js';
 import {registerHistoryRoutes} from './routes/history.js';
+import {registerReceiptRoutes} from './routes/receipts.js';
+import {registerPoolRoutes} from './routes/pools.js';
 import {registerAuditLogRoutes} from './routes/audit-log.js';
 import {kycSweep, registerKycRoutes} from './routes/kyc.js';
 import {registerAdminRoutes} from './routes/admin.js';
@@ -453,6 +455,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
   });
   await registerHistoryRoutes(app, {db: deps.db, chains: deps.chains});
+  await registerReceiptRoutes(app, {db: deps.db, chains: deps.chains});
+  await registerPoolRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    bus,
+    submit: deps.submit,
+    ...(deps.readBudget ? {readBudget: deps.readBudget} : {}),
+  });
   await registerAuditLogRoutes(app, {db: deps.db, reviewers: () => deps.complianceReviewers ?? []});
   await registerKycRoutes(app, {
     db: deps.db,
