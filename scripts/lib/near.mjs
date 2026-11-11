@@ -16,8 +16,61 @@ export {KeyPair, nearToYocto};
  * key from the sandbox's validator_key.json); on testnet the deployer from
  * .env. Never mainnet.
  */
+/**
+ * Free testnet RPCs to fall back to when the primary answers "rate limits
+ * exceeded" (FastNEAR's free tier does, under a full demo run: 2026-11-11).
+ * dRPC and NEAR's own endpoint both answered chain_id "testnet" that day.
+ */
+const TESTNET_FALLBACK_RPCS = ['https://near-testnet.drpc.org', 'https://rpc.testnet.near.org'];
+const RATE_LIMITED = /-429|rate limit|too many requests/i;
+/** The error's words for the rate-limit test; never throws (errors can carry BigInts). */
+const describe = (err) => {
+  let body = '';
+  try {
+    body = JSON.stringify(err ?? {}, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+  } catch {
+    // unserialisable: the message alone decides
+  }
+  return `${err?.message ?? ''} ${body}`;
+};
+
+/**
+ * A JsonRpcProvider that moves to the next URL only when the current one is
+ * rate-limiting. Every other error, a contract refusal included, is thrown
+ * as it came, so the checks that expect a refusal still read the node's own
+ * words. (near-api-js's FailoverRpcProvider switches on any error.)
+ */
+class RateLimitRotatingProvider extends JsonRpcProvider {
+  constructor(urls) {
+    super({url: urls[0]});
+    this.others = urls.slice(1).map((url) => new JsonRpcProvider({url}));
+  }
+  async sendJsonRpc(method, params) {
+    try {
+      return await super.sendJsonRpc(method, params);
+    } catch (err) {
+      if (!RATE_LIMITED.test(describe(err))) throw err;
+      let last = err;
+      for (const p of this.others) {
+        try {
+          return await p.sendJsonRpc(method, params);
+        } catch (e) {
+          if (!RATE_LIMITED.test(describe(e))) throw e;
+          last = e;
+        }
+      }
+      throw last;
+    }
+  }
+}
+
+export function providerFor(chain) {
+  if (chain.chainId !== 'near:testnet') return new JsonRpcProvider({url: chain.rpcUrl});
+  return new RateLimitRotatingProvider([...new Set([chain.rpcUrl, ...TESTNET_FALLBACK_RPCS])]);
+}
+
 export function rootAccount(chain, env = process.env) {
-  const provider = new JsonRpcProvider({url: chain.rpcUrl});
+  const provider = providerFor(chain);
   let id;
   let secret;
   if (chain.chainId === 'near:sandbox') {
@@ -114,7 +167,7 @@ export async function createScopedAccount(
 }
 
 /**
- * The owner's registration (docs/NEAR-PORT.md §5, step 2): the agent wallet
+ * The owner's registration (docs/NEAR-WIRE.md §5, step 2): the agent wallet
  * created with the signer's key scoped to Pactora, then `register_agent`.
  * Answers the contract agent id.
  */

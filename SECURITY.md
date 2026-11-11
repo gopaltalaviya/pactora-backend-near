@@ -4,7 +4,7 @@
 
 Pactora on NEAR runs on a **local NEAR sandbox and NEAR testnet only**, with a
 test stablecoin. Neither this backend nor the NEAR contract has had an
-external audit; one is required before mainnet. The NEAR port was reviewed
+external audit; one is required before mainnet. The NEAR build was reviewed
 internally on 2026-11-07 (fixes listed in `PROGRESS.md`).
 
 An internal security audit of the backend on 2026-11-09 (findings H1, M1,

@@ -17,7 +17,7 @@ ALTER TABLE "jobs" ADD CONSTRAINT "jobs_client_same_chain"
 ALTER TABLE "jobs" ADD CONSTRAINT "jobs_worker_same_chain"
   FOREIGN KEY (worker_agent_id, chain_id) REFERENCES agents (id, chain_id);--> statement-breakpoint
 -- Hand-added (drizzle cannot express CHECKs): every network key is a NEAR
--- CAIP-2 id, docs/NEAR-PORT.md §1. A stray '10143' cannot be written.
+-- CAIP-2 id, docs/NEAR-WIRE.md §1. A bare numeric id cannot be written.
 ALTER TABLE "agents" ADD CONSTRAINT "agents_chain_caip2" CHECK (chain_id ~ '^near:[a-z0-9-]+$');--> statement-breakpoint
 ALTER TABLE "indexer_cursor" ADD CONSTRAINT "indexer_cursor_chain_caip2" CHECK (chain_id ~ '^near:[a-z0-9-]+$');--> statement-breakpoint
 ALTER TABLE "job_events" ADD CONSTRAINT "job_events_chain_caip2" CHECK (chain_id ~ '^near:[a-z0-9-]+$');--> statement-breakpoint

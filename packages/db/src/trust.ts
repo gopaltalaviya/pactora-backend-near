@@ -3,19 +3,19 @@ import type {Db} from './index.js';
 import {reputationScoreSql} from './reputation.js';
 
 /**
- * Whether a reputation deserves to be believed (v3).
+ * Whether a reputation deserves to be believed.
  *
  * The score counts settled jobs, and only the escrow can write one, so every
  * review cost a real payment. That stops free reviews; it does not stop an
  * owner paying itself through wallets it controls. prooflines measured that
- * on an EVM chain: 7,665 ratings of one agent, every rater funded by the agent's own
+ * in a public on-chain agent registry: 7,665 ratings of one agent, every rater funded by the agent's own
  * owner seconds before it paid. So the trust check asks what the score cannot:
  *
  *   - how many DIFFERENT owners paid this worker, and how much of its record
  *     comes from the largest one;
  *   - whether payment-token money flowed from the worker's side to a client
  *     shortly before that client hired it (`token_transfers`, recorded by the
- *     indexer from the token's own Transfer logs).
+ *     indexer from the token's own NEP-141 `ft_transfer` events).
  *
  * It answers in words with the numbers behind them, because a second score
  * out of 100 would invite the same mistake it exists to correct.

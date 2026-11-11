@@ -200,7 +200,7 @@ describe('the database key store', () => {
 
   /**
    * Audit M1. A key is handed out BEFORE its account exists (the owner
-   * creates the account with it, NEAR-PORT §5 step 2), so a made-up account
+   * creates the account with it, NEAR-WIRE §5 step 2), so a made-up account
    * leaves a row. Those are not permanent: after the grace period, a key
    * whose account never appeared on chain and that no agent row names is
    * removed. A key whose account exists is kept, registered or not.

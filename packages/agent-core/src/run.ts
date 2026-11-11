@@ -1,6 +1,6 @@
 import type {z} from 'zod';
 import {PactoraClient} from '@pactora/sdk';
-import {ChainId, X402Scheme, X402_SCHEME, assertNoLegacyEnv} from '@pactora/shared';
+import {ChainId, X402Scheme, X402_SCHEME, assertNoUnsupportedEnv} from '@pactora/shared';
 import {buildBrain} from './factory.js';
 import {serveX402} from './x402.js';
 import {Worker, type WorkerEvent} from './worker.js';
@@ -25,7 +25,7 @@ export interface RunWorkerConfig<T> {
 
 export async function runWorker<T>(config: RunWorkerConfig<T>): Promise<void> {
   const env = config.env ?? process.env;
-  assertNoLegacyEnv(env);
+  assertNoUnsupportedEnv(env);
   const apiKey = env['PACTORA_API_KEY'];
 
   if (!apiKey && !config.client) {
@@ -98,7 +98,7 @@ export async function runWorker<T>(config: RunWorkerConfig<T>): Promise<void> {
       price: agent.pricePerTask,
       payTo: agent.walletAddress,
       asset: token,
-      // CAIP-2: the x402 network is the chain id itself (docs/NEAR-PORT.md §1).
+      // CAIP-2: the x402 network is the chain id itself (docs/NEAR-WIRE.md §1).
       network: ChainId.parse(net.chainId),
       schemes,
       log: (e) => log(`x402 ${e.kind} ${JSON.stringify(e)}`),

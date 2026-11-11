@@ -110,7 +110,7 @@ describe('the NEAR AI judge attestation', () => {
     expect(calls[1]).toBe('https://cloud-api.near.ai/v1/signature/chatcmpl-fixture-0001');
   });
 
-  it('ecdsa (EIP-191): recovers the signer and matches the Ethereum address', async () => {
+  it('ecdsa (EIP-191): recovers the signer and matches the secp256k1 signing address', async () => {
     world({algo: 'ecdsa'});
     const result = await new NearAiBrain(undefined, KEY).complete(verdictReq());
     expect(result.attestation).toMatchObject({signingAlgo: 'ecdsa', signingAddress: EC_ADDRESS});

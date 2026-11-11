@@ -43,7 +43,7 @@ export const JobListQuery = z
     /** Words to find in the spec: capability, a listing's title, description, skills (full text). */
     q: z.string().trim().min(1).max(100, 'q is at most 100 characters').optional(),
     limit: z.coerce.number().int().min(1).max(100).default(25),
-    /** v3: the `nextCursor` of the previous page. */
+    /** The `nextCursor` of the previous page. */
     cursor: Cursor.optional(),
   })
   .refine((q) => q.state === undefined || q.status === undefined, {
@@ -78,7 +78,7 @@ export interface JobRouteDeps {
     /** The caller's request id, carried to the signer. */
     traceId?: string;
   }) => Promise<{txHash: string; chainJobId?: string}>;
-  /** v3: a job's dispute bond, read from the chain. Omitted or null: spend 0. */
+  /** A job's dispute bond, read from the chain. Omitted or null: spend 0. */
   readDisputeBond?: (args: {chainId: string; chainJobId: bigint}) => Promise<bigint | null>;
   /** Contract views: `get_job`, for a job's deadlines. Omitted, they read as null. */
   viewChain?: ChainViewer;
@@ -247,7 +247,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
             : undefined,
           query.capability ? sql`${jobs.spec}->>'capability' = ${query.capability}` : undefined,
           query.q ? jobSearchSql(query.q) : undefined,
-          // v3: oldest first, so the next page starts after the cursor.
+          // Oldest first, so the next page starts after the cursor.
           query.cursor !== undefined ? gt(jobs.id, query.cursor) : undefined,
         ),
       )
@@ -487,7 +487,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
   /** Live job feed. Replays history first so a late subscriber sees it all. */
   app.get('/v1/jobs/:id/events', async (request, reply) => {
     const {job} = await loadJob(request.params as {id: string});
-    // v3: a reconnect resumes after the last event it saw.
+    // A reconnect resumes after the last event it saw.
     const after = lastEventIdOf(request);
     // The query runs inside streamEvents, after it has subscribed: see there.
     await streamEvents(reply, bus, job.id, async () => {
@@ -628,7 +628,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     // they were given.
     const offChainOnly = kind === 'submitResult' && job.path === 'direct';
 
-    // The hire moves money, and since v3 so does a dispute: the client posts
+    // The hire moves money, and so does a dispute: the client posts
     // the bond the job captured at creation, and the account's caps count it.
     // Declared here so the signer can refuse early with a 402 that says why,
     // instead of letting the call revert. Unreadable: 0, and the contract
@@ -1168,6 +1168,15 @@ function disputeOf(
   return {reason: p.reason, reasonHash: p.reasonHash, at: new Date(e.occurredAt).toISOString()};
 }
 
+/** SQLSTATE 40P01: Postgres chose this statement as a deadlock's victim. */
+function isDeadlock(err: unknown): boolean {
+  const e = err as {code?: unknown; cause?: {code?: unknown}} | null;
+  return e?.code === '40P01' || e?.cause?.code === '40P01';
+}
+
+/** Tries of one job event insert that keeps losing deadlocks, before the error stands. */
+const DEADLOCK_TRIES = 4;
+
 export async function recordEvent(
   db: Db,
   bus: EventBus,
@@ -1176,12 +1185,25 @@ export async function recordEvent(
   kind: string,
   payload: Record<string, unknown>,
 ): Promise<void> {
-  const [row] = await db
-    .insert(jobEvents)
-    .values({chainId, jobId, kind, payload})
-    .onConflictDoNothing()
-    .returning({id: jobEvents.id});
-  bus.publish(jobId, {event: kind, data: payload, ...(row ? {id: row.id} : {})});
+  // The fan-out trigger locks both parties' event counters. Another writer
+  // holding one of them can deadlock with this insert (live browser suite,
+  // 2026-11-11: a listing's decide answered 500). Postgres aborts one side
+  // and expects it to retry; the insert is idempotent (ON CONFLICT DO
+  // NOTHING), so a retry never writes twice.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const [row] = await db
+        .insert(jobEvents)
+        .values({chainId, jobId, kind, payload})
+        .onConflictDoNothing()
+        .returning({id: jobEvents.id});
+      bus.publish(jobId, {event: kind, data: payload, ...(row ? {id: row.id} : {})});
+      return;
+    } catch (err) {
+      if (!isDeadlock(err) || attempt >= DEADLOCK_TRIES) throw err;
+      await new Promise((r) => setTimeout(r, 20 * attempt + Math.floor(Math.random() * 30)));
+    }
+  }
 }
 
 const PUBLIC_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

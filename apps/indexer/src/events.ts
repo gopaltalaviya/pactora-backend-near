@@ -1,5 +1,5 @@
 /**
- * NEP-297 events → what the indexer stores (docs/NEAR-PORT.md §7).
+ * NEP-297 events → what the indexer stores (docs/NEAR-WIRE.md §7).
  *
  * Two inputs, both already parsed from `EVENT_JSON:` log lines by
  * @pactora/near's `eventsOf`:
@@ -10,9 +10,9 @@
  * - the payment token's NEP-141 `ft_transfer` events (near-contract-standards
  *   `FtTransfer::emit_many`), whose data array may list several transfers.
  *
- * Payloads use the camelCase keys the projection and the API read (the EVM
- * build's names, so `payload->>'outcome'` and `payload->>'reason'` keep
- * working): agent ids become `<role>AgentId`, every u64 becomes a decimal
+ * Payloads use the camelCase keys the projection and the API read (so
+ * `payload->>'outcome'` and `payload->>'reason'` work as written): agent ids
+ * become `<role>AgentId`, every u64 becomes a decimal
  * string, U128 amounts stay the decimal strings the contract wrote.
  */
 import type {Nep297Event} from '@pactora/near';
@@ -35,8 +35,8 @@ type Field = readonly [type: FieldType, from: string, to: string, presence?: 'op
 const OUTCOMES = new Set(['Success', 'Failed', 'DisputeLost', 'Unresolved']);
 
 /**
- * Every job event in events.rs, its kind (the names the EVM build used, kept
- * so the API's queries do not change) and its fields. Events not listed —
+ * Every job event in events.rs, its kind (the names the API's queries use)
+ * and its fields. Events not listed —
  * agent_registered, review, funded, caps_set, transfer_* and the rest — are
  * not part of a job's lifecycle and are ignored.
  */

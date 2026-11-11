@@ -1,5 +1,12 @@
 import type {ChainConfig} from '@pactora/config';
-import {blockRpc, nearClient, neardataSource, rpcSource, type BlockSource} from '@pactora/near';
+import {
+  accountsSource,
+  blockRpc,
+  nearClient,
+  neardataSource,
+  rpcSource,
+  type BlockSource,
+} from '@pactora/near';
 
 /**
  * The chain's block source, after checking it is the network the config names.
@@ -22,6 +29,25 @@ export async function openSource(
   }
   const rpc = blockRpc(chain.rpcUrl);
   if (chain.blockSource.kind === 'rpc') return rpcSource(rpc);
+  if (chain.blockSource.kind === 'accounts') {
+    const source = accountsSource({
+      baseUrl: chain.blockSource.url,
+      accounts: [chain.contracts.Pactora, chain.contracts.PaymentToken],
+    });
+    // Same network check as neardata's: the API's head block, by hash, on the RPC.
+    const served = await source.apiHead();
+    const onRpc = await rpc.block(served.height).then(
+      (b) => b?.header.hash ?? 'no block',
+      (err: unknown) => `no block (${(err as Error).message ?? ''})`,
+    );
+    if (served.hash !== onRpc) {
+      throw new Error(
+        `chain ${chain.chainId}: tx API ${chain.blockSource.url} head ${served.height} is ${served.hash}, ` +
+          `RPC ${chain.rpcUrl} has ${onRpc} — not the same network`,
+      );
+    }
+    return source;
+  }
 
   const source = neardataSource(chain.blockSource.url, fetch, opts.neardataApiKey);
   // A height both have as final: the lower of the two heads, a real block on either.

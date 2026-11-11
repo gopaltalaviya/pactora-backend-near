@@ -75,10 +75,34 @@ Cron (`crontab -e`), with the variables the scripts read:
 BACKUP_REMOTE=backup@<another host>:pactora/   # off-host copy over scp (key-based); unset, each run warns
 ALERT_WEBHOOK_URL=https://hooks.slack.com/...  # or a Discord webhook; unset, alerts are only logged
 API_HOST=api.<ip-with-dashes>.sslip.io
+BACKUP_PASSFILE=/root/.pactora-backup-pass
 0 3 * * *   /root/pactora/backup.sh       >> /root/pactora/backups/backup.log 2>&1
 0 4 1 * *   /root/pactora/restore-test.sh >> /root/pactora/backups/restore-test.log 2>&1
 */5 * * * * /root/pactora/alerts.sh       >> /root/pactora/backups/alerts.log 2>&1
+30 2 * * *  cd /root/pactora && docker compose -f docker-compose.full.yml -f docker-compose.vps.yml run --rm --no-deps api node bin/sanctions-refresh.mjs >> /root/pactora/backups/sanctions.log 2>&1
 ```
+
+**Sanctions lists, once at install and then daily (the last cron line).** A
+fresh database has no list. Screening must be on in production, so until the
+lists load an identity check answers 503 and `alerts.sh` raises "no active
+sanctions list". The api image carries the refresh, because the server has
+the images, not the repo:
+
+```bash
+docker compose -f docker-compose.full.yml -f docker-compose.vps.yml run --rm --no-deps api node bin/sanctions-refresh.mjs
+# ofac: replace — 19563 entries … · un: replace — 1007 entries … · uk: replace — 6420 entries …
+```
+
+Checked on a Vultr `vc2-1c-2gb` (1 vCPU, 2 GB, Ubuntu 26.10, 2026-11-11):
+`bootstrap-ubuntu.sh` fell back to Docker's 24.04 packages and worked. The
+stack used ~260 MB of RAM at rest. Let's Encrypt issued for the sslip.io
+name, and backup, restore-test, alerts and the refresh all passed. A
+`backup.sh` bug that shows only on Linux was found and fixed there:
+`pg_restore --list` closed the pipe early.
+
+Running the overlay from the repo instead of the flat server folder: set
+`CADDYFILE=./deploy/vps/Caddyfile`, or Docker mounts an empty directory in
+its place and Caddy does not start.
 
 - `backup.sh` writes `pactora-db-<stamp>.dump.enc` (`pg_dump -Fc`) and
   `pactora-evidence-<stamp>.tar.enc` (the bucket via `mc mirror`), both

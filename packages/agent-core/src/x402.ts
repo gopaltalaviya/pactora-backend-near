@@ -28,7 +28,7 @@ import type {Worker} from './worker.js';
  * The worker never sees money or keys here. What it holds is its own API key,
  * and the one question it asks the facilitator is "was I paid for this?".
  *
- * v3: with `schemes` including `pactora-escrow`, the quote also offers the
+ * With `schemes` including `pactora-escrow`, the quote also offers the
  * refundable scheme. Paid that way, the money is in escrow and the job is
  * still open: the worker does the work FIRST, and only on success accepts and
  * submits on chain. On failure it declines, so the client can cancel for a

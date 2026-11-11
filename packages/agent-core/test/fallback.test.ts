@@ -20,7 +20,7 @@ const req = {
   schema: Answer,
   schemaName: 'Answer',
   system: 'You are a research agent.',
-  prompt: 'How deep is the ETH/USDC pool?',
+  prompt: 'How deep is the NEAR/USDC pool?',
 } satisfies CompletionRequest<z.infer<typeof Answer>>;
 
 const dir = mkdtempSync(join(tmpdir(), 'pactora-brain-'));

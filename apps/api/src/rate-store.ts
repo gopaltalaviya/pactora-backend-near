@@ -10,7 +10,7 @@ export async function pruneRateLimits(db: Db): Promise<void> {
 const PRUNE_EVERY = 1_000;
 
 /**
- * A `@fastify/rate-limit` store that counts in Postgres (v3), so every API
+ * A `@fastify/rate-limit` store that counts in Postgres, so every API
  * replica shares one window per client instead of each allowing the full
  * limit (docs/17: "per process, so N× with N replicas").
  *

@@ -8,7 +8,7 @@
 - Event: **NEAR Hackathon**, deadline **2026-11-14 23:59 UTC**.
   Track: **Agent Economy** (primary); AI Security & Defense alongside.
   Plan and status: `pactora-docs-near/docs/24-near-hackathon.md` §1.5 and §5.
-- Wire contract between the services and the chain: `docs/NEAR-PORT.md`.
+- Wire contract between the services and the chain: `docs/NEAR-WIRE.md`.
 - Current state: the whole stack runs end to end on a local NEAR sandbox
   (`pnpm demo:local`: agents, people's listings, evidence and review, the
   DAO desk, a held payout, x402, the attack refused), and `pnpm swarm:local`
@@ -38,7 +38,7 @@ Contracts live checks (in `../pactora-contracts-near`, sandbox up):
 On Windows: `corepack` does not run from Git Bash; use PowerShell for
 `corepack pnpm …`, and set `DATABASE_URL` in the same command.
 
-**Branches:** `master` holds the port and M1–M10; `human-work` holds
+**Branches:** `master` holds the NEAR foundation and M1–M10; `human-work` holds
 2026-11-09's work. All four repos are on GitHub (private until submission).
 
 ## Next, in order
@@ -71,11 +71,6 @@ On Windows: `corepack` does not run from Git Bash; use PowerShell for
   ratings (the other party's history and the chain need them). Whether
   event payloads that quote a person's dispute reason should be scrubbed too
   is open; today they stay (dispute reasons are public by design).
-- **`chain/config/params.testnet.json` `_comment`** names the prototype it
-  carried values from. `chain/` is a byte copy of the contracts repo, so the
-  wording changes there, not here.
-- **`CLAUDE.md`** still names the prototype repos and paths; it is the
-  owner's file and was left as it is.
 
 ## Traps
 
@@ -201,16 +196,16 @@ stashed, the new test run, the source restored). One line of evidence each:
 | Read model (folded notifications, per-item read, titles, my bids, home stats) | b4d2bde | `read-model.test.ts`: the feed held all four items; the job had no title |
 | Low-entropy secret keys refused; `hireable` on profiles | 76bc902 | `netguard.test.ts`: `Buffer.alloc(32, 7)` accepted |
 | x402 step in `demo:local` (§8i) | 06193aa | the step's first run: 2 checks failed (the failed call was served and settled); fixed, green |
-| NEAR-only repository (docs, deploy, names) | 7c1d900 | `packages/shared/test/legacy-env.test.ts`: 2 of 5 failed on the old message |
+| NEAR-only repository (docs, deploy, names) | 7c1d900 | `packages/shared/test/unsupported-env.test.ts`: 2 of 5 failed on the old message |
 
 - Renames: Postgres role and database `pactora` in `docker-compose.full.yml`
   and the deploy scripts; compose project `pactora-full` (Postgres on
   127.0.0.1:5444); the listen/notify channel `pactora_events` (migration
   0031); deploy paths `~/pactora`; the build's commit variable
   `GIT_COMMIT_SHA` (`GIT_SHA` still read).
-- Deleted: `PLAN.md`, `scripts/video/`, `deploy/vps/switch-to-v3.sh`.
+- Deleted: `PLAN.md`, `scripts/video/` and an obsolete deploy script.
   Rewritten for NEAR: `README.md`, `CHANGELOG.md`, `SECURITY.md`,
-  `CONTRIBUTING.md`, `docs/README.md`, `docs/NEAR-PORT.md`,
+  `CONTRIBUTING.md`, `docs/README.md`, `docs/NEAR-WIRE.md`,
   `deploy/vps/README.md`, this file.
 - Gate: `pnpm check` 1333 passed, 10 skipped, 1 failed (`status.test` reads `pactora-docs-near` docs/15, which needs the 14 new routes: the docs repo's change); typecheck, lint, format clean; `test:startup` all 42 refused; `check-no-secrets` clean (421 files); `demo:local` "Demo passed.", 71 checks.
 
@@ -284,7 +279,7 @@ The auditor's reproductions were adapted into the repo's own test files.
   creation degrades `/v1/status`" (removed from `pactora-docs-near`
   `docs/STATUS.md`). (b) **Deviation:** the brief asked that a key be
   refused unless the account exists on chain. That would break registration:
-  by `docs/NEAR-PORT.md` §5 the owner CREATES the wallet account with the
+  by `docs/NEAR-WIRE.md` §5 the owner CREATES the wallet account with the
   key (`CreateAccount` + `AddKey` in one transaction; the interface's
   `lib/wallet.ts` and `scripts/demo.mjs` do exactly that), so the account
   cannot exist first. Instead a key is swept once it is unclaimed:
@@ -307,7 +302,7 @@ The auditor's reproductions were adapted into the repo's own test files.
   422`); both re-issue routes are limited to 20 a minute per client
   (`REISSUE_RATE_PER_MINUTE`; test: 21st → 429). No client in this repo
   omitted the nonce (`scripts/demo.mjs` does not re-issue; the interface has
-  no re-issue page). `docs/NEAR-PORT.md` §5 updated.
+  no re-issue page). `docs/NEAR-WIRE.md` §5 updated.
 - **L1 — IPv6 rate-limit buckets (fixed).** `clientKey(ip)` in
   `@pactora/service` (`http.ts`): IPv6 → its /64, IPv4 and IPv4-mapped
   unchanged; used by the app-wide limiter's `keyGenerator` and the
@@ -425,8 +420,8 @@ Contracts `pactora-contracts-near` 25df5c3.
   the admin console and the DAO dispute desk; Telegram and email. Then
   `c406e4a` (ops scripts, keeper recovery, the UK sanctions list) and
   `074757a` (the authorization matrix over every route and caller).
-- Hosting (Vultr + Vercel): the production compose still set the variables
-  of the prototype's chain (refused by every NEAR service), and the
+- Hosting (Vultr + Vercel): the production compose still set numeric-network
+  variables (refused by every NEAR service), and the
   Dockerfile copied a `chain/export` the NEAR layout lacks (no image built).
   Both fixed (`214dec8`); all seven images build, and the stack ran
   `operational` on the sandbox in Docker. Server `.env` and steps:
@@ -446,7 +441,7 @@ Contracts `pactora-contracts-near` 25df5c3.
 | Interface `pnpm check` | 151/151, lint and format clean |
 | Interface browser tests, 5 browsers, `--workers=2` | 443 passed, 2 skipped |
 | Interface production build against the held demo API | all 21 static pages 200, 28 pages crawled, no broken internal link; `/v1/status` all components up |
-| Docs `pnpm check:env` | was broken (named the prototype repos); fixed, and docs/08 gained the 10 NEAR variables it was missing |
+| Docs `pnpm check:env` | was broken (named stale repo paths); fixed, and docs/08 gained the 10 NEAR variables it was missing |
 
 
 Environment traps seen: on a fresh database the API tests fail with
@@ -458,10 +453,11 @@ on Windows (`near-workspaces`) nor in the cargo-near image (no OpenSSL
 headers): run them in WSL. An empty `.env` (gitignored) is in place in
 `pactora-contracts-near` for step 1.
 
-### 2026-11-04 to 2026-11-06: the port to NEAR
+### 2026-11-04 to 2026-11-06: the NEAR foundation
 
 - 2026-11-04: baseline imported (`f1b3fae`, tag `pre-hackathon`): the
-  prototype the escrow-and-reputation design was worked out on.
+  escrow-and-reputation design and a first version of the services, from
+  before the hackathon window.
 - 2026-11-05: the foundation (`20342b0`): CAIP-2 network keys, NEAR config,
   db 0011–0013, `@pactora/near` (RPC, function calls, NEP-413, sha256);
   the indexer reads final NEAR blocks and decodes Pactora's NEP-297 and the
@@ -469,6 +465,6 @@ headers): run them in WSL. An empty `.env` (gitignored) is in place in
   KMS ed25519 keys) and signs only the allowed Pactora methods; the API,
   SDK, agent runtime and MCP server on NEAR.
 - 2026-11-06: the demo end to end on NEAR (`e7e8603`), the counterparty
-  check enforced at hire with the attack in the demo (`8fd8913`), the
-  chain-specific scripts removed (`919f719`), and `pnpm demo:local`: the
+  check enforced at hire with the attack in the demo (`8fd8913`), unused
+  scripts removed (`919f719`), and `pnpm demo:local`: the
   whole system from nothing in one command (`2904f85`).

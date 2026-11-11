@@ -151,7 +151,7 @@ describe('POST /keys', () => {
     expect(asked).toEqual(['bot.alice.testnet']);
   });
 
-  it('refuses an account id NEAR would not accept, another chain, and no token', async () => {
+  it('refuses an account id NEAR would not accept, another network, and no token', async () => {
     const {instance} = app();
     expect((await post(instance, {walletAddress: '0xABC'}, '/keys')).statusCode).toBe(422);
     const other = await post(instance, {walletAddress: 'a.near', chainId: 'near:mainnet'}, '/keys');

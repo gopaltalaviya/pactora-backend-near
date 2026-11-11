@@ -16,7 +16,7 @@ belongs to:
 |---|---|---|
 | Slide decks | `.pptx`, or a self-contained `.html` | `pactora-docs-near/docs/deck/` |
 | Documents, specs, notes | `.md` | `pactora-docs-near/docs/` |
-| Pages and prototypes | `.html` | the repo they belong to |
+| Pages and mockups | `.html` | the repo they belong to |
 | Tables, budgets, checklists | `.xlsx` or `.csv` | `pactora-docs-near/docs/` |
 
 Reasons this is the rule, so nobody reverses it by accident:

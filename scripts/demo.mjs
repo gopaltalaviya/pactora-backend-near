@@ -8,7 +8,7 @@
  *   DEMO_HOLD=1 pnpm demo                   # then keep everything up for the website
  *
  * Every agent is registered the way a person would through the website
- * (docs/NEAR-PORT.md §5): the API hands out the key the signer holds for the
+ * (docs/NEAR-WIRE.md §5): the API hands out the key the signer holds for the
  * agent's wallet; the owner's account creates that wallet with the key scoped
  * to Pactora and calls register_agent; the owner signs the API's challenge
  * with NEP-413; the signer accepts the wallet. Nothing is written to the
@@ -63,6 +63,11 @@ import {
 import {saveKey, sweep} from './lib/throwaway.mjs';
 
 const SLUG = process.env.DEMO_NETWORK ?? 'sandbox';
+// NEAR each test owner starts with. Testnet NEAR comes from faucets: an owner
+// spends ~0.5 (its agent's wallet, 0.2 + a 0.25 gas allowance, and storage),
+// and the sweep returns the rest. 3 on testnet made one run need ~50 NEAR at
+// its peak and ran a 50 NEAR deployer dry (2026-11-11).
+const PERSON_NEAR = SLUG === 'testnet' ? '1' : '3';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // Testnet: every full-access test account's key is saved under .keys/testnet/
 // before the account exists, and swept back into the deployer at cleanup.
@@ -214,7 +219,7 @@ try {
   await sweep(ROOT, SLUG, root.provider, root.id);
   const people = [];
   for (const name of ['orchestrator', ...WORKERS.map((w) => w.capability)]) {
-    people.push(await createPerson(root, `${run}-${name}`, '3', {save: keep}));
+    people.push(await createPerson(root, `${run}-${name}`, PERSON_NEAR, {save: keep}));
   }
   for (const p of people) await mintTo(root, TOKEN, p, 50_000_000);
   ok(`${people.length} owners created with full-access keys, 50 mUSDC each (run ${run})`);
@@ -392,7 +397,13 @@ try {
   ok('orchestrator funded 2 mUSDC into its purse; every worker staked and is hireable');
 
   // ── 4. the indexer, as in production ──────────────────────────────────
-  const indexer = new Indexer({db, chain, source: await openSource(chain)});
+  const indexerSource = await openSource(chain);
+  const indexer = new Indexer({db, chain, source: indexerSource});
+  // A sparse source (testnet: FastNEAR's tx API) answers from ~30 s behind the
+  // head and is rate-limited: tick every 6 s, and wait up to 8x longer for
+  // what the indexer writes. The sandbox's RPC source keeps its 0.5 s pace.
+  const sparseIndexer = Boolean(indexerSource.blocksIn);
+  const INDEX_PATIENCE = sparseIndexer ? 8 : 1;
   // From the start of this run: the jobs it is about to create.
   ok(`indexer starting at block ${(await indexer.seedCursorToHead()) ?? '(existing cursor)'}`);
   let indexerFailures = 0;
@@ -403,7 +414,7 @@ try {
       } catch (err) {
         if (indexerFailures++ % 10 === 0) warn(`indexer: ${err.message ?? err}`);
       }
-      await sleep(500);
+      await sleep(sparseIndexer ? 6000 : 500);
     }
   })();
 
@@ -492,7 +503,7 @@ try {
   );
 
   // The indexer saw it: settlements and reputation in the database.
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 40 * INDEX_PATIENCE; i++) {
     const [{n}] =
       await sql`SELECT count(*)::int AS n FROM job_events WHERE kind IN ('settled', 'direct_paid')`;
     if (n >= settled.length) break;
@@ -545,7 +556,7 @@ try {
 
     const bidders = [];
     for (const [i, price] of ['30000', '35000'].entries()) {
-      const owner = await createPerson(root, `${run}-bidder${i + 1}`, '3', {save: keep});
+      const owner = await createPerson(root, `${run}-bidder${i + 1}`, PERSON_NEAR, {save: keep});
       await mintTo(root, TOKEN, owner, 20_000_000);
       const a = await registerAgent(owner, {
         name: `Bidder ${i + 1}`,
@@ -841,7 +852,7 @@ try {
     const workerProfileId = (await reviewedWorker.sdk.getMyProfile()).profileId;
     const clientProfileId = (await client.getMyProfile()).profileId;
     // The indexer may be a few blocks behind the chain: wait for its settled event.
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 60 * INDEX_PATIENCE; i++) {
       if ((await client.getPartyReviews(reviewedJob.job.jobId)).window?.settledOnChain) break;
       await sleep(500);
     }
@@ -937,7 +948,7 @@ try {
   // the person approves the same way they funded. Settled on chain, and the
   // worker's on-chain record moves.
   {
-    const hirer = await createPerson(root, `${run}-hirer`, '3', {save: keep});
+    const hirer = await createPerson(root, `${run}-hirer`, PERSON_NEAR, {save: keep});
     await mintTo(root, TOKEN, hirer, 20_000_000);
     const reg = await call(
       hirer.account,
@@ -979,7 +990,7 @@ try {
       : fail(`POST /v1/people: ${me.status} ${JSON.stringify(me.body)}`);
     await deposit(hirer, TOKEN, PACTORA, 1_000_000, {Fund: {agent_id: Number(hirerChainId)}});
 
-    const dOwner = await createPerson(root, `${run}-direct`, '3', {save: keep});
+    const dOwner = await createPerson(root, `${run}-direct`, PERSON_NEAR, {save: keep});
     await mintTo(root, TOKEN, dOwner, 20_000_000);
     const dw = await registerAgent(dOwner, {
       name: 'Direct Translator',
@@ -1093,7 +1104,9 @@ try {
   const daoWasm = process.env.SPUTNIK_DAO_WASM ?? join(contractsRoot, 'dao.wasm');
   if (SLUG !== 'sandbox' || !existsSync(daoWasm)) {
     warn(
-      `the DAO desk section is skipped: no Sputnik DAO code at ${daoWasm} (create-dao.mjs --fetch-wasm writes it)`,
+      SLUG !== 'sandbox'
+        ? 'the DAO desk section runs on the sandbox only (it deploys a throwaway DAO); on testnet the real 2-of-3 DAO ruling is checked by verify-near --dao'
+        : `the DAO desk section is skipped: no Sputnik DAO code at ${daoWasm} (create-dao.mjs --fetch-wasm writes it)`,
     );
   } else {
     const {deployDaoSandbox} = await import(
@@ -1101,7 +1114,7 @@ try {
     );
     const members = [];
     for (let i = 1; i <= 3; i++)
-      members.push(await createPerson(root, `${run}-council${i}`, '3', {save: keep}));
+      members.push(await createPerson(root, `${run}-council${i}`, PERSON_NEAR, {save: keep}));
     const daoId = `${run}-dao.${root.id}`;
     await deployDaoSandbox(
       root.account,
@@ -1112,7 +1125,7 @@ try {
     await call(root.account, PACTORA, 'set_arbiter', {arbiter: daoId}, {deposit: 1n});
     try {
       // A disputed escrow job.
-      const wOwner = await createPerson(root, `${run}-disputed`, '3', {save: keep});
+      const wOwner = await createPerson(root, `${run}-disputed`, PERSON_NEAR, {save: keep});
       await mintTo(root, TOKEN, wOwner, 20_000_000);
       const w = await registerAgent(wOwner, {
         name: 'Disputed Worker',
@@ -1238,7 +1251,7 @@ try {
   // Clearing it lets the keeper's auto_approve pay, on chain. Soft by design:
   // anyone else could still send the permissionless exit (docs/26 F13).
   {
-    const hOwner = await createPerson(root, `${run}-heldworker`, '3', {save: keep});
+    const hOwner = await createPerson(root, `${run}-heldworker`, PERSON_NEAR, {save: keep});
     await mintTo(root, TOKEN, hOwner, 20_000_000);
     // A capability no in-process worker listens for: this job moves only when the demo moves it.
     const hw = await registerAgent(hOwner, {name: 'Held Worker', capability: 'held-review', price: '40000'});
@@ -1289,7 +1302,11 @@ try {
     const deadline = BigInt((await jobOnChain()).review_deadline);
     const chainNow = async () =>
       BigInt((await root.provider.viewBlock({finality: 'final'})).header.timestamp_nanosec) / 1_000_000_000n;
-    for (let i = 0; i < 120 && (await chainNow()) <= deadline + 1n; i++) await sleep(500);
+    // Sandbox: a 10 s review window. Testnet: 600 s (config/params.testnet.json),
+    // waited out by the chain's own clock, so the hold is tested for real there too.
+    const waitStep = SLUG === 'testnet' ? 3000 : 500;
+    const waitSteps = SLUG === 'testnet' ? 300 : 120;
+    for (let i = 0; i < waitSteps && (await chainNow()) <= deadline + 1n; i++) await sleep(waitStep);
     await sleep(12_000);
     const whileHeld = await jobOnChain();
     const purseHeld = BigInt((await purse(hw)).balance);
@@ -1308,7 +1325,8 @@ try {
 
     // Cleared (two reviewers in production): the keeper's auto_approve pays.
     await setStanding('clear', 'cleared by review');
-    for (let i = 0; i < 60 && (await jobOnChain()).state !== 'Settled'; i++) await sleep(500);
+    for (let i = 0; i < 60 * (SLUG === 'testnet' ? 4 : 1) && (await jobOnChain()).state !== 'Settled'; i++)
+      await sleep(500);
     const paidOut = await jobOnChain();
     const gain = BigInt((await purse(hw)).balance) - purseStart;
     const bps = (PRICE * BigInt(params.protocol_fee_bps)) / 10_000n;
@@ -1330,7 +1348,7 @@ try {
   // the client's cancel returns everything. Every check is read from the
   // contract.
   {
-    const xOwner = await createPerson(root, `${run}-x402`, '3', {save: keep});
+    const xOwner = await createPerson(root, `${run}-x402`, PERSON_NEAR, {save: keep});
     await mintTo(root, TOKEN, xOwner, 20_000_000);
     const xAgent = await registerAgent(xOwner, {
       name: 'Paid Research',
@@ -1397,7 +1415,7 @@ try {
       const clientPurseBefore = await purse(orchestratorAgent);
       const paid = await client.payX402(x402.url, {
         maxAmount: '40000',
-        body: {input: {q: 'Where is ETH/USDC liquidity deepest on NEAR?'}},
+        body: {input: {q: 'Where is NEAR/USDC liquidity deepest?'}},
         idempotencyKey: `${run}-x402-ok`,
         scheme: 'pactora-escrow',
       });
@@ -1502,9 +1520,9 @@ try {
     // The attacker's agents. A farm: its owner pays a puppet client, which
     // pays the farm once — a bought review. And a fresh agent, too new to
     // have a record, that charges far more than any task is worth.
-    const farmOwner = await createPerson(root, `${run}-farm`, '3', {save: keep});
-    const puppetOwner = await createPerson(root, `${run}-puppet`, '3', {save: keep});
-    const priceyOwner = await createPerson(root, `${run}-pricey`, '3', {save: keep});
+    const farmOwner = await createPerson(root, `${run}-farm`, PERSON_NEAR, {save: keep});
+    const puppetOwner = await createPerson(root, `${run}-puppet`, PERSON_NEAR, {save: keep});
+    const priceyOwner = await createPerson(root, `${run}-pricey`, PERSON_NEAR, {save: keep});
     for (const p of [farmOwner, priceyOwner]) await mintTo(root, TOKEN, p, 50_000_000);
     const farm = await registerAgent(farmOwner, {
       name: 'Cheap Research',
@@ -1538,7 +1556,7 @@ try {
       path: 'direct',
     });
     let farmTrust;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 60 * INDEX_PATIENCE; i++) {
       farmTrust = await client.trust(Number(farm.agentId));
       if (farmTrust.action === 'block') break;
       await sleep(500);
@@ -1601,7 +1619,7 @@ try {
     // API and the signer straight to the chain. The key is the same kind
     // every agent wallet holds — function-call only, scoped to Pactora.
     console.log(`\n  worse: an agent's wallet key is stolen, and the attacker calls the chain directly.\n`);
-    const leakyOwner = await createPerson(root, `${run}-leaky`, '3', {save: keep});
+    const leakyOwner = await createPerson(root, `${run}-leaky`, PERSON_NEAR, {save: keep});
     await mintTo(root, TOKEN, leakyOwner, 5_000_000);
     const stolen = KeyPair.fromRandom('ed25519');
     const leakyWallet = `bot.${leakyOwner.id}`;

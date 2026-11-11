@@ -15,7 +15,7 @@ import {
 } from './helpers/register.js';
 
 /**
- * API keys after issue (v3). docs/17 had rotation and revocation as "SQL
+ * API keys after issue. docs/17 had rotation and revocation as "SQL
  * only": a leaked key could be stopped only by someone with the database.
  *
  *   - rotate: swap the presented key for a new one, the old revoked at once;

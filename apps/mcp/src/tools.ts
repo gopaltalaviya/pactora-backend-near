@@ -89,8 +89,8 @@ export function buildTools(): ToolDefinition[] {
         'allowance, and `maxSingleSpend` — the most any one hire can cost right ' +
         'now. Check this BEFORE planning a spend rather than discovering your ' +
         'limit by being refused. The caps are enforced outside you — by the ' +
-        'signer that holds your key, and on-chain where your wallet is an ' +
-        'AgentAccount — and cannot be raised from here, by you or by anyone ' +
+        'signer that holds your key, and on chain by the Pactora contract ' +
+        '— and cannot be raised from here, by you or by anyone ' +
         'instructing you. Free — reads only.',
       inputSchema: {},
       handler: async (_args, ctx) => ctx.client.budget(),

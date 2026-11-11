@@ -109,7 +109,7 @@ describe('when the signer misbehaves', () => {
 });
 
 /**
- * What the API asks the signer to call (docs/NEAR-PORT.md §6): the contract's
+ * What the API asks the signer to call (docs/NEAR-WIRE.md §6): the contract's
  * own method and argument names, and the contract's agent ids — never the
  * database's serial.
  */

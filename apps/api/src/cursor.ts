@@ -1,7 +1,7 @@
 import {z} from 'zod';
 
 /**
- * Opaque page cursors (v3).
+ * Opaque page cursors.
  *
  * A cursor wraps the internal row id the list is ordered by. Opaque so a
  * client treats it as a token rather than doing arithmetic on it, and so the

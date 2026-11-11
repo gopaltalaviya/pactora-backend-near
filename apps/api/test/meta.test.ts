@@ -21,7 +21,7 @@ const DB_URL = process.env['DATABASE_URL'] ?? 'postgres://pactora:pactora@127.0.
 
 let app: FastifyInstance;
 let db: Db;
-/** Swapped per test; `null` means "not an AgentAccount, or RPC down". */
+/** Swapped per test; `null` means "no purse reading, or RPC down". */
 let reading: BudgetReading | null | 'throw' = null;
 
 const config = loadConfig({
@@ -109,7 +109,7 @@ describe('GET /v1/network', () => {
     expect(body.fastPathMaxDisplay).toMatch(/\d/);
   });
 
-  /** Everything a client calls on NEAR lives in these accounts (docs/NEAR-PORT.md §4). */
+  /** Everything a client calls on NEAR lives in these accounts (docs/NEAR-WIRE.md §4). */
   it('names the Pactora contract, the token and the arbiter, and the NEAR network id', async () => {
     const body = (await app.inject({method: 'GET', url: '/v1/network'})).json();
     expect(body.chainId).toBe('near:sandbox');
@@ -200,7 +200,7 @@ describe('GET /v1/budget', () => {
    */
   it('gives a newly registered agent a usable budget, not zero', async () => {
     const {apiKey} = await register();
-    reading = null; // no AgentAccount on chain, as for any EOA-backed agent
+    reading = null; // no purse reading from the chain
 
     const body = (await app.inject({method: 'GET', url: '/v1/budget', headers: auth(apiKey)})).json();
     expect(BigInt(body.perTaskCap), 'per-task cap must not be zero').toBeGreaterThan(0n);
@@ -258,7 +258,7 @@ describe('GET /v1/budget', () => {
     expect(body.maxSingleSpend).toBe('20000');
   });
 
-  it('falls back to the cached policy when the wallet is not an AgentAccount', async () => {
+  it('falls back to the cached policy when the purse cannot be read', async () => {
     const {agentId, apiKey} = await register();
     reading = null;
     await db.execute(
@@ -319,7 +319,7 @@ describe('GET /v1/budget', () => {
   });
 
   /**
-   * v3: the contract's cap ROLLS — no 24 hours may exceed it — and the
+   * The contract's cap ROLLS — no 24 hours may exceed it — and the
    * account says when its oldest counted spend leaves the window. That is
    * when capacity next returns; "UTC midnight" or "24h after the first spend"
    * would both send an agent to sleep for the wrong duration.

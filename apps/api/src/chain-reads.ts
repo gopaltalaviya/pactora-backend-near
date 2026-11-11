@@ -11,7 +11,7 @@ import type {PactoraConfig} from '@pactora/config';
  * against came from the chain or from our copy of it.
  *
  * On NEAR every one of these is a view call on the one Pactora contract
- * (docs/NEAR-PORT.md): the registry, the purses (caps and balance) and the
+ * (docs/NEAR-WIRE.md): the registry, the purses (caps and balance) and the
  * jobs all live there.
  */
 
@@ -93,7 +93,7 @@ export function makeBudgetReader(config: PactoraConfig, clientFor = clients(conf
  * An agent as the contract's registry reports it.
  *
  * `wallet` is the accepted wallet, `pendingWallet` the one proposed and not
- * yet accepted (docs/NEAR-PORT.md §5: the signer accepts for it at
+ * yet accepted (docs/NEAR-WIRE.md §5: the signer accepts for it at
  * registration).
  */
 export interface IdentityReading {

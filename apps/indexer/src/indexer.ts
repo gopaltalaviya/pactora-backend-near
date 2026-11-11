@@ -28,7 +28,7 @@ import {
 
 /**
  * NEAR final blocks → Postgres, one worker per enabled chain
- * (docs/NEAR-PORT.md §7).
+ * (docs/NEAR-WIRE.md §7).
  *
  * Three properties this is built around:
  *
@@ -60,6 +60,11 @@ import {
  * chain grows, while a tick stays short enough that a failure retries little.
  */
 export const MAX_BLOCKS_PER_TICK = 50;
+/**
+ * A sparse source's range per tick: a few API calls whatever its width, so a
+ * backlog clears quickly (testnet makes ~100 blocks a minute).
+ */
+export const MAX_BLOCKS_PER_SPARSE_TICK = 600;
 
 /** Block reads in flight at once. Polite to a public endpoint; the order of processing is unaffected. */
 const FETCH_CONCURRENCY = 5;
@@ -221,6 +226,25 @@ export class Indexer {
       }
     }
     if (from > final) return from - 1;
+
+    // A sparse source (`accounts`) answers for a whole range with only the
+    // blocks our receipts executed in, so a tick can take a much wider range
+    // for the same few calls; it has no per-block chain to check (see
+    // `accountsSource`: completeness comes from its head bound instead).
+    if (source.blocksIn) {
+      const to = Math.min(final, from + MAX_BLOCKS_PER_SPARSE_TICK - 1);
+      const sparse = await source.blocksIn(from, to);
+      for (const b of sparse) {
+        if (b.height < from || b.height > to) {
+          throw new ChainLinkError(
+            `chain ${chain.chainId}: asked the ${source.kind} source for ${from}..${to}, got block ${b.height}`,
+          );
+        }
+      }
+      const lastHash = sparse.at(-1)?.hash ?? cursor?.lastBlockHash ?? '';
+      return this.apply(sparse, to, lastHash, from);
+    }
+
     const to = Math.min(final, from + MAX_BLOCKS_PER_TICK - 1);
 
     const blocks = await this.readBlocks(from, to).catch((err: unknown) => {
@@ -264,6 +288,12 @@ export class Indexer {
     }
 
     const real = blocks.filter((b): b is BlockRead => b !== null);
+    return this.apply(real, to, parent, from);
+  }
+
+  /** Decode and write one batch's events, and move the cursor to `to`, in one transaction. */
+  private async apply(real: BlockRead[], to: number, parent: string, from: number): Promise<number> {
+    const {chain} = this.deps;
     const protocol = real.flatMap((b) => eventsOf(b.receipts, b, this.pactora));
     const token = real.flatMap((b) => eventsOf(b.receipts, b, this.token));
     // Decoded before the transaction, so an event this code cannot read
@@ -509,7 +539,7 @@ export class Indexer {
    * chain id yet, and the same two parties.
    *
    * The hash alone is not enough. A spec can repeat — the same work hired
-   * twice, a database rebuilt, two deployments sharing a chain — and an EVM
+   * twice, a database rebuilt, two deployments sharing a chain — and a
    * live run once linked an unaccepted escrow job to an OLD fast-path
    * payment, called it settled, and credited the worker. The event names
    * both parties by contract agent id; they must be this row's.

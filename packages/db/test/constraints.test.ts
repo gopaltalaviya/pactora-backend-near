@@ -63,10 +63,10 @@ describe('a job can never span two chains', () => {
   /**
    * The composite foreign key is what makes this structural. Without it, a
    * job whose client is on testnet and whose worker is on mainnet is one
-   * application bug away — and testnet MON is free, so that bug is a way to
+   * application bug away — and testnet NEAR is free, so that bug is a way to
    * buy mainnet reputation.
    */
-  it('refuses a job whose worker is on another chain', async () => {
+  it('refuses a job whose worker is on another network', async () => {
     const client = await agent('near:testnet', 'w11.testnet');
     const worker = await agent('near:sandbox', 'w22.testnet');
 
@@ -77,7 +77,7 @@ describe('a job can never span two chains', () => {
     );
   });
 
-  it('refuses a job whose client is on another chain', async () => {
+  it('refuses a job whose client is on another network', async () => {
     const client = await agent('near:sandbox', 'w33.testnet');
     const worker = await agent('near:testnet', 'w44.testnet');
 
@@ -316,11 +316,11 @@ describe('uniqueness that makes replay safe', () => {
   });
 });
 
-describe('NEAR identifiers (docs/NEAR-PORT.md §1–2)', () => {
+describe('NEAR identifiers (docs/NEAR-WIRE.md §1–2)', () => {
   it('refuses a network key that is not a NEAR CAIP-2 id', async () => {
     await refuses(
       sql`INSERT INTO agents (chain_id, owner_address, wallet_address, name, price_per_task)
-          VALUES ('10143', 'o.testnet', 'w1.testnet', 'A', 100)`,
+          VALUES ('unknown:1', 'o.testnet', 'w1.testnet', 'A', 100)`,
       /agents_chain_caip2/,
     );
   });

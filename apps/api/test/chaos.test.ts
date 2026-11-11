@@ -429,7 +429,7 @@ describe('the daily cap', () => {
     submitBehaviour = () => {
       throw new PactoraError(
         ErrorCode.INSUFFICIENT_FUNDS,
-        'the agent wallet 0xabc has no MON left for gas — top it up and retry the same request',
+        'the agent wallet bot.testnet has no NEAR left for gas — top it up and retry the same request',
       );
     };
 

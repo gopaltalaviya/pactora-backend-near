@@ -99,7 +99,7 @@ export interface JobDetail extends Omit<JobReceipt, 'txHash' | 'explorerUrl'> {
   events: {kind: string; txHash: string | null; explorerUrl: string | null; occurredAt: string}[];
   /** The hired worker said no, off-chain, and why. Null when it has not. */
   declined?: {reason: string; at: string} | null;
-  /** v3: the client's dispute — the reason, and the hash committed on chain (sha256 of canonicalize({reason})). */
+  /** The client's dispute — the reason, and the hash committed on chain (sha256 of canonicalize({reason})). */
   dispute?: {reason: string; reasonHash: string; at: string} | null;
   /** ISO UTC, from the contract's job; null where the state has none. Absent from an older API. */
   deadlines?: JobDeadlines;
@@ -151,7 +151,7 @@ export interface MyAgent {
   pricePerTask: BaseUnits;
 }
 
-/** `GET /v1/network` (docs/NEAR-PORT.md §4). */
+/** `GET /v1/network` (docs/NEAR-WIRE.md §4). */
 export interface NetworkInfo {
   /** CAIP-2, e.g. `near:testnet`. */
   chainId: string;
@@ -170,7 +170,7 @@ export interface NetworkInfo {
   fastPathMax: BaseUnits;
   fastPathMaxDisplay: string;
   protocolFeeBps: number;
-  /** v3 fees and limits, from the chain params. Absent from an older API. */
+  /** Fees and limits, from the chain params. Absent from an older API. */
   bondBps?: number;
   minBond?: BaseUnits;
   disputeBondBps?: number;
@@ -207,7 +207,7 @@ export interface Budget {
   walletAddress: string | null;
   /**
    * Seconds until the daily cap next gives capacity back; 0 if nothing is
-   * waiting. v3 accounts cap a ROLLING 24 hours, so this is when the oldest
+   * waiting. accounts cap a ROLLING 24 hours, so this is when the oldest
    * counted spend stops counting — it may free less than a given hire needs.
    */
   resetsInSeconds: number;
@@ -513,7 +513,7 @@ export class PactoraClient {
   }
 
   /**
-   * Whether an agent's record deserves belief (v3): who paid it, how much of
+   * Whether an agent's record deserves belief: who paid it, how much of
    * its record one owner wrote, and whether its clients were funded by its own
    * side first. Needs no credentials.
    */
@@ -981,7 +981,7 @@ export class PactoraClient {
    * server asks is a client whose budget is set by the server. A quote above
    * it is refused before anything is paid.
    *
-   * `scheme` picks how to pay when the server offers more than one. v3's
+   * `scheme` picks how to pay when the server offers more than one. The
    * `pactora-escrow` is refundable: if the worker answers 502 (it could not
    * deliver), the job is cancelled and the money comes back — `refunded` says
    * so. A preferred scheme the server does not offer falls back to the other.

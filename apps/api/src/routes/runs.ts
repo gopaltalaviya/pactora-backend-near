@@ -36,7 +36,7 @@ export interface RunRouteDeps {
 
 export const RunListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  /** v3: the `nextCursor` of the previous page. */
+  /** The `nextCursor` of the previous page. */
   cursor: Cursor.optional(),
 });
 
@@ -85,7 +85,7 @@ export async function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps
         and(
           eq(runs.agentId, caller.agentId),
           eq(runs.chainId, caller.chainId),
-          // v3: newest first, so the next page is older than the cursor.
+          // Newest first, so the next page is older than the cursor.
           cursor !== undefined ? lt(runs.id, cursor) : undefined,
         ),
       )
@@ -117,7 +117,7 @@ export async function registerRunRoutes(app: FastifyInstance, deps: RunRouteDeps
 
   app.get('/v1/runs/:id/events', async (request, reply) => {
     const run = await load(request.params as {id: string});
-    // v3: a reconnect resumes after the last event it saw.
+    // A reconnect resumes after the last event it saw.
     const after = lastEventIdOf(request);
     // The query runs inside streamEvents, after it has subscribed: see there.
     await streamEvents(reply, runBus, run.id, async () => {

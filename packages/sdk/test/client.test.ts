@@ -514,7 +514,7 @@ describe('waiting for work, not for a state', () => {
 });
 
 /**
- * v3: paying for an HTTP resource with the refundable scheme. The money
+ * Paying for an HTTP resource with the refundable scheme. The money
  * waits in escrow, so a worker that answers 502 — paid, could not deliver —
  * costs the client nothing: the SDK cancels the job and the escrow refunds.
  */

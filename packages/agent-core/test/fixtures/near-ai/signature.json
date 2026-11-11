@@ -2,6 +2,6 @@
   "_note": "The documented shape of GET /v1/signature/<response id> (docs.near.ai response-signature-verification, docs/24 §4). `text` is sha256(request bytes):sha256(response bytes); the test fills text, signature and signing_address from the bytes it exchanged and a key it holds, so nothing here is a captured secret.",
   "text": "<sha256 of the request body>:<sha256 of the response body>",
   "signature": "<hex or base64>",
-  "signing_address": "<ed25519 public key (hex) or 0x… Ethereum address>",
+  "signing_address": "<ed25519 public key (hex) or 0x… secp256k1 ECDSA (EIP-191) signing address>",
   "signing_algo": "ed25519"
 }

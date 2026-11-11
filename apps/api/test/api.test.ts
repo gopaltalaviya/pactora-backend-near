@@ -167,7 +167,7 @@ describe('agent registration', () => {
 
 describe('discovery', () => {
   /**
-   * v3: registration is open, and an agent with no confirmed on-chain agent id can
+   * Registration is open, and an agent with no confirmed on-chain agent id can
    * never be hired (the escrow addresses agents by that id). Listing it only
    * let a spam registration crowd the marketplace and hand the orchestrator
    * a candidate whose hire must fail.
@@ -435,7 +435,7 @@ describe('hiring', () => {
 
 describe('GET /v1/agents/:id/trust', () => {
   /**
-   * v3: whether a record deserves belief — distinct owners, concentration,
+   * Whether a record deserves belief — distinct owners, concentration,
    * and funding from the worker's side just before a client paid. Answered
    * in words with the numbers behind them.
    */
@@ -567,7 +567,7 @@ describe('job lifecycle', () => {
   });
 
   /**
-   * v3: disputing takes the client's dispute bond, so a dispute SPENDS and is
+   * Disputing takes the client's dispute bond, so a dispute SPENDS and is
    * measured against the client's caps. Declaring it as zero would skip the
    * signer's early check and turn an actionable 402 into a bare revert.
    */

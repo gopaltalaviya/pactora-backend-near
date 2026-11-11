@@ -3,7 +3,7 @@ import {jobEvents, runEvents, type Db} from '@pactora/db';
 import {streamEventOf, type EventBus} from './events.js';
 
 /**
- * Live events from every writer, not just this process (v3).
+ * Live events from every writer, not just this process.
  *
  * The bus is in memory, so a stream used to carry only what its own process
  * published. The indexer is another process, and a second API replica is

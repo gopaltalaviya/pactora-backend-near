@@ -8,8 +8,8 @@
     "shortName": "near-testnet",
     "testnet": true,
     "nativeCurrency": {"name": "NEAR", "symbol": "NEAR", "decimals": 24},
-    "rpcUrls": ["https://rpc.testnet.near.org"],
-    "blockSource": {"kind": "neardata", "url": "https://testnet.neardata.xyz"},
+    "rpcUrls": ["https://test.rpc.fastnear.com", "https://rpc.testnet.near.org"],
+    "blockSource": {"kind": "accounts", "url": "https://tx.test.fastnear.com"},
     "blockExplorerUrls": ["https://testnet.nearblocks.io"],
     "faucetUrls": [],
     "paymentToken": {"symbol": "mUSDC", "decimals": 6, "accountId": null, "deployWithProtocol": true}

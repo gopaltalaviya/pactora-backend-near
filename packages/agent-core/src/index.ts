@@ -10,4 +10,4 @@ export * from './factory.js';
 export {CachedBrain, RecordingBrain, FallbackBrain};
 export * from './run.js';
 export * from './x402.js';
-export {assertNoLegacyEnv} from '@pactora/shared';
+export {assertNoUnsupportedEnv} from '@pactora/shared';

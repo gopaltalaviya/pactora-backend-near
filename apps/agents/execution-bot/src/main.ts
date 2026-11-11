@@ -6,7 +6,7 @@ import {runWorker} from '@pactora/agent-core';
  *
  * It produces a plan and reports what it would do. It does NOT hold the
  * client's funds and cannot move them: on Pactora, value moves only through
- * `TaskEscrow`, under the caps in the client's own `AgentAccount`. An
+ * the Pactora contract's escrow, under the caps on the client's own purse. An
  * execution agent that could spend on the client's behalf would make those
  * caps meaningless, which is the whole point of having them.
  *

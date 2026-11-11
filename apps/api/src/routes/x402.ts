@@ -29,7 +29,7 @@ import {hire, requiredIdempotencyKey, type JobRouteDeps} from './jobs.js';
  *
  * - `settle` — the CLIENT pays for a resource it was quoted in a 402. The
  *   payment is a fast-path hire of the worker named in the quote, so it runs
- *   through every rule a hire does: the signer's caps (or the AgentAccount's,
+ *   through every rule a hire does: the signer's caps (and the purse's,
  *   on chain), idempotency, on-chain agent ids. The answer carries the ready-made
  *   `X-PAYMENT` header for the retry.
  * - `verify` — the WORKER asks whether a presented payment is good. No side
@@ -43,7 +43,7 @@ import {hire, requiredIdempotencyKey, type JobRouteDeps} from './jobs.js';
  * says what the API asked for; only the receipt says what the escrow did.
  */
 
-/** The x402 `network` is the CAIP-2 chain id itself (docs/NEAR-PORT.md §1). */
+/** The x402 `network` is the CAIP-2 chain id itself (docs/NEAR-WIRE.md §1). */
 export const x402Network = (chainId: string): ChainId => ChainId.parse(chainId);
 
 export const SettleBody = z.object({paymentRequirements: PaymentRequirements});
@@ -84,7 +84,7 @@ export async function registerX402Routes(app: FastifyInstance, deps: X402RouteDe
     const asked = BigInt(req.maxAmountRequired);
 
     if (escrowed) {
-      // v3: the money waits in the escrow, so there is no fast-path cap —
+      // The money waits in the escrow, so there is no fast-path cap —
       // only the escrow's own ceiling on one job.
       const maxJobAmount = chain.params.maxJobAmount;
       if (asked > maxJobAmount) {
@@ -255,7 +255,7 @@ async function check(
     return {verdict: invalid('not_direct_payment', 'an escrow job is not a direct payment', payer)};
   if (escrowed && job.path !== 'escrow')
     return {verdict: invalid('wrong_scheme', 'a direct payment is not an escrow-backed one', payer)};
-  // v3: an escrow payment is good only while its money is still in escrow
+  // An escrow payment is good only while its money is still in escrow
   // for this work — not once the client cancelled it or the job has ended.
   if (escrowed && job.state !== 'created') {
     return {

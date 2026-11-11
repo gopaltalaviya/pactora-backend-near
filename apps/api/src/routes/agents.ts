@@ -95,7 +95,7 @@ export const DiscoverQuery = z.object({
 });
 
 /**
- * The agent keys the signer holds (docs/NEAR-PORT.md §5–6): the public key a
+ * The agent keys the signer holds (docs/NEAR-WIRE.md §5–6): the public key a
  * new agent wallet is created with, and the wallet's `accept_wallet`, signed
  * with that key.
  */
@@ -173,7 +173,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
     }
     const chain = chains[chainId]!;
 
-    // v3: only agents the chain confirmed. One with no on-chain agent id can never
+    // Only agents the chain confirmed. One with no on-chain agent id can never
     // be hired, so listing it let open registration crowd the marketplace.
     const conditions = [eq(agents.chainId, chainId), eq(agents.active, true), isNotNull(agents.chainAgentId)];
     if (q.maxPrice) conditions.push(lte(agents.pricePerTask, q.maxPrice));
@@ -312,13 +312,13 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
   });
 
   /**
-   * Whether this agent's record deserves belief (v3).
+   * Whether this agent's record deserves belief.
    *
    * The score proves every review cost a payment; this asks who paid. It
    * counts distinct client owners, how much of the record one owner wrote,
    * and whether a client received payment-token money from the worker's side
-   * shortly before it paid — the farming pattern prooflines measured on
-   * an earlier deployment. Answered in words with the numbers behind them, and the block the
+   * shortly before it paid — the farming pattern prooflines measured in
+   * a public on-chain agent registry. Answered in words with the numbers behind them, and the block the
    * indexer had read up to, so the answer says what it rests on.
    */
   app.get('/v1/agents/:id/trust', async (request) => {
@@ -349,7 +349,7 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
   });
 
   /**
-   * The key a new agent wallet is created with (docs/NEAR-PORT.md §5, step 1).
+   * The key a new agent wallet is created with (docs/NEAR-WIRE.md §5, step 1).
    *
    * The signer generates it on first request and holds the private half; the
    * owner's wallet adds the public half to the new account as a
@@ -542,12 +542,10 @@ export async function registerAgentRoutes(app: FastifyInstance, deps: RouteDeps)
       // Without it an agent registers with no policy row at all, and
       // /v1/budget falls back to the cache, finds nothing, and reports zero —
       // so an orchestrator refuses to hire anybody and the marketplace does
-      // not work at all for a new agent. Meanwhile the signer, reading a
-      // wallet that is a plain EOA rather than an AgentAccount, enforces
-      // nothing. Those two disagreeing is worse than either alone.
+      // not work at all for a new agent.
       //
-      // The on-chain caps still win wherever an AgentAccount exists; this is
-      // the floor for everyone else.
+      // The on-chain caps on the agent's purse still win wherever they can be
+      // read; this is the floor when they cannot.
       await tx.insert(spendPolicies).values({
         agentId: agent!.id,
         perTaskCap: String(chains[chainId]!.params.defaultPerTaskCap),

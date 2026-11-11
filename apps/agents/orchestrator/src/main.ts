@@ -1,7 +1,7 @@
 import {PactoraClient} from '@pactora/sdk';
 import {
   Orchestrator,
-  assertNoLegacyEnv,
+  assertNoUnsupportedEnv,
   buildBrain,
   buildJudgeBrain,
   describeBrain,
@@ -11,7 +11,7 @@ import {
 /**
  * orchestrator — the client side, as a process.
  *
- *   node dist/main.js "find the deepest ETH/USDC venue on NEAR and tell me whether to trade"
+ *   node dist/main.js "Research NEAR/USDC liquidity on NEAR and tell me whether to open a position."
  *
  * Prints the trace as it happens. Every on-chain action carries its explorer
  * link on the line where it happens, because a payment nobody can verify is
@@ -25,7 +25,7 @@ if (!goal) {
 }
 
 try {
-  assertNoLegacyEnv();
+  assertNoUnsupportedEnv();
 } catch (err) {
   process.stderr.write(`${(err as Error).message}\n`);
   process.exit(1);

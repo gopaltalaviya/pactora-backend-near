@@ -18,7 +18,7 @@ import type {IdentityReading} from '../src/chain-reads.js';
  *
  * Now the owner signs a server-issued, single-use challenge that names what
  * is being registered — on NEAR with NEP-413, and with a FULL-ACCESS key of
- * the owner's account (docs/NEAR-PORT.md §5). The agent's own function-call
+ * the owner's account (docs/NEAR-WIRE.md §5). The agent's own function-call
  * key, which the signer holds, cannot sign for its owner.
  */
 

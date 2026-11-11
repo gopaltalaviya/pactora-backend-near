@@ -1,5 +1,5 @@
 /**
- * Where the indexer reads final blocks from (docs/NEAR-PORT.md §3, §7).
+ * Where the indexer reads final blocks from (docs/NEAR-WIRE.md §3, §7).
  *
  * Both sources reduce a block to the same thing: its header and the receipt
  * executions in it, each with its logs. The indexer does not know which one
@@ -27,11 +27,18 @@ export interface BlockRead {
 }
 
 export interface BlockSource {
-  readonly kind: 'neardata' | 'rpc';
+  readonly kind: 'neardata' | 'rpc' | 'accounts';
   /** Height of the newest final block. */
   finalHeight(): Promise<number>;
   /** The block at `height`, or null when no block was produced there. */
   blockAt(height: number): Promise<BlockRead | null>;
+  /**
+   * A sparse source (`accounts`) answers for a whole range at once with only
+   * the blocks in which a watched account's receipts executed, in height
+   * order. The indexer then cannot chain every block to its parent; it
+   * relies on the source's own completeness bound (`finalHeight`) instead.
+   */
+  blocksIn?(from: number, to: number): Promise<BlockRead[]>;
   /**
    * The oldest height the source still holds, when it can say (an RPC node's
    * `sync_info.earliest_block_height`); null or absent: everything (archival).
@@ -219,6 +226,199 @@ export function blockRpc(rpcUrl: string): BlockRpc {
         chunk_id: chunkHash,
       });
       return c.transactions.map((t) => ({hash: t.hash, signer_id: t.signer_id}));
+    },
+  };
+}
+
+/**
+ * The `accounts` source (testnet, 2026-11-11): FastNEAR's transactions API
+ * (`tx.test.fastnear.com`), asked only for the transactions that touch the
+ * watched accounts (Pactora and its token), instead of reading every block.
+ *
+ * Why: testnet makes ~100 blocks a minute. neardata's free tier serves ~30
+ * blocks a minute (measured: a burst of 32, then HTTP 429) and its key is a
+ * paid plan; a free RPC throttles a block-and-chunks reader to ~22 blocks a
+ * minute (measured: 232 of 21,000 calls answered). This source makes a few
+ * calls per tick whatever the network's traffic.
+ *
+ * How it stays complete:
+ * - `finalHeight` is the API's own newest indexed block, minus `holdBack`
+ *   blocks, so the indexer never moves past a height whose transactions the
+ *   API has not listed yet (a transaction is listed with all its receipts;
+ *   holdBack covers the receipts still executing after its block).
+ * - `blocksIn(from, to)` lists transactions from `from - lookBack` (receipts
+ *   execute after their transaction's block) and keeps exactly the receipts
+ *   that EXECUTED in [from, to], filed under their own block. Ranges do not
+ *   overlap, so each receipt is read once.
+ * - What it cannot do: chain every block to its parent (it reads only the
+ *   blocks with our receipts). `openSource` checks its head hash against the
+ *   RPC at start instead.
+ */
+export interface AccountsSourceOptions {
+  /** e.g. `https://tx.test.fastnear.com` */
+  baseUrl: string;
+  /** The accounts whose transactions matter: Pactora and its payment token. */
+  accounts: string[];
+  fetchImpl?: PostLike;
+  /** Blocks kept back from the API's head. Default 50 (~30 s on testnet). */
+  holdBack?: number;
+  /** How far before `from` a transaction may lie and still have receipts in range. Default 300. */
+  lookBack?: number;
+}
+
+type PostLike = (
+  url: string,
+  init: {method: 'POST'; headers: Record<string, string>; body: string; signal?: AbortSignal},
+) => Promise<{ok: boolean; status: number; json(): Promise<unknown>}>;
+
+interface TxApiAccountPage {
+  account_txs: Array<{transaction_hash: string; tx_block_height: number}>;
+  resume_token?: string | null;
+}
+interface TxApiReceipt {
+  receipt: {receipt_id: string; predecessor_id: string; receiver_id: string};
+  execution_outcome: {
+    id: string;
+    block_hash: string;
+    block_height: number;
+    block_timestamp: number | string;
+    index?: number;
+    outcome: {executor_id: string; logs: string[]; status: Record<string, unknown>};
+  };
+}
+interface TxApiTx {
+  transaction: {hash: string; signer_id: string};
+  receipts: TxApiReceipt[];
+}
+
+const TX_HASHES_PER_CALL = 20;
+const ACCOUNT_PAGE = 200;
+
+/** An `accounts` source, plus its API's raw head (for the startup network check). */
+export type AccountsSource = BlockSource & {apiHead(): Promise<{height: number; hash: string}>};
+
+export function accountsSource(opts: AccountsSourceOptions): AccountsSource {
+  const base = opts.baseUrl.replace(/\/$/, '');
+  const post = opts.fetchImpl ?? fetch;
+  const holdBack = opts.holdBack ?? 50;
+  const lookBack = opts.lookBack ?? 300;
+  const accounts = [...new Set(opts.accounts)];
+  if (accounts.length === 0) throw new Error('accountsSource: no accounts to watch');
+
+  const call = async <T>(path: string, body: unknown): Promise<T> => {
+    const res = await post(`${base}${path}`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) throw new Error(`fastnear tx API ${path}: HTTP ${res.status}`);
+    return (await res.json()) as T;
+  };
+
+  /** The API's newest indexed block: its own completeness bound. */
+  const head = async () => {
+    const r = await call<{
+      blocks: Array<{block_height: number; block_hash: string; block_timestamp: string}>;
+    }>('/v0/blocks', {});
+    const b = r.blocks?.[0];
+    if (!b) throw new Error('fastnear tx API /v0/blocks: no blocks');
+    return b;
+  };
+
+  const hashesTouching = async (account: string, fromTx: number, to: number): Promise<string[]> => {
+    const out: string[] = [];
+    let resume: string | undefined;
+    for (let page = 0; page < 1000; page++) {
+      const r = await call<TxApiAccountPage>('/v0/account', {
+        account_id: account,
+        from_tx_block_height: fromTx,
+        to_tx_block_height: to,
+        desc: false,
+        limit: ACCOUNT_PAGE,
+        ...(resume ? {resume_token: resume} : {}),
+      });
+      for (const row of r.account_txs) out.push(row.transaction_hash);
+      if (!r.resume_token) return out;
+      resume = r.resume_token;
+    }
+    throw new Error(
+      `fastnear tx API /v0/account: more than ${1000 * ACCOUNT_PAGE} transactions for ${account}`,
+    );
+  };
+
+  return {
+    kind: 'accounts',
+    async apiHead() {
+      const h = await head();
+      return {height: h.block_height, hash: h.block_hash};
+    },
+    async finalHeight() {
+      return (await head()).block_height - holdBack;
+    },
+    async blockAt(height) {
+      // Only the cursor seed asks for one block (the head); a sparse source
+      // keeps no per-block chain, so the hash is informational.
+      const h = await head();
+      return {
+        height,
+        hash: h.block_height === height ? h.block_hash : '',
+        prevHash: '',
+        timestampNs: BigInt(h.block_timestamp),
+        receipts: [],
+      };
+    },
+    async blocksIn(from, to) {
+      if (to < from) return [];
+      const fromTx = Math.max(0, from - lookBack);
+      const hashes = new Set<string>();
+      for (const a of accounts) for (const h of await hashesTouching(a, fromTx, to)) hashes.add(h);
+      const all = [...hashes];
+      const byHeight = new Map<number, BlockRead & {order: Array<[number, ReceiptExecution]>}>();
+      for (let i = 0; i < all.length; i += TX_HASHES_PER_CALL) {
+        const r = await call<{transactions: Array<TxApiTx | null>}>('/v0/transactions', {
+          tx_hashes: all.slice(i, i + TX_HASHES_PER_CALL),
+        });
+        for (const tx of r.transactions) {
+          if (!tx) continue;
+          for (const rc of tx.receipts ?? []) {
+            const eo = rc.execution_outcome;
+            if (eo.block_height < from || eo.block_height > to) continue;
+            let b = byHeight.get(eo.block_height);
+            if (!b) {
+              b = {
+                height: eo.block_height,
+                hash: eo.block_hash,
+                prevHash: '',
+                timestampNs: BigInt(eo.block_timestamp),
+                receipts: [],
+                order: [],
+              };
+              byHeight.set(eo.block_height, b);
+            }
+            b.order.push([
+              eo.index ?? 0,
+              {
+                receiptId: eo.id,
+                executorId: eo.outcome.executor_id,
+                predecessorId: rc.receipt.predecessor_id,
+                txHash: tx.transaction.hash,
+                logs: eo.outcome.logs,
+                ok: !('Failure' in eo.outcome.status),
+              },
+            ]);
+          }
+        }
+      }
+      return [...byHeight.values()]
+        .sort((a, b) => a.height - b.height)
+        .map(({order, ...b}) => ({
+          ...b,
+          // In the order the block executed them (the outcome's index), then by id.
+          receipts: order
+            .sort((x, y) => x[0] - y[0] || x[1].receiptId.localeCompare(y[1].receiptId))
+            .map(([, r]) => r),
+        }));
     },
   };
 }

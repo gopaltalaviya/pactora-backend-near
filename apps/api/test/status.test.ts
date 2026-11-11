@@ -299,7 +299,7 @@ describe('/metrics in production', () => {
  */
 const DOCS_DIR =
   process.env.PACTORA_DOCS_DIR ?? fileURLToPath(new URL('../../../../pactora-docs-near', import.meta.url));
-describe('gas (v3)', () => {
+describe('gas', () => {
   /**
    * docs/17: "wallet balance monitoring: none; checked by hand before demos".
    * The signer now reports its wallets' gas from a background reading; the

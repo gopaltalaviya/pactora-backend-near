@@ -1,6 +1,6 @@
 /**
  * The tracked `.env.example` is what a judge copies. It must describe THIS
- * build: every name in it passes the services' own legacy-env guard (or the
+ * build: every name in it passes the services' own unsupported-env guard (or the
  * copy refuses to start), every name is one the code actually reads, and
  * every network value is a NEAR CAIP-2 id.
  */
@@ -8,7 +8,7 @@ import {readFileSync, readdirSync, statSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {describe, expect, it} from 'vitest';
-import {legacyEnvProblems} from '../src/legacy-env.js';
+import {unsupportedEnvProblems} from '../src/unsupported-env.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -45,8 +45,8 @@ const READ_ELSEWHERE = new Set(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'M
 const RPC_PER_NETWORK = /^RPC_URL_(TESTNET|SANDBOX|MAINNET)$/;
 
 describe('.env.example', () => {
-  it('passes the legacy-env guard every service runs at boot', () => {
-    expect(legacyEnvProblems(example)).toEqual([]);
+  it('passes the unsupported-env guard every service runs at boot', () => {
+    expect(unsupportedEnvProblems(example)).toEqual([]);
   });
 
   it('names only variables the code reads', () => {

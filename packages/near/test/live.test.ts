@@ -8,7 +8,7 @@ import {blockRpc, nearClient, neardataSource, rpcSource} from '../src/index.js';
  *   NEAR_LIVE=1 pnpm vitest run packages/near/test/live.test.ts
  */
 const LIVE = process.env['NEAR_LIVE'] === '1';
-const RPC = process.env['RPC_URL_TESTNET'] ?? 'https://rpc.testnet.near.org';
+const RPC = process.env['RPC_URL_TESTNET'] ?? 'https://test.rpc.fastnear.com';
 
 describe.skipIf(!LIVE)('NEAR testnet, live (read-only)', () => {
   const client = nearClient(RPC);

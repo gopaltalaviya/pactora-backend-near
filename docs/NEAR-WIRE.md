@@ -63,8 +63,8 @@ A network entry:
   "chainId": "near:testnet", "slug": "testnet", "nearNetworkId": "testnet",
   "name": "NEAR Testnet", "shortName": "near-testnet", "testnet": true,
   "nativeCurrency": {"name": "NEAR", "symbol": "NEAR", "decimals": 24},
-  "rpcUrls": ["https://rpc.testnet.near.org"],
-  "blockSource": {"kind": "neardata", "url": "https://testnet.neardata.xyz"},
+  "rpcUrls": ["https://test.rpc.fastnear.com", "https://rpc.testnet.near.org"],
+  "blockSource": {"kind": "accounts", "url": "https://tx.test.fastnear.com"},
   "blockExplorerUrls": ["https://testnet.nearblocks.io"],
   "faucetUrls": [],
   "paymentToken": {"symbol": "mUSDC", "decimals": 6, "accountId": null, "deployWithProtocol": true}
@@ -127,8 +127,8 @@ account does, and the agent id exists only after `register_agent`:
    pending, the signer accepts first (`POST /keys/accept`, §6). Only then is
    the agent row written and the API key issued.
 
-`chainAgentId` is required (an agent not on chain cannot be hired); the old
-`walletSignature` path is gone. Key re-issue (`POST /v1/agents/:id/keys`) takes
+`chainAgentId` is required (an agent not on chain cannot be hired).
+Key re-issue (`POST /v1/agents/:id/keys`) takes
 `{publicKey, signature, nonce}` — the nonce of the challenge that was signed,
 required since the 2026-11-09 audit (M2) — and makes the same full-access
 check against the agent's current on-chain owner. In every check the
@@ -203,7 +203,7 @@ with `code`:
 | `code` (HTTP) | When |
 |---|---|
 | `SCHEMA_MISMATCH` (422) | body or args malformed; declared `spend` below what the call takes; contract `BadHash`, `ZeroAmount`, `AmountBelowMinimum`, `AmountAboveMaximum`, `AmountTooLargeForFastPath`, `WindowTooLong` |
-| `CHAIN_MISMATCH` (409) | another chain; agent row not on this chain |
+| `CHAIN_MISMATCH` (409) | another network; agent row not on this chain |
 | `FORBIDDEN` (403) | method not allowed; `client_id`/`agent_id` not the agent's; dispute of another client's job; key is FullAccess, for another receiver, or lacks the method; contract `NotAgentWallet`, `NotAgentOwner`, `NotPendingWallet` |
 | `AGENT_NOT_HIREABLE` (409) | no `chainAgentId`; no key held; key not on the wallet; wallet account missing; no purse; contract `NotHireable`, `AgentFrozen`, `SameOwner`, `SelfDealing` |
 | `INSUFFICIENT_FUNDS` (402) | wallet below 0.05 NEAR; key allowance below 0.01 NEAR; purse balance below the spend; contract `InsufficientBalance`, `InsufficientBond`, `InsufficientStorage` |

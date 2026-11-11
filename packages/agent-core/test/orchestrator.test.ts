@@ -21,7 +21,7 @@ import {
 
 const PLAN_ONE = {
   subtasks: [
-    {capability: 'market-research', input: {question: 'ETH/USDC depth?'}, requiredFields: ['summary']},
+    {capability: 'market-research', input: {question: 'NEAR/USDC depth?'}, requiredFields: ['summary']},
   ],
   reasoning: 'one question, one capability',
 };
@@ -61,7 +61,7 @@ const DEFAULTS: Record<string, unknown> = {
   Plan: PLAN_ONE,
   Selection: {agentId: 7, reason: 'cheapest with a real history'},
   Verdict: GOOD_VERDICT,
-  Synthesis: {answer: 'ETH/USDC depth is healthy.', confidence: 0.8},
+  Synthesis: {answer: 'NEAR/USDC depth is healthy.', confidence: 0.8},
 };
 
 interface Calls {
@@ -101,7 +101,7 @@ function fakeClient(over: Record<string, unknown> = {}): {client: PactoraClient;
     awaitResult: async () => ({
       jobId: '9',
       state: 'submitted',
-      result: {summary: 'ETH/USDC depth is healthy at 0.3% slippage for 100k.'},
+      result: {summary: 'NEAR/USDC depth is healthy at 0.3% slippage for 100k.'},
     }),
     approve: async (jobId: string) => {
       calls.approved.push(jobId);
@@ -128,7 +128,7 @@ function build(clientOver: Record<string, unknown> = {}, replies: Record<string,
 describe('the happy path', () => {
   it('plans, hires, judges, approves and answers', async () => {
     const {orchestrator, calls, events} = build();
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
 
     expect(report.delivered).toBe(true);
     expect(report.steps[0]).toMatchObject({status: 'settled', jobId: '9'});
@@ -157,7 +157,7 @@ describe('the happy path', () => {
   });
 });
 
-describe('the trust gate (v3)', () => {
+describe('the trust gate', () => {
   const OTHER = {...CANDIDATE, agentId: 8};
   const verdicts = (map: Record<number, string>) => async (id: number) => ({
     agentId: String(id),
@@ -290,7 +290,7 @@ describe('the branches a live demo actually hits', () => {
   /**
    * The planner used to be asked for the output field names a subtask must
    * produce. It is a guess about a worker not yet chosen, whose schema it
-   * cannot see — and the first live run answered ["eth","usdc","near"], so
+   * cannot see — and the first live run answered ["near","usdc","liquidity"], so
    * every worker correctly refused and nothing was ever hired.
    */
   it('does not ask a worker for fields the planner invented', async () => {
@@ -550,9 +550,9 @@ describe('what the worker is told', () => {
       {Plan: {subtasks: [{capability: 'market-research', input: {}}], reasoning: 'the goal is the input'}},
     );
 
-    await orchestrator.run('how deep is ETH/USDC on NEAR?');
+    await orchestrator.run('how deep is NEAR/USDC?');
 
-    expect(specs[0]!.input['goal']).toBe('how deep is ETH/USDC on NEAR?');
+    expect(specs[0]!.input['goal']).toBe('how deep is NEAR/USDC?');
   });
 
   it('tells the worker where its subtask sits in the plan', async () => {
@@ -606,11 +606,11 @@ describe('what the worker is told', () => {
           };
         },
       },
-      {Plan: {subtasks: [{capability: 'market-research', input: {pair: 'ETH/USDC'}}], reasoning: 'r'}},
+      {Plan: {subtasks: [{capability: 'market-research', input: {pair: 'NEAR/USDC'}}], reasoning: 'r'}},
     );
 
     await orchestrator.run('goal');
-    expect(specs[0]!.input['pair']).toBe('ETH/USDC');
+    expect(specs[0]!.input['pair']).toBe('NEAR/USDC');
     expect(specs[0]!.input['goal']).toBe('goal');
   });
 });
@@ -701,7 +701,7 @@ describe('dependent subtasks', () => {
                 // Live, the second Groq run: a bare step index.
                 researchResult: '{{0}}',
                 count: '[3]',
-                pair: 'ETH/USDC',
+                pair: 'NEAR/USDC',
                 note: 'use <b>bold</b> sparingly',
               },
               dependsOn: 0,
@@ -719,7 +719,7 @@ describe('dependent subtasks', () => {
     expect(input).not.toHaveProperty('research');
     expect(input).not.toHaveProperty('researchResult');
     // Real values stay, including ones that merely contain angle brackets.
-    expect(input['pair']).toBe('ETH/USDC');
+    expect(input['pair']).toBe('NEAR/USDC');
     expect(input['count']).toBe('[3]');
     expect(input['note']).toBe('use <b>bold</b> sparingly');
   });
@@ -803,8 +803,8 @@ describe('rejecting work that was already paid for', () => {
   /**
    * The fast path pays the worker in full when the job is created. That is
    * the trade the client makes for skipping escrow, and it means there is
-   * nothing left to withhold: `TaskEscrow` has already transferred, recorded
-   * the feedback and finished with the job.
+   * nothing left to withhold: the contract has already transferred, recorded
+   * the review and finished with the job.
    *
    * The orchestrator still called `dispute` when the judge rejected a
    * fast-path result, and the contract refused —
@@ -953,7 +953,7 @@ describe('a worker that goes silent', () => {
           jobId,
           state: 'submitted',
           path: 'escrow',
-          result: {summary: 'ETH/USDC depth is healthy at 0.3% slippage.'},
+          result: {summary: 'NEAR/USDC depth is healthy at 0.3% slippage.'},
         };
       },
       cancel: async (jobId: string) => {
@@ -985,7 +985,7 @@ describe('a worker that goes silent', () => {
       silent: (id) => (id === 7 ? 'never-accepts' : 'delivers'),
     });
 
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
 
     expect(hires.map((h) => h.agentId)).toEqual([7, 8]);
     expect(cancelled).toEqual(['101']);
@@ -1011,7 +1011,7 @@ describe('a worker that goes silent', () => {
       silent: (id) => (id === 7 ? 'declines' : 'delivers'),
       cancelNotConfirmedOnce: true,
     });
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
     expect(cancelled).toEqual(['101']);
     expect(hires.map((h) => h.agentId)).toEqual([7, 8]);
     expect(report.steps[0]).toMatchObject({status: 'settled', agentId: 8});
@@ -1023,7 +1023,7 @@ describe('a worker that goes silent', () => {
       silent: (id) => (id === 7 ? 'declines' : 'delivers'),
     });
 
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
 
     expect(hires.map((h) => h.agentId)).toEqual([7, 8]);
     expect(cancelled).toEqual(['101']);
@@ -1037,7 +1037,7 @@ describe('a worker that goes silent', () => {
 
   it('ends the step as declined, with the reason, when every worker declines', async () => {
     const {orchestrator} = scenario({candidates: [CANDIDATE, OTHER], silent: () => 'declines'});
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
     expect(report.steps[0]).toMatchObject({
       status: 'declined',
       detail: 'agent 8 declined: needs a private wallet export — cancelled and refunded',
@@ -1050,7 +1050,7 @@ describe('a worker that goes silent', () => {
       silent: (id) => (id === 7 ? 'accepts-then-silent' : 'delivers'),
     });
 
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
 
     expect(report.steps[0]).toMatchObject({status: 'settled', agentId: 8});
     // An accepted job cannot be cancelled; the keeper refunds it later.
@@ -1062,7 +1062,7 @@ describe('a worker that goes silent', () => {
   it('never hires the same agent twice', async () => {
     const {orchestrator, hires} = scenario({candidates: [CANDIDATE], silent: () => 'never-accepts'});
 
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
 
     expect(hires.map((h) => h.agentId)).toEqual([7]);
     expect(report.steps[0]).toMatchObject({status: 'timeout'});
@@ -1074,7 +1074,7 @@ describe('a worker that goes silent', () => {
       silent: () => 'never-accepts',
     });
 
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
 
     expect(hires).toHaveLength(2);
     expect(report.steps[0]).toMatchObject({status: 'timeout'});
@@ -1088,7 +1088,7 @@ describe('a worker that goes silent', () => {
       cancelFails: true,
     });
 
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
 
     expect(hires).toHaveLength(1);
     expect(report.steps[0]).toMatchObject({status: 'failed'});
@@ -1108,7 +1108,7 @@ describe('a worker that goes silent', () => {
       cancelFails: true,
     });
 
-    const report = await orchestrator.run('how deep is ETH/USDC?');
+    const report = await orchestrator.run('how deep is NEAR/USDC?');
 
     expect(hires).toHaveLength(1);
     expect(cancelled).toEqual([]);
@@ -1141,10 +1141,10 @@ describe('two runs with the same goal', () => {
       },
     };
     const {orchestrator} = build(over);
-    await orchestrator.run('how deep is ETH/USDC?');
-    await orchestrator.run('how deep is ETH/USDC?');
+    await orchestrator.run('how deep is NEAR/USDC?');
+    await orchestrator.run('how deep is NEAR/USDC?');
     const second = build(over).orchestrator;
-    await second.run('how deep is ETH/USDC?');
+    await second.run('how deep is NEAR/USDC?');
 
     expect(keys).toHaveLength(3);
     expect(keys.every((k) => typeof k === 'string' && k.length >= 32)).toBe(true);

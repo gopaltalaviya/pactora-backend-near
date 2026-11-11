@@ -10,7 +10,7 @@ import type {PactoraConfig} from '@pactora/config';
  * The signature is NEP-413 (a wallet's `signMessage`), and the key that made
  * it must be a FULL-ACCESS key of the owner's account: an agent's
  * function-call key, which the signer holds, can sign NEP-413 too, and must
- * not be able to speak for its owner (docs/NEAR-PORT.md §5).
+ * not be able to speak for its owner (docs/NEAR-WIRE.md §5).
  */
 
 /** How long a challenge stays signable. */

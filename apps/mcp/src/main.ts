@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
-import {assertNoLegacyEnv} from '@pactora/shared';
+import {assertNoUnsupportedEnv} from '@pactora/shared';
 import {buildServer} from './server.js';
 
 /**
@@ -12,7 +12,7 @@ import {buildServer} from './server.js';
  */
 
 try {
-  assertNoLegacyEnv();
+  assertNoUnsupportedEnv();
 } catch (err) {
   process.stderr.write(`${(err as Error).message}\n`);
   process.exit(1);

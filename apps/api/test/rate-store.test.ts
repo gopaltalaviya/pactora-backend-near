@@ -8,7 +8,7 @@ import {chainDeps} from './helpers/register.js';
 import {buildApp, EventBus} from '../src/app.js';
 
 /**
- * A rate limit shared between replicas (v3). docs/17: "per process, so N×
+ * A rate limit shared between replicas. docs/17: "per process, so N×
  * with N replicas". Two app instances stand in for two replicas: with the
  * in-memory store each allows the full limit; with the Postgres store they
  * share one.

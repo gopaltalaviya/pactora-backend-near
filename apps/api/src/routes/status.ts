@@ -85,7 +85,7 @@ export interface StatusReport {
    */
   model: ModelStatus;
   /**
-   * Gas in the wallets the signer sends from (v3), from the signer's own
+   * Gas in the wallets the signer sends from, from the signer's own
    * background reading. Reported beside the components, like the model: a
    * signer that reports nothing is `unknown`, not a fault; a low wallet
    * degrades the status, because the next transaction from it will fail.

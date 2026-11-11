@@ -8,4 +8,4 @@ their own repository:
 Same paths there, so `docs/08` in a code comment here means
 [`pactora-docs-near/docs/08-configuration.md`](https://github.com/gopaltalaviya/pactora-docs-near/blob/master/docs/08-configuration.md).
 In this repo: the build log ([`PROGRESS.md`](../PROGRESS.md)) and the wire
-contract between the services and the chain ([`NEAR-PORT.md`](NEAR-PORT.md)).
+contract between the services and the chain ([`NEAR-WIRE.md`](NEAR-WIRE.md)).

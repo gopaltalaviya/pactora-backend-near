@@ -227,7 +227,7 @@ describe('the job loop, beside the paid endpoint', () => {
 });
 
 /**
- * v3: the refundable scheme. An escrow-backed payment holds the money in the
+ * The refundable scheme. An escrow-backed payment holds the money in the
  * escrow while the worker works, so a worker that cannot deliver costs the
  * client nothing: it declines, and the client cancels for a full refund. The
  * work is done BEFORE anything is committed on chain, so a failure never

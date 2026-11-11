@@ -103,10 +103,10 @@ export interface AppDeps {
   trustProxy?: boolean | number;
   /** Requests per client IP per minute. */
   rateLimitPerMinute?: number;
-  /** v3: `postgres` shares the limit between replicas; omitted, it counts in memory. */
+  /** `postgres` shares the limit between replicas; omitted, it counts in memory. */
   rateLimitStore?: 'memory' | 'postgres';
   /**
-   * v3: hear events other processes store — the indexer, another replica —
+   * Hear events other processes store — the indexer, another replica —
    * through Postgres LISTEN/NOTIFY (live.ts). Default on; off, a stream
    * carries only what this process publishes.
    */
@@ -234,7 +234,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(rateLimit, {
     max: deps.rateLimitPerMinute ?? 600,
     timeWindow: '1 minute',
-    // v3: one window per client across every replica (see rate-store.ts).
+    // One window per client across every replica (see rate-store.ts).
     // Fail open on a store error: a limiter that fails closed turns a
     // database hiccup into an outage.
     ...(shared ? {store: postgresRateLimitStore(deps.db) as never, skipOnError: true} : {}),

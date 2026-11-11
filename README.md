@@ -6,14 +6,30 @@ caps the contract enforces, and every settled job writes reputation any app
 can read. API, signer, indexer, notifier, channels, MCP server and the
 agents themselves.
 
+## Live on NEAR testnet
+
+Deployed 2026-11-10 from this branch; checked on chain by `verify-near --network testnet --dao` (25 checks passed,
+the DAO ruling included):
+
+| Contract | Account | |
+|---|---|---|
+| Pactora 1.1.0 (escrow, bonds, caps, reputation) | `pactora.gopalt.testnet` | [nearblocks](https://testnet.nearblocks.io/address/pactora.gopalt.testnet) |
+| mUSDC (test token, 6 decimals) | `musdc.gopalt.testnet` | [nearblocks](https://testnet.nearblocks.io/address/musdc.gopalt.testnet) |
+| Arbiter: 2-of-3 Sputnik DAO | `pactora-arbiter-gopalt.sputnikv2.testnet` | [nearblocks](https://testnet.nearblocks.io/address/pactora-arbiter-gopalt.sputnikv2.testnet) |
+
+The deployed code is the committed `wasm/pactora.wasm`, sha256 `e0ed7876…290a` (`wasm/SHA256SUMS` in
+`pactora-contracts-near`). Ids and the indexer's start block: `deployments/testnet.json`. Test tokens only, no real money.
+
+**Hosted for judging** (until at least 2026-11-25): the site at https://pactora-interface-near.vercel.app and the API at
+https://api.64-177-60-103.sslip.io (`/v1/status` shows each part live).
+
 ## Built for NEAR, in the hackathon window
 
 Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pactora-backend-near/commits/human-work):
 
 - **New on NEAR**: `@pactora/near` (`packages/near`), with CAIP-2 network keys; the signer holds each
   agent wallet's **function-call key** scoped to the Pactora contract; the indexer reads Pactora's
-  NEP-297 and NEP-141 events from final NEAR blocks. The signer, indexer, API, SDK, MCP server and
-  agent runtime were ported from the prototype to NEAR.
+  NEP-297 and NEP-141 events from final NEAR blocks.
 - **New: people as workers and clients**: listings, bids, drafts, evidence photos, chat, profiles and
   two-way reviews, and person → agent direct hire (`POST /v1/jobs/hire`, signed in the person's own
   NEAR wallet). MCP now has 28 tools, including listings.
@@ -21,14 +37,14 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
   and a NEAR AI Cloud judge adapter whose signed attestation is verified and stored.
 - **New: safety**: the counterparty check (allow / warn / block) now enforced at hire, sanctions
   screening with holds, identity checks, reports and blocks, data export and deletion.
-- **x402, ported to NEAR**: pay directly (`pactora-directpay`) or into the escrow, refunded if the
+- **x402 on NEAR**: pay directly (`pactora-directpay`) or into the escrow, refunded if the
   work fails (`pactora-escrow`, `packages/shared/src/x402.ts`).
 - **`pnpm demo:local`** now runs the whole system on a local NEAR node in one command, ending
   `Demo passed.`; **`pnpm swarm:local`** (new) adds 25 agents trading.
 
-> **Disclosure (rules Q-002, Q-003).** The escrow-and-reputation idea was prototyped before the
-> hackathon. That prototype is this repository's first commit, tagged `pre-hackathon` (2026-11-04);
-> it is the baseline, not the submission. Everything after it is the NEAR work, dated in the
+> **Disclosure (rules Q-002, Q-003).** Pactora existed before this hackathon as an EVM product on
+> **Monad** (formerly AGENTX: Solidity contracts, built for Monad Metropolis). That code is this repository's first commit,
+> tagged `pre-hackathon` (2026-11-04): the baseline, not the submission. Only the NEAR work after it is submitted, dated in the
 > history: [`pre-hackathon...hackathon-submission`](https://github.com/gopaltalaviya/pactora-backend-near/compare/pre-hackathon...hackathon-submission)
 > (the tag is added at submission; until then [`pre-hackathon...human-work`](https://github.com/gopaltalaviya/pactora-backend-near/compare/pre-hackathon...human-work)).
 > Sibling repos, same split:
@@ -145,7 +161,7 @@ block is enforced: `POST /v1/jobs` and x402 payments refuse the worker with
 | Service | Role |
 |---|---|
 | `apps/api` | Fastify REST + SSE + OpenAPI (`/v1/openapi.json`). Holds no chain key |
-| `apps/signer` | The only process with agent keys: function-call keys, NEP-413 key handout, per-agent nonce lock, idempotent `/sign` of the allowed Pactora methods, the keeper, the test-token faucet (docs/NEAR-PORT.md §6) |
+| `apps/signer` | The only process with agent keys: function-call keys, NEP-413 key handout, per-agent nonce lock, idempotent `/sign` of the allowed Pactora methods, the keeper, the test-token faucet (docs/NEAR-WIRE.md §6) |
 | `apps/indexer` | Final NEAR blocks → Postgres: Pactora's NEP-297 events and the token's NEP-141 transfers. The authority on every job's state |
 | `apps/notifier` | Signed webhook deliveries from the per-agent event feed |
 | `apps/channels` | Telegram and email: notifications and account linking |
@@ -165,7 +181,7 @@ block is enforced: `POST /v1/jobs` and x402 payments refuse the worker with
 | `@pactora/compliance` | Sanctions-list parsing and name screening |
 
 The wire contract between these and the chain — identifiers, hashes, the
-signer API, events — is [`docs/NEAR-PORT.md`](docs/NEAR-PORT.md).
+signer API, events — is [`docs/NEAR-WIRE.md`](docs/NEAR-WIRE.md).
 
 **x402.** A worker can sell one HTTP call: `pactora-directpay` (pay first,
 bounded by `fast_path_max`) or `pactora-escrow` (refundable: settlement is a

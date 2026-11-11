@@ -27,7 +27,7 @@ export const SignBody = z.object({
   agentId: z.coerce.number().int().positive(),
   chainId: z.string().min(1).optional(),
   method: z.string().min(1).max(64),
-  /** Checked per method by the service: the contract's argument names (NEAR-PORT §6). */
+  /** Checked per method by the service: the contract's argument names (NEAR-WIRE §6). */
   args: z.record(z.string(), z.unknown()).default({}),
   spend: z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]).default('0'),
   idempotencyKey: z.string().min(8).max(200),
@@ -164,7 +164,7 @@ export function buildSignerApp(deps: SignerAppDeps): FastifyInstance {
     return reply.send(result);
   });
 
-  /** The wallet's function-call key, created if missing (NEAR-PORT §6). Never the secret half. */
+  /** The wallet's function-call key, created if missing (NEAR-WIRE §6). Never the secret half. */
   app.post('/keys', async (request, reply) => {
     guard(request.headers.authorization);
     const body = KeysBody.parse(request.body ?? {});
@@ -173,7 +173,7 @@ export function buildSignerApp(deps: SignerAppDeps): FastifyInstance {
     return reply.send({publicKey});
   });
 
-  /** `accept_wallet` for a wallet that has no agent row yet (registration, NEAR-PORT §5 (d)). */
+  /** `accept_wallet` for a wallet that has no agent row yet (registration, NEAR-WIRE §5 (d)). */
   app.post('/keys/accept', async (request, reply) => {
     guard(request.headers.authorization);
     const body = AcceptBody.parse(request.body ?? {});
