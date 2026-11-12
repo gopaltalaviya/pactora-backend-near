@@ -39,6 +39,7 @@ import {purgeRetention, type RetentionConfig} from './retention.js';
 import {registerAgentEventRoutes} from './routes/agent-events.js';
 import {registerWebhookRoutes} from './routes/webhooks.js';
 import {registerFaucetRoutes, type FaucetConfig} from './routes/faucet.js';
+import {registerCredentialRoutes} from './routes/credentials.js';
 import {registerProfileRoutes} from './routes/profiles.js';
 import {registerHistoryRoutes} from './routes/history.js';
 import {registerReceiptRoutes} from './routes/receipts.js';
@@ -49,7 +50,7 @@ import {registerAdminRoutes} from './routes/admin.js';
 import {registerChannelRoutes} from './routes/channels.js';
 import type {ChainViewer} from './chain-reads.js';
 import type {IdentityProvider, SanctionsIndex} from './compliance.js';
-import type {FaucetSend} from './submit.js';
+import type {CredentialMint, FaucetSend} from './submit.js';
 import type {TargetPolicy} from '@pactora/service';
 import {jobsReadyToSettle, settleAcceptedDraft} from './evidence.js';
 import type {ObjectStore} from '@pactora/storage';
@@ -166,6 +167,15 @@ export interface AppDeps {
   /** The signer's faucet (testnet and sandbox only); omitted, POST /v1/faucet answers 503. */
   faucetSend?: FaucetSend;
   faucet?: FaucetConfig;
+  /**
+   * The signer's work-credential minter; omitted, or no `Credentials`
+   * contract in the chain config, POST /v1/jobs/:id/credential answers 503.
+   */
+  credentialMint?: CredentialMint;
+  /** The clock a credential's `issued_at` is read from (tests). */
+  credentialsNow?: () => Date;
+  /** New work-credential claims per worker agent per UTC day (CREDENTIALS_PER_WORKER_PER_DAY); default 20. */
+  credentialsPerWorkerPerDay?: number;
   /** Identity checks (docs/26 F13); omitted, POST /v1/kyc/start answers 503. */
   identityProvider?: IdentityProvider;
   /** Sanctions screening (docs/26 F14) of a person's legal name before an identity session. */
@@ -494,6 +504,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     chains: deps.chains,
     ...(deps.faucetSend ? {send: deps.faucetSend} : {}),
     config: deps.faucet ?? {amount: 5_000_000n, perIpPerDay: 5, dailyCap: 500_000_000n},
+  });
+  await registerCredentialRoutes(app, {
+    db: deps.db,
+    chains: deps.chains,
+    ...(deps.credentialMint ? {mint: deps.credentialMint} : {}),
+    ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
+    ...(deps.credentialsNow ? {now: deps.credentialsNow} : {}),
+    ...(deps.credentialsPerWorkerPerDay ? {perWorkerPerDay: deps.credentialsPerWorkerPerDay} : {}),
   });
   await registerListingRoutes(app, {
     db: deps.db,

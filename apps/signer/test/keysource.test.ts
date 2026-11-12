@@ -1,7 +1,7 @@
 import {describe, expect, it, vi} from 'vitest';
 import {KeyPair} from '@pactora/near';
 import type {KmsClient} from '../src/kms.js';
-import {keeperAccount, signerKeys} from '../src/keysource.js';
+import {keeperAccount, minterAccount, signerKeys} from '../src/keysource.js';
 
 /** Which keys the signer runs on, decided once at boot from the environment. */
 
@@ -136,5 +136,53 @@ describe('the keeper account', () => {
       keeperAccount({KEEPER_ACCOUNT_ID: 'k.testnet', KEEPER_SECRET_KEY: 'ed25519:1111'}, true, kms),
     ).rejects.toThrow(/not a valid/);
     await expect(keeperAccount({KEEPER_ACCOUNT_ID: 'k.testnet'}, true, kms)).rejects.toThrow(/neither/);
+  });
+});
+
+describe('the credential minter account', () => {
+  it('is off when nothing is set', () => {
+    expect(minterAccount({}, true)).toBeUndefined();
+  });
+
+  it('takes an ed25519 secret key on a testnet', () => {
+    const m = minterAccount({MINTER_ACCOUNT_ID: 'minter.testnet', MINTER_SECRET_KEY: KP.toString()}, true);
+    expect(m?.accountId).toBe('minter.testnet');
+    expect(m?.key.publicKey).toBe(KP.getPublicKey().toString());
+  });
+
+  it('refuses to run on a chain that is not a testnet', () => {
+    expect(() =>
+      minterAccount({MINTER_ACCOUNT_ID: 'minter.near', MINTER_SECRET_KEY: KP.toString()}, false),
+    ).toThrow(/not a testnet/);
+  });
+
+  it('needs both the account and the key, a NEAR account id, and a well-formed ed25519 key', () => {
+    expect(() => minterAccount({MINTER_SECRET_KEY: KP.toString()}, true)).toThrow(/MINTER_ACCOUNT_ID/);
+    expect(() => minterAccount({MINTER_ACCOUNT_ID: 'minter.testnet'}, true)).toThrow(/MINTER_SECRET_KEY/);
+    expect(() =>
+      minterAccount({MINTER_ACCOUNT_ID: 'Not An Account', MINTER_SECRET_KEY: KP.toString()}, true),
+    ).toThrow(/not a NEAR account id/);
+    expect(() =>
+      minterAccount({MINTER_ACCOUNT_ID: 'minter.testnet', MINTER_SECRET_KEY: 'secp256k1:abc'}, true),
+    ).toThrow(/ed25519/);
+    expect(() =>
+      minterAccount({MINTER_ACCOUNT_ID: 'minter.testnet', MINTER_SECRET_KEY: 'ed25519:1111'}, true),
+    ).toThrow(/not a valid/);
+  });
+
+  it('refuses to share an account with the faucet or the keeper: one key, two nonce counters', () => {
+    const minter = {MINTER_ACCOUNT_ID: 'ops.testnet', MINTER_SECRET_KEY: KP.toString()};
+    expect(() => minterAccount({...minter, FAUCET_ACCOUNT_ID: 'ops.testnet'}, true)).toThrow(
+      /MINTER_ACCOUNT_ID must not be FAUCET_ACCOUNT_ID/,
+    );
+    expect(() => minterAccount({...minter, KEEPER_ACCOUNT_ID: 'ops.testnet'}, true)).toThrow(
+      /MINTER_ACCOUNT_ID must not be KEEPER_ACCOUNT_ID/,
+    );
+    expect(
+      minterAccount(
+        {...minter, FAUCET_ACCOUNT_ID: 'faucet.testnet', KEEPER_ACCOUNT_ID: 'keeper.testnet'},
+        true,
+      )?.accountId,
+    ).toBe('ops.testnet');
   });
 });

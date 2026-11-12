@@ -6,8 +6,9 @@ import {nearClient} from '@pactora/near';
 import {buildInfo, createMetrics, env, installShutdown, loadEnv, serviceLogger} from '@pactora/service';
 import {buildSignerApp} from './app.js';
 import {awsKms, type KmsClient} from './kms.js';
-import {faucetAccount, keeperAccount, signerKeys} from './keysource.js';
+import {faucetAccount, keeperAccount, minterAccount, signerKeys} from './keysource.js';
 import {assertFaucetNotOwner, makeFaucet} from './faucet.js';
+import {assertMinterMatches, makeMinter} from './minter.js';
 import {SignerService} from './signer.js';
 import {chainKeeper} from './keeper.js';
 import {WalletWatch, signingAccountsToWatch, type WatchedWallet} from './wallets.js';
@@ -50,6 +51,13 @@ const Env = z.object({
     .string()
     .regex(/^[1-9]\d{0,38}$/, 'FAUCET_MAX_PER_SEND must be a positive whole number of base units')
     .default('10000000'),
+  /**
+   * The work-credential minter (testnet and sandbox only): the account the
+   * credentials contract names as its `minter`. Used only when the chain
+   * config has a `Credentials` contract.
+   */
+  MINTER_ACCOUNT_ID: z.string().optional(),
+  MINTER_SECRET_KEY: env.nearSecretKey().optional(),
   /** Below this many yoctoNEAR an account is "low" on /health. Default 0.1 NEAR (ten 100 Tgas calls). */
   WALLET_LOW_BALANCE_YOCTO: z
     .string()
@@ -73,6 +81,9 @@ const chain = config.chain();
 const db = createDb(cfg.DATABASE_URL, {max: cfg.DB_POOL_MAX});
 const locks = createLockPool(cfg.DATABASE_URL, {max: cfg.LOCK_POOL_MAX});
 const near = nearClient(chain.rpcUrl);
+// Configuration only, so before the RPC is asked anything: a minter that is
+// misconfigured, or shares the faucet's or keeper's account, refuses at once.
+const minterKey = minterAccount(process.env, chain.testnet);
 
 // Before any key is loaded: an RPC serving another network — a mistyped
 // RPC_URL_<SLUG> — would have this signer sign that network's transactions.
@@ -107,6 +118,18 @@ const faucet = faucetKey
   ? makeFaucet({near, chain, account: faucetKey, maxPerSend: BigInt(cfg.FAUCET_MAX_PER_SEND)})
   : undefined;
 
+const credentialsContract = chain.contracts['Credentials'];
+// The configured minter must be the contract's, or every mint fails on
+// chain; an RPC that does not answer refuses the start, as the faucet's does.
+if (minterKey && credentialsContract) await assertMinterMatches(near, credentialsContract, minterKey);
+if (minterKey && !credentialsContract) {
+  logger.warn(
+    {chainId: chain.chainId, minter: minterKey.accountId},
+    'MINTER_ACCOUNT_ID is set but the chain config has no Credentials contract: minting is off',
+  );
+}
+const minter = minterKey && credentialsContract ? makeMinter({near, chain, account: minterKey}) : undefined;
+
 const service = new SignerService({db, locks, chain, keys, near, logger});
 const metrics = createMetrics('signer');
 
@@ -122,6 +145,7 @@ const walletWatch = new WalletWatch({
     })),
     ...(keeper ? [{account: keeper.accountId, role: 'keeper'}] : []),
     ...(faucet ? [{account: faucet.accountId, role: 'faucet'}] : []),
+    ...(minter ? [{account: minter.accountId, role: 'minter'}] : []),
   ],
   lowYocto: BigInt(cfg.WALLET_LOW_BALANCE_YOCTO),
   gauge: metrics.gauge('signer_wallet_balance', 'NEAR balance of an account the signer sends from', [
@@ -159,6 +183,7 @@ const app = buildSignerApp({
   logger,
   wallets: () => walletWatch.snapshot(),
   ...(faucet ? {faucet} : {}),
+  ...(minter ? {minter} : {}),
   checks: {
     database: () => db.execute(sql`SELECT 1`),
     rpc: () => near.finalBlock(),

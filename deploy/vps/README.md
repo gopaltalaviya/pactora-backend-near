@@ -36,6 +36,12 @@ WEBHOOK_SECRET_KEY=      # openssl rand -hex 32 — seals webhook secrets; share
 # mUSDC float and a little NEAR, never the token's owner (docs/08).
 FAUCET_ACCOUNT_ID=
 FAUCET_SECRET_KEY=       # ed25519:…
+# Optional, testnet: the work-credential minter — the account the Credentials
+# contract names as its minter, with ~1 NEAR for storage; the signer refuses to
+# start if it is not the contract's minter. Used only once chain/deployments
+# lists a Credentials contract.
+MINTER_ACCOUNT_ID=
+MINTER_SECRET_KEY=       # ed25519:…
 # Optional: RPC_URL_TESTNET, NEARDATA_API_KEY; model keys for live runs (README "Models").
 ```
 

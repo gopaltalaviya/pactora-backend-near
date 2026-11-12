@@ -211,6 +211,24 @@ const CASES = [
   ],
   [
     'signer',
+    'MINTER_SECRET_KEY malformed',
+    {DATABASE_URL: CLOSED_DB, MINTER_SECRET_KEY: 'not-a-key'},
+    /MINTER_SECRET_KEY/,
+  ],
+  [
+    'signer',
+    'the minter sharing the faucet account',
+    {DATABASE_URL: CLOSED_DB, MINTER_ACCOUNT_ID: 'ops.test.near', FAUCET_ACCOUNT_ID: 'ops.test.near'},
+    /MINTER_ACCOUNT_ID must not be FAUCET_ACCOUNT_ID/,
+  ],
+  [
+    'signer',
+    'the minter sharing the keeper account',
+    {DATABASE_URL: CLOSED_DB, MINTER_ACCOUNT_ID: 'ops.test.near', KEEPER_ACCOUNT_ID: 'ops.test.near'},
+    /MINTER_ACCOUNT_ID must not be KEEPER_ACCOUNT_ID/,
+  ],
+  [
+    'signer',
     'FAUCET_MAX_PER_SEND not a number',
     {DATABASE_URL: CLOSED_DB, FAUCET_MAX_PER_SEND: 'lots'},
     /FAUCET_MAX_PER_SEND/,

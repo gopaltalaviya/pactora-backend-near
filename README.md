@@ -112,7 +112,7 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
   NEP-297 and NEP-141 events from final NEAR blocks.
 - **New: people as workers and clients**: listings, bids, drafts, evidence photos, chat, profiles and
   two-way reviews, and person → agent direct hire (`POST /v1/jobs/hire`, signed in the person's own
-  NEAR wallet). MCP now has 31 tools, including listings and pools.
+  NEAR wallet). MCP now has 33 tools, including listings, pools and work credentials.
 - **New: disputes on chain**: the DAO dispute desk for a 2-of-3 Sputnik DAO council (`/v1/admin`),
   and a NEAR AI Cloud judge adapter whose response signature is verified, against the key in NEAR AI's attestation report, and stored.
 - **New: safety**: the counterparty check (allow / warn / block) now enforced at hire, sanctions
@@ -131,7 +131,7 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
 | TEE attestation (security) | The NEAR AI Cloud judge's response signature is verified twice, by the orchestrator and again by the API, against the key NEAR AI's public attestation report gives for the model's enclave (`apps/api/src/judge-verify.ts`). The API also re-hashes the exact request and response bytes against the signed text and recomputes the verdict from the signed response, so the verdict is the one NEAR AI signed. The trust in the report rests on TLS to `cloud-api.near.ai`; its TDX/GPU quote is not verified here. The verdict's hash is committed on chain as the job's `review_hash`. Live on NEAR testnet (2026-11-12): chain job 68 was approved on a NEAR AI verdict; the contract's `review_hash` `fda38cdf…e9f1` equals the verdict hash the live API verified and stored (`/receipts` shows it as Judged on NEAR AI). Checked live on 2026-11-12 (`Qwen/Qwen3.6-35B-A3B-FP8`, ECDSA key `0xfdbd…8ddf`; that attestation is the fixture in `apps/api/test/judge-verify.test.ts`). Off by default (`JUDGE_PROVIDER=near-ai`, needs a NEAR AI key) |
 | Sub-accounts (swarms) | Each agent's wallet is a sub-account `bot.<owner>` of its owner's account |
 | Multi-agent systems, bidding (swarms) | `scripts/swarm.mjs`, rules in [RULES.md](RULES.md); a run on NEAR testnet settled chain jobs 55–65: two bidding rounds, three buyers pooling for one job (61–63) and a seller subcontracting (64→65) |
-| Agent commerce (agents) | Agents hire, check and pay agents and people through the contract's escrow; MCP server with 31 tools; x402 |
+| Agent commerce (agents) | Agents hire, check and pay agents and people through the contract's escrow; MCP server with 33 tools; x402 |
 | NEAR Intents, Chain Signatures (agents, swarms) | **Not used.** Settlement is the Pactora contract's own escrow on testnet, and NEAR Intents runs on mainnet; paying into the escrow from other chains through Intents is the next step |
 
 > **Disclosure (rules Q-002, Q-003).** Earlier, non-NEAR code existed before this hackathon
@@ -276,7 +276,7 @@ block is enforced: `POST /v1/jobs` and x402 payments refuse the worker with
 | `apps/indexer` | Final NEAR blocks → Postgres: Pactora's NEP-297 events and the token's NEP-141 transfers. The authority on every job's state |
 | `apps/notifier` | Signed webhook deliveries from the per-agent event feed |
 | `apps/channels` | Telegram and email: notifications and account linking |
-| `apps/mcp` | 31 MCP tools over stdio, or streamable HTTP with `MCP_HTTP_PORT` (bearer = the agent's API key): `get_network`, `my_budget`, `discover_agents`, `check_trust`, `hire_agent`, `approve_job`, `dispute_job`, `post_listing`, `decide_application`, `find_listings`, `bid_on_listing`, `claim_listing`, `review_job`, `send_message`, `get_updates`, `accept_job`, `submit_result`, `await_result` and more |
+| `apps/mcp` | 33 MCP tools over stdio, or streamable HTTP with `MCP_HTTP_PORT` (bearer = the agent's API key): `get_network`, `my_budget`, `discover_agents`, `check_trust`, `hire_agent`, `approve_job`, `dispute_job`, `post_listing`, `decide_application`, `find_listings`, `bid_on_listing`, `claim_listing`, `review_job`, `send_message`, `get_updates`, `accept_job`, `submit_result`, `await_result`, `claim_credential`, `get_credential` and more |
 | `apps/agents/*` | The orchestrator, and research, trading and execution workers |
 
 | Package | Role |
@@ -387,7 +387,7 @@ where a live check exists, the demo step.
 | An agent swarm: 20 buyers, 5 sellers, bidding and settlement on chain | `pnpm swarm:local` |
 | Person → agent direct hire (`POST /v1/jobs/hire`): the person signs `create_job` in their own wallet | `apps/api/test/direct-hire.test.ts`; `demo:local` §8f (settled on chain) |
 | Owner's agents (`GET /v1/me/agents`), bidder `hireable`, job `deadlines`, `agentMode`, agent rename | `apps/api/test/reads.test.ts` |
-| MCP tools for agents to bid on people's listings: `find_listings`, `bid_on_listing`, `claim_listing` (28 tools then; 31 with the pool tools, 2026-11-11) | `apps/mcp/test/tools.test.ts` |
+| MCP tools for agents to bid on people's listings: `find_listings`, `bid_on_listing`, `claim_listing` (28 tools then; 31 with the pool tools, 2026-11-11; 33 with the work-credential tools) | `apps/mcp/test/tools.test.ts` |
 
 ## Built with
 
