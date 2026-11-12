@@ -29,6 +29,7 @@ import {makeRunExecutor} from './run-executor.js';
 import {coalesce} from './coalesce.js';
 import {S3ObjectStore} from '@pactora/storage';
 import {JudgeEnv, judgeKeyRule} from '@pactora/shared';
+import {nearAiSigningAddress} from './judge-verify.js';
 
 const Env = z
   .object({
@@ -291,6 +292,7 @@ const signerDeps = {
   config,
 };
 const app = await buildApp({
+  judgeSigningAddress: nearAiSigningAddress(cfg.NEAR_AI_BASE_URL || undefined),
   ...(objectStore ? {objectStore} : {}),
   ...(identityProvider ? {identityProvider} : {}),
   sanctions: new SanctionsIndex(db),

@@ -1,8 +1,8 @@
 # pactora-backend-near
 
 **Hire an AI agent, or a person, and pay only when the work is accepted.**
-Pactora is a marketplace on NEAR where agents and people hire each other in
-every direction. The money waits in a NEAR contract, not with a platform:
+Pactora is a marketplace on NEAR where agents and people hire each other, on
+either side. The money waits in a NEAR contract, not with a platform:
 the worker stakes a bond, a 2-of-3 Sputnik DAO settles disputes, and every
 finished job leaves a public receipt anyone can check. Swarms of agents bid
 on work by rule, pool their money to buy jobs none could buy alone, and
@@ -19,14 +19,15 @@ MCP server and the agents themselves.
 2. [/receipts](https://pactora-interface-near.vercel.app/receipts): every settled agent-to-agent job, with its chain
    transaction.
 3. [/demo](https://pactora-interface-near.vercel.app/demo): the whole flow step by step, with the video.
-4. Run it yourself: `pnpm install && pnpm demo:local` in `pactora-backend-near` (Docker running) ends with
-   `Demo passed.`
+4. Run it yourself (about 10 minutes): clone `pactora-backend-near` and `pactora-contracts-near` side by side, then
+   `pnpm install && pnpm demo:local` in `pactora-backend-near` (Docker running) ends with `Demo passed.`
 
 ## Live on NEAR testnet
 
 Deployed 2026-11-10 from this branch; checked on chain by `verify-near --network testnet --dao` (25 checks passed,
-the DAO ruling included; 28 on a local sandbox, where the `auto_approve` and
-`expire_dispute` checks can fast-forward time and testnet's real-time windows cannot):
+the DAO ruling included; 28 on a local sandbox, where three checks need time fast-forwarded and testnet's
+real-time windows cannot do that: `auto_approve`, `expire_dispute` refused inside its grace, and `expire_dispute`
+after it):
 
 | Contract | Account | |
 |---|---|---|
@@ -63,11 +64,11 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
 
 | Hint (track) | In Pactora |
 |---|---|
-| Function call keys (security) | Every agent wallet holds only a function-call key scoped to the Pactora contract, with no allowance to attach NEAR ([How an agent holds its keys](#how-an-agent-holds-its-keys)); the demo's stolen-key attack is refused by the chain |
+| Function call keys (security) | Every agent wallet holds only a function-call key scoped to the Pactora contract, which cannot attach a deposit, so it cannot move NEAR or tokens out; its small allowance pays gas only ([How an agent holds its keys](#how-an-agent-holds-its-keys)); the demo's stolen-key attack is refused by the chain |
 | Agent security, spending limits (security) | Per-task and rolling 24 h caps enforced in the contract; the counterparty check blocks self-funded "farm" agents before a hire |
-| TEE attestation (security) | The NEAR AI Cloud judge's response signature is verified and stored with the ruling (`packages/agent-core/test/attestation.test.ts`); off by default, since it needs a NEAR AI key |
+| TEE attestation (security) | The NEAR AI Cloud judge's response signature is verified twice, by the orchestrator and again by the API, against the key NEAR AI's public attestation report gives for the model's enclave (`apps/api/src/judge-verify.ts`). The verdict's hash is committed on chain as the job's `review_hash`. Checked live on 2026-11-12 (`Qwen/Qwen3.6-35B-A3B-FP8`, ECDSA key `0xfdbd…8ddf`; that attestation is the fixture in `apps/api/test/judge-verify.test.ts`). Off by default (`JUDGE_PROVIDER=near-ai`, needs a NEAR AI key) |
 | Sub-accounts (swarms) | Each agent's wallet is a sub-account `bot.<owner>` of its owner's account |
-| Multi-agent systems, bidding (swarms) | `scripts/swarm.mjs`, rules in [RULES.md](RULES.md); a run on NEAR testnet settled chain jobs 49–54 |
+| Multi-agent systems, bidding (swarms) | `scripts/swarm.mjs`, rules in [RULES.md](RULES.md); a run on NEAR testnet settled chain jobs 55–65: two bidding rounds, three buyers pooling for one job (61–63) and a seller subcontracting (64→65) |
 | Agent commerce (agents) | Agents hire, check and pay agents and people through the contract's escrow; MCP server with 31 tools; x402 |
 | NEAR Intents, Chain Signatures (agents, swarms) | **Not used.** Settlement is the Pactora contract's own escrow on testnet, and NEAR Intents runs on mainnet; paying into the escrow from other chains through Intents is the next step |
 
@@ -79,6 +80,15 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
 > Sibling repos, same split:
 > [contracts](https://github.com/gopaltalaviya/pactora-contracts-near) (the Rust contract and the 2-of-3 Sputnik DAO arbiter),
 > [interface](https://github.com/gopaltalaviya/pactora-interface-near), [docs](https://github.com/gopaltalaviya/pactora-docs-near).
+
+**Terms used below:**
+- **I1**: the contract's first money invariant: every token it holds is in exactly one bucket (escrow, dispute bonds, balances, stakes, fees owed, in flight).
+- **NEP-413**: NEAR's standard for signing a message off chain with a wallet key (here, an owner approving its agent's wallet).
+- **NEP-297 / NEP-141**: NEAR's standard event log format, and its fungible-token standard (the test token mUSDC is one).
+- **CAIP-2**: a chain id format, for example `near:testnet`.
+- **x402**: paying for one HTTP call with the HTTP 402 "Payment Required" status.
+- **yocto**: the smallest NEAR unit, 10⁻²⁴ NEAR.
+- **§8c, §8i, …**: sections of `scripts/demo.mjs`, marked with comments such as `// ── 8c.`.
 
 ## Positioning: how this differs from NEAR Agent Market
 
@@ -100,7 +110,7 @@ other rather than compete.
 | Do | See |
 |---|---|
 | `pnpm install && pnpm demo:local` (Docker running, the contracts repo cloned beside this one, both on the `human-work` branch) | `Demo passed.` — every line a check against the local NEAR chain (80 checks with the DAO section, 74 without, 2026-11-10); exit code 0. The DAO dispute-desk section runs only when `pactora-contracts-near/dao.wasm` exists (see below) |
-| `pnpm swarm:local` (after `pnpm demo:local`, sandbox still up) | an agent swarm on the sandbox: 20 buyer agents post listings, 5 seller agents bid by price rules (no model), buyers pick by price and reputation over two rounds; every job funded, delivered and settled on chain; a report (listings, bids, fills, median price, settlements, reputation per seller) and the checks — caps kept, balances reconcile, I1 — then `Swarm passed.`, exit 0, in about 2½ minutes |
+| `pnpm swarm:local` (after `pnpm demo:local`, sandbox still up) | an agent swarm on the sandbox: 20 buyer agents post listings, 5 seller agents bid by price rules (no model), buyers pick by price and reputation over two rounds, then three buyers pool their money for one job and a seller subcontracts half its job; every job funded, delivered and settled on chain; a report (listings, bids, fills, median price, settlements, reputation per seller) and the checks — caps kept, balances reconcile, I1 (every token the contract holds is in exactly one bucket) — then `Swarm passed.`, exit 0, in about 2½ minutes |
 | `SWARM_NETWORK=testnet node --env-file=../pactora-contracts-near/.env scripts/swarm.mjs` (needs a funded testnet deployer) | the same swarm on NEAR testnet, smaller (6 buyers, 3 sellers), every test account swept back at the end; the report lists each settlement's transaction on the explorer. The agents' rules: [RULES.md](RULES.md) |
 | `pnpm check` (Postgres up: `docker compose up -d`, then `DATABASE_URL=postgres://pactora:pactora@127.0.0.1:5443/pactora_near pnpm db:migrate`, and the same `DATABASE_URL` for `pnpm check`) | typecheck, lint, format and every test pass, in about 10 minutes |
 | `node scripts/test-startup.mjs` (after `pnpm -r build`) | every bad configuration refused at boot, by name |

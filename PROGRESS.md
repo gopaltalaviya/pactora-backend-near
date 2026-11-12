@@ -223,7 +223,7 @@ stashed, the new test run, the source restored). One line of evidence each:
 - `JUDGE_PROVIDER=near-ai` (off by default; `chain` = the orchestrator's
   brain judges, as before): `NearAiBrain` (packages/agent-core
   `providers/near-ai.ts`), OpenAI-compatible chat completions at
-  `https://cloud-api.near.ai/v1`, default model `zai-org/GLM-5.1-FP8`
+  `https://cloud-api.near.ai/v1`, default model `Qwen/Qwen3.6-35B-A3B-FP8`
   (docs.near.ai, 2026-11; `NEAR_AI_MODEL`, `NEAR_AI_BASE_URL` override).
   Settings are validated by `JudgeEnv` in `@pactora/shared`, used by the api's
   boot schema and by `buildJudgeBrain`. The key is required when chosen, and

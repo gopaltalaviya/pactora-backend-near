@@ -98,7 +98,7 @@ describe('the NEAR AI judge attestation', () => {
     expect(verdict).toMatchObject({accept: true, provider: 'near-ai'});
     expect(verdict.attestation).toMatchObject({
       provider: 'near-ai',
-      model: 'zai-org/GLM-5.1-FP8',
+      model: 'Qwen/Qwen3.6-35B-A3B-FP8',
       responseId: 'chatcmpl-fixture-0001',
       signingAlgo: 'ed25519',
       signingAddress: ED_PUB,

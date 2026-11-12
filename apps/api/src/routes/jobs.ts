@@ -26,6 +26,7 @@ import {acceptedDraftOf, draftDeliveryOf, settleAcceptedDraft, type DraftDeliver
 import {requireClear, requireWorkerPayable} from '../compliance.js';
 import {jobTitleOf, listingOfSpec} from '../read-model.js';
 import {releaseDeclinedSlot} from '../listing-slots.js';
+import {checkJudge, type JudgeSigningAddress} from '../judge-verify.js';
 
 /** Query for `GET /v1/jobs`. Coerced, because query strings are strings. */
 /** States a job is still moving through, and the ones it has finished in. */
@@ -80,6 +81,8 @@ export interface JobRouteDeps {
   }) => Promise<{txHash: string; chainJobId?: string}>;
   /** A job's dispute bond, read from the chain. Omitted or null: spend 0. */
   readDisputeBond?: (args: {chainId: string; chainJobId: bigint}) => Promise<bigint | null>;
+  /** NEAR AI's attested signing key for a model; without it a judge is never stored. */
+  judgeSigningAddress?: JudgeSigningAddress;
   /** Contract views: `get_job`, for a job's deadlines. Omitted, they read as null. */
   viewChain?: ChainViewer;
 }
@@ -611,8 +614,37 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
     const disputeReason = kind === 'dispute' ? DisputeBody.parse(request.body ?? {}).reason : undefined;
     // The judge's attestation (NEAR AI, docs/24 §4) on an approve or dispute:
     // stored with the event, never sent to the signer.
-    const judge =
+    let judge =
       kind === 'approve' || kind === 'dispute' ? JudgeBody.parse(request.body ?? {}).judge : undefined;
+    if (judge) {
+      // Checked, not taken on trust (2026-11-12): see judge-verify.ts.
+      const check = await checkJudge(judge, deps.judgeSigningAddress);
+      if ('refuse' in check) throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, check.refuse);
+      if ('drop' in check) {
+        request.log.warn({jobId: job.publicId, why: check.drop}, 'judge attestation not stored');
+        judge = undefined;
+      }
+    }
+    if (judge) {
+      // One NEAR AI response vouches for one job.
+      const reused = await db
+        .select({id: jobEvents.id})
+        .from(jobEvents)
+        .where(
+          and(
+            sql`${jobEvents.jobId} <> ${job.id}`,
+            inArray(jobEvents.kind, ['job.settled', 'job.disputed']),
+            sql`${jobEvents.payload} -> 'judge' ->> 'responseId' = ${judge.responseId}`,
+          ),
+        )
+        .limit(1);
+      if (reused.length > 0) {
+        throw new PactoraError(
+          ErrorCode.SCHEMA_MISMATCH,
+          `NEAR AI response ${judge.responseId} already vouches for another job`,
+        );
+      }
+    }
     const {judge: _judgeField, ...bodyForSigner} = (request.body ?? {}) as Record<string, unknown>;
     void _judgeField;
     const reasonHash =
@@ -658,7 +690,13 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
             // release" would not be true.
             ...(resultHash ? {resultHash} : {}),
             ...(reasonHash ? {reasonHash} : {}),
-            ...(extras.reviewHash ? {reviewHash: extras.reviewHash} : {}),
+            // A judged approve commits the verdict's hash on chain (the
+            // contract's review_hash), so the receipt can be matched to it.
+            ...(extras.reviewHash
+              ? {reviewHash: extras.reviewHash}
+              : judge && kind === 'approve'
+                ? {reviewHash: judge.verdictHash}
+                : {}),
           },
         });
 
@@ -693,7 +731,8 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       jobId: job.publicId,
       txHash: result.txHash,
       ...(disputeReason !== undefined ? {reason: disputeReason, reasonHash} : {}),
-      ...(judge ? {judge} : {}),
+      // judgeVerified: the API checked it (judge-verify.ts); older events lack it.
+      ...(judge ? {judge, judgeVerified: true} : {}),
     });
 
     return {
@@ -1085,12 +1124,16 @@ export const JudgeBody = z.object({judge: JudgeAttestation.optional()});
 export const ApproveBody = JudgeBody;
 
 /** The attestation stored with the ruling that settled or disputed the job. */
-function judgeOf(events: {kind: string; payload: unknown}[]): JudgeAttestation | null {
+function judgeOf(
+  events: {kind: string; payload: unknown}[],
+): (JudgeAttestation & {verified: boolean}) | null {
   const e = events.find(
     (x) => (x.kind === 'job.settled' || x.kind === 'job.disputed') && (x.payload as {judge?: unknown}).judge,
   );
-  const parsed = e ? JudgeAttestation.safeParse((e.payload as {judge?: unknown}).judge) : null;
-  return parsed?.success ? parsed.data : null;
+  const payload = e?.payload as {judge?: unknown; judgeVerified?: unknown} | undefined;
+  const parsed = payload ? JudgeAttestation.safeParse(payload.judge) : null;
+  // `verified`: the API checked the signature and NEAR AI's attested key itself.
+  return parsed?.success ? {...parsed.data, verified: payload!.judgeVerified === true} : null;
 }
 
 export const DeclineBody = z.object({

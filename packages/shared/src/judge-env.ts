@@ -20,7 +20,8 @@ export type JudgeProvider = (typeof JUDGE_PROVIDERS)[number];
 
 /** Documented at docs.near.ai/cloud/quickstart (2026-11). */
 export const NEAR_AI_DEFAULT_BASE_URL = 'https://cloud-api.near.ai/v1';
-export const NEAR_AI_DEFAULT_MODEL = 'zai-org/GLM-5.1-FP8';
+// zai-org/GLM-5.1-FP8 was withdrawn by 2026-11-12; checked against GET /v1/models.
+export const NEAR_AI_DEFAULT_MODEL = 'Qwen/Qwen3.6-35B-A3B-FP8';
 
 export const JudgeEnv = z.object({
   JUDGE_PROVIDER: z

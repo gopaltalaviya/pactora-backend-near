@@ -67,9 +67,12 @@ import type {
 } from './chain-reads.js';
 import type {OwnerVerifier} from './challenges.js';
 import type {WalletKeys} from './routes/agents.js';
+import type {JudgeSigningAddress} from './judge-verify.js';
 
 export interface AppDeps {
   db: Db;
+  /** NEAR AI's attested signing key for a model (judge-verify.ts); without it a judge is never stored. */
+  judgeSigningAddress?: JudgeSigningAddress;
   chains: Record<string, ChainConfig>;
   defaultChainId: string;
   submit: JobRouteDeps['submit'];
@@ -382,6 +385,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     submit: deps.submit,
     ...(deps.readDisputeBond ? {readDisputeBond: deps.readDisputeBond} : {}),
     ...(deps.viewChain ? {viewChain: deps.viewChain} : {}),
+    ...(deps.judgeSigningAddress ? {judgeSigningAddress: deps.judgeSigningAddress} : {}),
   });
   await registerMetaRoutes(app, {
     db: deps.db,

@@ -71,7 +71,7 @@ describe('NEAR AI Cloud as the judge', () => {
     const headers = calls[0]!.init.headers as Record<string, string>;
     expect(headers['authorization']).toBe(`Bearer ${KEY}`);
     const body = JSON.parse(String(calls[0]!.init.body));
-    expect(body.model).toBe('zai-org/GLM-5.1-FP8');
+    expect(body.model).toBe('Qwen/Qwen3.6-35B-A3B-FP8');
     expect(body.messages[0]).toEqual({role: 'system', content: JUDGE_SYSTEM});
     expect(body.response_format.type).toBe('json_schema');
     expect(body.response_format.json_schema.name).toBe('Verdict');

@@ -10,4 +10,5 @@ export * from './factory.js';
 export {CachedBrain, RecordingBrain, FallbackBrain};
 export * from './run.js';
 export * from './x402.js';
+export {verifyEd25519, verifyEip191} from './providers/near-ai.js';
 export {assertNoUnsupportedEnv} from '@pactora/shared';
