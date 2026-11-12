@@ -55,6 +55,8 @@ const mint: CredentialMint = async (...a) => {
 };
 /** The chain's tokens, by token id: what `nft_token` answers. */
 const tokens = new Map<string, {token_id: string; owner_id: string}>();
+/** The Pactora contract's review_hash per chain job id: what `get_job` answers (null when none). */
+const chainReviews = new Map<string, string | null>();
 const views: string[] = [];
 let viewFails = false;
 const viewChain: ChainViewer = async (_chain, contract, method, args) => {
@@ -62,6 +64,10 @@ const viewChain: ChainViewer = async (_chain, contract, method, args) => {
   if (viewFails) throw new Error('fetch failed');
   if (contract === CREDENTIALS && method === 'nft_token') {
     return tokens.get(String((args as {token_id: string}).token_id)) ?? null;
+  }
+  if (contract !== CREDENTIALS && method === 'get_job') {
+    const id = String((args as {job_id: number}).job_id);
+    return {state: 'Settled', review_hash: chainReviews.get(id) ?? null};
   }
   throw new Error(`no such view ${contract}.${method}`);
 };
@@ -101,6 +107,7 @@ beforeEach(async () => {
   mints.length = 0;
   views.length = 0;
   tokens.clear();
+  chainReviews.clear();
   viewFails = false;
   mintAnswer = async (tokenId) => ({
     txHash: `MINT${tokenId}`,
@@ -255,6 +262,25 @@ describe('POST /v1/jobs/:id/credential', () => {
       txHash: `MINT${chainJobId}`,
       explorerUrl: CHAIN.explorerTx(`MINT${chainJobId}`),
     });
+  });
+
+  // 2026-11-12, live: job 68 was approved on a NEAR AI verdict, its review_hash
+  // on chain, but the credential said null: only person-review drafts were read.
+  it("takes reviewHash from the chain's job (a judged approval), not only from a review draft", async () => {
+    const {job, worker} = await settledJob('settled', false);
+    chainReviews.set(job.chainJobId!, 'ab'.repeat(32));
+    expect((await claim(app, job.publicId, worker.apiKey)).statusCode).toBe(201);
+    expect(JSON.parse(mints[0]![2].extra).reviewHash).toBe('ab'.repeat(32));
+  });
+
+  it('refuses to mint when the job cannot be read from the chain, and leaves nothing behind', async () => {
+    const {job, worker} = await settledJob('settled', false);
+    viewFails = true;
+    const r = await claim(app, job.publicId, worker.apiKey);
+    viewFails = false;
+    expect(r.statusCode).toBe(503);
+    expect(mints).toHaveLength(0);
+    expect((await app.inject({url: `/v1/jobs/${job.publicId}/credential`})).json().status).toBe('none');
   });
 
   it('records a null reviewHash when the job had no accepted review', async () => {

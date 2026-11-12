@@ -135,6 +135,19 @@ export async function registerCredentialRoutes(
       .limit(1);
     const id = job.chainJobId!;
     const amount = String(job.amount);
+    // The contract's own record is the truth for the review hash: a judged
+    // approval (NEAR AI verdict) puts it there, with no review draft in our DB.
+    // Unreadable → no mint: a credential must never carry guessed data.
+    const onChain = (await deps.viewChain!(job.chainId, chain.contracts.Pactora, 'get_job', {
+      job_id: Number(id),
+    }).catch(() => undefined)) as {review_hash?: string | null} | null | undefined;
+    if (!onChain) {
+      throw new PactoraError(
+        ErrorCode.UPSTREAM_UNAVAILABLE,
+        'the job could not be read from the chain right now; nothing was minted — try again in a minute',
+      );
+    }
+    const reviewHash = onChain.review_hash ?? review?.reviewHash ?? null;
     return {
       title: `Pactora job #${id}`,
       description:
@@ -151,7 +164,7 @@ export async function registerCredentialRoutes(
         token: chain.contracts.PaymentToken,
         specHash: job.specHash,
         resultHash: job.resultHash ?? null,
-        reviewHash: review?.reviewHash ?? null,
+        reviewHash,
         settledAt: job.settledAt ? job.settledAt.toISOString() : null,
       }),
     };
