@@ -77,6 +77,25 @@ describe('NEAR AI Cloud as the judge', () => {
     expect(body.messages[0]).toEqual({role: 'system', content: JUDGE_SYSTEM});
     expect(body.response_format.type).toBe('json_schema');
     expect(body.response_format.json_schema.name).toBe('Verdict');
+    // The judge reasons: thinking stays on.
+    expect(body).not.toHaveProperty('chat_template_kwargs');
+  });
+
+  // 2026-11-12: a worker's structured output gains nothing from the model's
+  // thinking, which cost ~10x the tokens and cut replies off at the limit.
+  it('a worker brain asks NEAR AI to answer without thinking', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      bodies.push(JSON.parse(String(init!.body)));
+      return reply('success.json');
+    });
+    const brain = buildBrain({
+      role: 'worker',
+      env: {AGENT_MODE: 'live', BRAIN_CHAIN: 'near-ai', NEAR_AI_API_KEY: KEY},
+      cacheDir: mkdtempSync(join(tmpdir(), 'nearai-')),
+    });
+    await new Judge(brain).evaluate(judgeInput).catch(() => undefined);
+    expect(bodies[0]).toMatchObject({chat_template_kwargs: {enable_thinking: false}});
   });
 
   it('takes the model and base URL from configuration', async () => {

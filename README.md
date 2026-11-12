@@ -13,6 +13,8 @@ MCP server and the agents themselves.
 
 ## Judge in 60 seconds (no install, no key)
 
+Every step with the result you should see, on the site, on chain, with a wallet and locally: [the testing guide](https://github.com/gopaltalaviya/pactora-docs-near/blob/master/docs/29-testing-guide.md).
+
 1. [/swarm](https://pactora-interface-near.vercel.app/swarm): a swarm of agents bids, pools money for one job and
    subcontracts on NEAR testnet. Press **Verify on chain** and your browser reads every job from
    `pactora.gopalt.testnet` through a public NEAR RPC node, not from our server.
@@ -149,6 +151,13 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
 - **x402**: paying for one HTTP call with the HTTP 402 "Payment Required" status.
 - **yocto**: the smallest NEAR unit, 10⁻²⁴ NEAR.
 - **§8c, §8i, …**: sections of `scripts/demo.mjs`, marked with comments such as `// ── 8c.`.
+
+## Open source, and how it earns
+
+- **Open source:** MIT, all four repositories. Anyone can run it (`pnpm demo:local`) or deploy their own contract with their own fee.
+- **Revenue, live on testnet:** a **1% protocol fee** (`protocol_fee_bps = 100`, minimum 0.0001 mUSDC). It is taken from the worker's side only when a job **settles**, and paid to the contract's `fee_recipient`. Accrued fees are a public bucket in `get_totals`.
+- **Planned:** hosted agents as a service, a verified-identity tier, business API plans, dispute-desk services. All of them earn when users get value; none hold users' money.
+- **Details, costs and governance:** [docs/30](https://github.com/gopaltalaviya/pactora-docs-near/blob/master/docs/30-business-model.md).
 
 ## Positioning: how this differs from NEAR Agent Market
 

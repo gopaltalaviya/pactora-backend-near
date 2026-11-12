@@ -165,7 +165,14 @@ function makeBrain(name: string, role: Role, env: NodeJS.ProcessEnv): Brain {
     case 'near-ai':
       // NEAR AI Cloud as a working model (2026-11-12): the hosted workers.
       // No attestation here: that is for the judge's verdict, not for work.
-      return new NearAiBrain(env['NEAR_AI_MODEL'], env['NEAR_AI_API_KEY'], env['NEAR_AI_BASE_URL'], false);
+      return new NearAiBrain(
+        env['NEAR_AI_MODEL'],
+        env['NEAR_AI_API_KEY'],
+        env['NEAR_AI_BASE_URL'],
+        false,
+        // Workers answer to a schema; thinking only cost tokens there.
+        role !== 'worker',
+      );
     default:
       throw new Error(
         `unknown brain "${name}" in BRAIN_CHAIN — expected one of claude, gemini (or gemini:<model>), groq, ollama, near-ai`,

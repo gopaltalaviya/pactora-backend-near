@@ -40,18 +40,26 @@ export class NearAiBrain extends JsonHttpBrain {
   readonly #apiKey: string | undefined;
   readonly #baseUrl: string;
   readonly #requireAttestation: boolean;
+  readonly #thinking: boolean;
 
   constructor(
     model: string | undefined = undefined,
     apiKey: string | undefined = undefined,
     baseUrl: string | undefined = undefined,
     requireAttestation = true,
+    /**
+     * Whether the model reasons before it answers. On for the judge, whose
+     * verdict is worth the tokens; off for workers (2026-11-12), where it cost
+     * ~10x the tokens and cut structured replies off at the limit.
+     */
+    thinking = true,
   ) {
     super();
     this.model = model || NEAR_AI_DEFAULT_MODEL;
     this.#apiKey = apiKey || undefined;
     this.#baseUrl = (baseUrl || NEAR_AI_DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.#requireAttestation = requireAttestation;
+    this.#thinking = thinking;
   }
 
   override async complete<T>(req: CompletionRequest<T>): Promise<CompletionResult<T>> {
@@ -91,6 +99,7 @@ export class NearAiBrain extends JsonHttpBrain {
           type: 'json_schema',
           json_schema: {name: req.schemaName, schema: jsonSchema, strict: false},
         },
+        ...(this.#thinking ? {} : {chat_template_kwargs: {enable_thinking: false}}),
       },
     };
   }
