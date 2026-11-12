@@ -72,8 +72,8 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
 | Agent commerce (agents) | Agents hire, check and pay agents and people through the contract's escrow; MCP server with 31 tools; x402 |
 | NEAR Intents, Chain Signatures (agents, swarms) | **Not used.** Settlement is the Pactora contract's own escrow on testnet, and NEAR Intents runs on mainnet; paying into the escrow from other chains through Intents is the next step |
 
-> **Disclosure (rules Q-002, Q-003).** Pactora existed before this hackathon as an EVM product on
-> **Monad** (formerly AGENTX: Solidity contracts, built for Monad Metropolis). That code is this repository's first commit,
+> **Disclosure (rules Q-002, Q-003).** Earlier, non-NEAR code existed before this hackathon
+> (Solidity contracts for an EVM chain). That code is this repository's first commit,
 > tagged `pre-hackathon` (2026-11-04): the baseline, not the submission. Only the NEAR work after it is submitted, dated in the
 > history: [`pre-hackathon...hackathon-submission`](https://github.com/gopaltalaviya/pactora-backend-near/compare/pre-hackathon...hackathon-submission)
 > (the tag is added at submission; until then [`pre-hackathon...human-work`](https://github.com/gopaltalaviya/pactora-backend-near/compare/pre-hackathon...human-work)).
