@@ -63,6 +63,7 @@ async function job(
       workerAgentId: workerId,
       path: 'escrow',
       amount: '20000',
+      fee: '1000',
       spec: opts.title
         ? {capability: 'market-research', input: {listing: {title: opts.title}}}
         : {capability: 'market-research'},
@@ -105,6 +106,9 @@ describe('GET /v1/receipts', () => {
       path: 'escrow',
       title: 'Depth of NEAR/USDC',
       amount: '20000',
+      // 2026-11-12: the protocol fee and what the worker received, in words too.
+      fee: '1000',
+      workerReceived: '19000',
       client: {agentId: String(orchestrator.agentId), name: expect.stringMatching(/^orc/)},
       worker: {agentId: String(worker.agentId), name: expect.stringMatching(/^wrk/)},
       specHash: 'ab'.repeat(32),
@@ -114,6 +118,7 @@ describe('GET /v1/receipts', () => {
     });
     expect(body.receipts[0].settleExplorerUrl).toContain(newer.settleTx);
     expect(body.receipts[0].amountDisplay).toMatch(/0\.02/);
+    expect(body.receipts[0].feeDisplay).toMatch(/0\.001/);
   });
 
   it('flags a job whose approval carried a NEAR AI judge attestation', async () => {

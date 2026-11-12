@@ -296,6 +296,50 @@ describe('GET /v1/jobs/:id — deadlines', () => {
   });
 });
 
+describe('GET /v1/jobs/:id — money from the chain (2026-11-12)', () => {
+  async function jobIn(state: string, chainJobId: string | null, fee: string | null = null): Promise<string> {
+    const c = await agent(app, `rd-mc${++n}`);
+    const w = await agent(app, `rd-mw${n}`);
+    const rows = (await db.execute(sql`
+      INSERT INTO jobs (chain_id, client_agent_id, worker_agent_id, path, amount, fee, spec, spec_hash, chain_job_id, state)
+      VALUES ('near:sandbox', ${c.agentId}, ${w.agentId}, 'escrow', '20000', ${fee}, ${JSON.stringify({capability: 'market-research', input: {}})}::jsonb,
+              ${'ab'.repeat(32)}, ${chainJobId}, ${state})
+      RETURNING public_id`)) as unknown as {public_id: string}[];
+    return rows[0]!.public_id;
+  }
+  const read = async (id: string) =>
+    (await app.inject({url: `/v1/jobs/${id}`})).json() as {
+      fee: string | null;
+      bonds: {workerBond: string; disputeBond: string; bondLocked: boolean} | null;
+    };
+
+  it('shows the real worker bond, dispute bond and fee the contract holds', async () => {
+    chainJobs.set('201', {
+      id: 201,
+      state: 'Accepted',
+      amount: '20000',
+      fee: '1000',
+      worker_bond: '2000',
+      dispute_bond: '1000',
+      bond_locked: true,
+      accept_deadline: 0,
+      work_deadline: 1_800_000_000,
+      review_deadline: 0,
+      dispute_deadline: 0,
+    });
+    const job = await read(await jobIn('accepted', '201'));
+    expect(job.bonds).toEqual({workerBond: '2000', disputeBond: '1000', bondLocked: true});
+    // The fee is fixed when the job is created: the chain's, when the row has none yet.
+    expect(job.fee).toBe('1000');
+  });
+
+  it('bonds are null when the job is not on chain or the chain cannot be read', async () => {
+    expect((await read(await jobIn('created', null))).bonds).toBeNull();
+    chainJobs.set('202', 'throw');
+    expect((await read(await jobIn('created', '202'))).bonds).toBeNull();
+  });
+});
+
 describe('GET /v1/network — agentMode', () => {
   it('says whether the agents replay recordings or spend tokens', async () => {
     const res = await app.inject({url: '/v1/network'});

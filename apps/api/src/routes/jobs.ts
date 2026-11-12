@@ -134,28 +134,34 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
   const {db, chains, bus, submit, readDisputeBond} = deps;
   const enabled = Object.keys(chains);
 
-  /** The job's deadlines from the chain; 10 s cache per job and state. Unreadable → all null. */
-  const deadlineCache = new Map<string, {at: number; v: JobDeadlines}>();
-  async function readDeadlines(job: {chainId: string; chainJobId: string | null; state: string}) {
-    if (!deps.viewChain || !job.chainJobId || ['settled', 'refunded'].includes(job.state))
-      return NO_DEADLINES;
+  /**
+   * The contract's own record of a job (`get_job`), cached 10 s per job and
+   * state. Null when the job is not on chain yet or the chain cannot be read.
+   */
+  const chainJobCache = new Map<string, {at: number; v: Record<string, unknown> | null}>();
+  async function readChainJob(job: {chainId: string; chainJobId: string | null; state: string}) {
+    if (!deps.viewChain || !job.chainJobId) return null;
     const chain = chains[job.chainId];
-    if (!chain) return NO_DEADLINES;
+    if (!chain) return null;
     const key = `${job.chainId}:${job.chainJobId}:${job.state}`;
-    const hit = deadlineCache.get(key);
+    const hit = chainJobCache.get(key);
     if (hit && Date.now() - hit.at < 10_000) return hit.v;
-    const onChain = (await deps
+    const onChain = ((await deps
       .viewChain(job.chainId, chain.contracts.Pactora, 'get_job', {job_id: Number(job.chainJobId)})
-      .catch(() => undefined)) as Record<string, unknown> | null | undefined;
-    if (!onChain) return NO_DEADLINES;
+      .catch(() => undefined)) ?? null) as Record<string, unknown> | null;
+    chainJobCache.set(key, {at: Date.now(), v: onChain});
+    if (chainJobCache.size > 5_000) chainJobCache.clear();
+    return onChain;
+  }
+
+  /** The job's deadlines from the chain. Unreadable, or finished → all null. */
+  function deadlinesFrom(job: {state: string}, onChain: Record<string, unknown> | null): JobDeadlines {
+    if (!onChain || ['settled', 'refunded'].includes(job.state)) return NO_DEADLINES;
     // The chain's state when it says one: the indexer may not have caught up.
-    const v = deadlinesOf(
+    return deadlinesOf(
       typeof onChain['state'] === 'string' ? onChain['state'].toLowerCase() : job.state,
       onChain,
     );
-    deadlineCache.set(key, {at: Date.now(), v});
-    if (deadlineCache.size > 5_000) deadlineCache.clear();
-    return v;
   }
 
   /**
@@ -307,6 +313,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       .from(jobEvents)
       .where(eq(jobEvents.jobId, job.id))
       .orderBy(asc(jobEvents.id));
+    const onChain = await readChainJob(job);
 
     return {
       jobId: job.publicId,
@@ -320,7 +327,10 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       title: jobTitleOf(job.spec),
       listingId: listingOfSpec(job.spec)?.listingId ?? null,
       listingTitle: listingOfSpec(job.spec)?.title ?? null,
-      fee: job.fee,
+      // Fixed when the job is created; the contract's when the row has none yet.
+      fee: job.fee ?? baseUnitsOf(onChain?.['fee']),
+      /** The bonds the contract holds for this job (2026-11-12); null when unreadable. */
+      bonds: bondsOf(onChain),
       spec: job.spec,
       specHash: job.specHash,
       result: job.result,
@@ -334,7 +344,7 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       createdAt: job.createdAt,
       settledAt: job.settledAt,
       /** ISO UTC, from the contract's job; null where the state has no such deadline. */
-      deadlines: await readDeadlines(job),
+      deadlines: deadlinesFrom(job, onChain),
       events: events.map((e) => ({
         kind: e.kind,
         txHash: e.txHash,
@@ -1268,3 +1278,19 @@ async function sha256Of(input: string): Promise<string> {
 }
 
 export {desc, agentStats, BaseUnits, z};
+
+/** A base-unit amount from the contract (a U128 string), or null. */
+function baseUnitsOf(v: unknown): string | null {
+  return typeof v === 'string' && /^\d{1,39}$/.test(v) ? v : null;
+}
+
+/** The worker bond, the client's dispute bond and whether the bond is locked, from `get_job`. */
+function bondsOf(
+  onChain: Record<string, unknown> | null,
+): {workerBond: string; disputeBond: string; bondLocked: boolean} | null {
+  if (!onChain) return null;
+  const workerBond = baseUnitsOf(onChain['worker_bond']);
+  const disputeBond = baseUnitsOf(onChain['dispute_bond']);
+  if (workerBond === null || disputeBond === null) return null;
+  return {workerBond, disputeBond, bondLocked: onChain['bond_locked'] === true};
+}

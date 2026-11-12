@@ -28,6 +28,7 @@ interface Row {
   chain_job_id: string | null;
   path: 'escrow' | 'direct';
   amount: string;
+  fee: string | null;
   spec: unknown;
   spec_hash: string;
   result_hash: string | null;
@@ -54,7 +55,7 @@ export async function registerReceiptRoutes(
     if (wanted.length === 0) return {count: 0, receipts: []};
 
     const rows = (await db.execute(sql`
-      SELECT j.public_id, j.chain_id, j.chain_job_id, j.path, j.amount, j.spec, j.spec_hash,
+      SELECT j.public_id, j.chain_id, j.chain_job_id, j.path, j.amount, j.fee, j.spec, j.spec_hash,
              j.result_hash, j.settled_at,
              c.id AS client_id, c.name AS client_name, w.id AS worker_id, w.name AS worker_name,
              (SELECT count(*) FROM job_events e WHERE e.job_id = j.id AND e.tx_hash IS NOT NULL) AS tx_count,
@@ -86,6 +87,10 @@ export async function registerReceiptRoutes(
           title: jobTitleOf(r.spec),
           amount: r.amount,
           amountDisplay: chain.formatToken(BigInt(r.amount)),
+          // The protocol fee, taken from the worker's side; null before it is known.
+          fee: r.fee,
+          feeDisplay: r.fee === null ? null : chain.formatToken(BigInt(r.fee)),
+          workerReceived: r.fee === null ? null : String(BigInt(r.amount) - BigInt(r.fee)),
           client: {agentId: String(r.client_id), name: r.client_name},
           worker: {agentId: String(r.worker_id), name: r.worker_name},
           specHash: r.spec_hash,
