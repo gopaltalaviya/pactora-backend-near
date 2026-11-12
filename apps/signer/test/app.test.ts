@@ -3,6 +3,7 @@ import {PactoraError, ErrorCode} from '@pactora/shared';
 import {createMetrics} from '@pactora/service';
 import {buildSignerApp} from '../src/app.js';
 import type {AcceptRequest, SignRequest} from '../src/signer.js';
+import type {CredentialMetadata, Minter} from '../src/minter.js';
 
 /**
  * The signer's HTTP surface: `/sign`, `/keys`, `/keys/accept`, `/health`.
@@ -28,6 +29,7 @@ function app(
   opts: {
     ensure?: (wallet: string) => Promise<{publicKey: string; created: boolean}>;
     accept?: (req: AcceptRequest) => Promise<unknown>;
+    minter?: Minter;
   } = {},
 ) {
   const seen: SignRequest[] = [];
@@ -47,6 +49,7 @@ function app(
     chainId: 'near:testnet',
     keysKind: 'test',
     token: TOKEN,
+    ...(opts.minter ? {minter: opts.minter} : {}),
     checks: {database: async () => 1},
     metrics: createMetrics('signer-test'),
     logger: {warn: () => {}, error: () => {}},
@@ -201,5 +204,83 @@ describe('health and readiness', () => {
     expect(health).toMatchObject({ok: true, chainId: 'near:testnet'});
     expect(health.wallets.wallets[0]).toMatchObject({account: 'bot.testnet', balanceYocto: '5'});
     expect((await instance.inject({url: '/ready'})).statusCode).toBe(200);
+  });
+});
+
+describe('POST /credentials/mint', () => {
+  const metadata: CredentialMetadata = {
+    title: 'Pactora job #7',
+    description: 'A credential.',
+    media: 'data:image/svg+xml;base64,PHN2Zy8+',
+    issued_at: '1800000000000',
+    extra: '{"chainJobId":"7"}',
+  };
+  const body = {tokenId: '7', receiverId: 'worker.testnet', metadata};
+  const minter = (mint: Minter['mint'] = async () => ({txHash: 'M1'})) => {
+    const calls: unknown[][] = [];
+    const m: Minter = {
+      accountId: 'minter.testnet',
+      contract: 'credentials.testnet',
+      mint: async (...a) => {
+        calls.push(a);
+        return mint(...a);
+      },
+    };
+    return {m, calls};
+  };
+
+  it('mints and answers the transaction, the minter and the contract', async () => {
+    const {m, calls} = minter();
+    const {instance} = app(undefined, {minter: m});
+    const res = await post(instance, body, '/credentials/mint');
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({
+      txHash: 'M1',
+      tokenId: '7',
+      from: 'minter.testnet',
+      contract: 'credentials.testnet',
+    });
+    expect(calls).toEqual([['7', 'worker.testnet', metadata]]);
+  });
+
+  it('needs the signer token', async () => {
+    const {m, calls} = minter();
+    const {instance} = app(undefined, {minter: m});
+    expect((await post(instance, body, '/credentials/mint', 'Bearer wrong')).statusCode).toBe(401);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('answers 503 when no minter is configured', async () => {
+    const {instance} = app();
+    const res = await post(instance, body, '/credentials/mint');
+    expect(res.statusCode).toBe(503);
+    expect(res.json().code).toBe('UPSTREAM_UNAVAILABLE');
+    expect(res.json().detail).toMatch(/no credential minter/);
+  });
+
+  it.each([
+    ['a non-decimal token id', {...body, tokenId: 'abc'}],
+    ['a bad receiver', {...body, receiverId: 'Worker!'}],
+    ['no metadata', {...body, metadata: undefined}],
+    ['a missing title', {...body, metadata: {...metadata, title: undefined}}],
+    ['an extra metadata field', {...body, metadata: {...metadata, reference: 'https://x'}}],
+    ['media that is not an inline SVG', {...body, metadata: {...metadata, media: 'https://evil/x.png'}}],
+    ['a non-numeric issued_at', {...body, metadata: {...metadata, issued_at: 'today'}}],
+    ['oversized extra', {...body, metadata: {...metadata, extra: 'x'.repeat(5000)}}],
+  ])('refuses %s with 422', async (_label, payload) => {
+    const {m, calls} = minter();
+    const {instance} = app(undefined, {minter: m});
+    expect((await post(instance, payload, '/credentials/mint')).statusCode).toBe(422);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('passes a contract refusal through with its code', async () => {
+    const {m} = minter(async () => {
+      throw new PactoraError(ErrorCode.INVALID_STATE, 'the contract refused: TokenExists');
+    });
+    const {instance} = app(undefined, {minter: m});
+    const res = await post(instance, body, '/credentials/mint');
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('INVALID_STATE');
   });
 });

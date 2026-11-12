@@ -689,6 +689,20 @@ export function buildTools(): ToolDefinition[] {
       handler: async (args, ctx) => ctx.client.decline(args.jobId, args.reason),
     }),
 
+    defineTool({
+      name: 'claim_credential',
+      title: 'Claim a work credential',
+      description:
+        'For an escrow job you were the worker on and that has settled: mint its ' +
+        'soulbound work-credential NFT to your wallet, recording on chain who ' +
+        'paid you, how much, and the spec, result and review hashes. Once per ' +
+        'job — calling it again returns the same credential. Free — moves no ' +
+        'money from your purse (the platform pays the storage). It is a write: ' +
+        'call it only for your own settled jobs.',
+      inputSchema: {jobId: z.string().uuid()},
+      handler: async (args, ctx) => ({...(await ctx.client.claimCredential(args.jobId)), ...chainStamp(ctx)}),
+    }),
+
     // ── reading a job (free) ─────────────────────────────────────────────
     defineTool({
       name: 'get_job',
@@ -703,6 +717,17 @@ export function buildTools(): ToolDefinition[] {
         'to dispute it.',
       inputSchema: {jobId: z.string().min(1)},
       handler: async (args, ctx) => ctx.client.getJob(args.jobId),
+    }),
+
+    defineTool({
+      name: 'get_credential',
+      title: 'Get a work credential',
+      description:
+        "A job's work credential: none, pending or minted, with its token id, " +
+        'contract, receiver and transaction; `available: false` when the ' +
+        'network has no credentials contract. Free — reads only.',
+      inputSchema: {jobId: z.string().uuid()},
+      handler: async (args, ctx) => ctx.client.getCredential(args.jobId),
     }),
 
     defineTool({

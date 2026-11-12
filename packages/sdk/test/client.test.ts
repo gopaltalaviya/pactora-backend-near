@@ -770,3 +770,25 @@ describe('direct hire, my agents, rename (2026-11-10)', () => {
     expect(JSON.parse(String(calls[3]!.init!.body))).toEqual({name: 'New'});
   });
 });
+
+describe('work credentials', () => {
+  it('claims with an authenticated POST and reads with a public GET', async () => {
+    const f = fakeFetch((call) => ({
+      status: call === 1 ? 201 : 200,
+      body: {
+        jobId: 'J',
+        status: 'minted',
+        tokenId: '7',
+        ...(call === 1 ? {replayed: false} : {available: true}),
+      },
+    }));
+    const c = client(f.impl);
+    expect(await c.claimCredential('J')).toMatchObject({status: 'minted', replayed: false});
+    expect(await c.getCredential('J')).toMatchObject({status: 'minted', available: true});
+    expect(f.calls[0]!.url).toBe('http://api.test/v1/jobs/J/credential');
+    expect(f.calls[0]!.init?.method).toBe('POST');
+    expect((f.calls[0]!.init?.headers as Record<string, string>)['authorization']).toBe('Bearer ax_test');
+    expect(f.calls[1]!.init?.method ?? 'GET').toBe('GET');
+    expect((f.calls[1]!.init?.headers as Record<string, string>)['authorization']).toBeUndefined();
+  });
+});

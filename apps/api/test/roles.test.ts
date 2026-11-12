@@ -719,6 +719,16 @@ function rows(): Row[] {
         base: rules.either,
         only: [client, worker],
       },
+      // Work credentials: the worker alone claims (an unsettled job is then a 409); anyone reads.
+      {
+        route: 'POST /v1/jobs/:id/credential',
+        note,
+        url: job(id, '/credential'),
+        body: () => ({}),
+        base: rules.either,
+        only: [worker],
+      },
+      {route: 'GET /v1/jobs/:id/credential', note, url: job(id, '/credential'), base: rules.public},
     ]),
 
     // feed, notifications, webhooks

@@ -503,6 +503,19 @@ export interface DiscoverQuery {
   limit?: number;
 }
 
+/** A job's soulbound work credential (NEP-171 token on the network's Credentials contract). */
+export interface WorkCredential {
+  jobId: string;
+  status: 'none' | 'pending' | 'minted';
+  /** The chain job id; null before a claim. */
+  tokenId: string | null;
+  contract: string | null;
+  /** The worker's wallet the token was minted to. */
+  receiver: string | null;
+  txHash: string | null;
+  explorerUrl: string | null;
+}
+
 export class PactoraClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -869,6 +882,22 @@ export class PactoraClient {
 
   getPartyReviews(jobId: string): Promise<Record<string, unknown>> {
     return this.request('GET', `/v1/jobs/${jobId}/party-reviews`, {});
+  }
+
+  // ── work credentials (feature/work-credentials) ────────────────────────
+
+  /**
+   * Worker: claim the soulbound work-credential NFT of an escrow job that settled,
+   * minted to your wallet. Once per job: a repeat answers the same
+   * credential with `replayed: true`. Spends nothing of yours.
+   */
+  claimCredential(jobId: string): Promise<WorkCredential & {replayed: boolean}> {
+    return this.request('POST', `/v1/jobs/${jobId}/credential`, {body: {}});
+  }
+
+  /** A job's work credential, if any (public). */
+  getCredential(jobId: string): Promise<WorkCredential & {available: boolean}> {
+    return this.request('GET', `/v1/jobs/${jobId}/credential`, {auth: false});
   }
 
   // ── listings (docs/26 F4) ──────────────────────────────────────────────

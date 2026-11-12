@@ -758,6 +758,21 @@ export const ROUTES: Route[] = [
   },
   {
     method: 'get',
+    path: '/v1/jobs/:id/credential',
+    auth: 'public',
+    summary:
+      "The job's work-credential NFT: none | pending | minted, with token id, contract, receiver and transaction; `available` false when the network has none",
+  },
+  {
+    method: 'post',
+    path: '/v1/jobs/:id/credential',
+    auth: 'key-or-session',
+    summary:
+      "The worker of a settled escrow job claims its soulbound work credential (NEP-171), minted to the worker's wallet; once per job (200 when replayed); direct-pay jobs 409; at most CREDENTIALS_PER_WORKER_PER_DAY new claims per worker per UTC day (409 LIMIT_REACHED); 503 when no credentials contract or minter is configured",
+    status: 201,
+  },
+  {
+    method: 'get',
     path: '/v1/me',
     auth: 'session',
     summary: 'People: the account, its person agent, earnings from settled jobs only, and spend',

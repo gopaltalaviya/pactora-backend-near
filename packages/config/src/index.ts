@@ -24,6 +24,9 @@ import {ACCOUNT_ID_RE, ChainId as ChainIdSchema, unsupportedEnvProblems, type Ch
 const AccountId = z.string().regex(ACCOUNT_ID_RE, 'must be a NEAR account id').min(2).max(64);
 const Units = z.string().regex(/^\d+$/);
 
+/** The longest payment-token symbol networks.json may name (work-credential metadata is sized for it). */
+export const PAYMENT_TOKEN_SYMBOL_MAX = 16;
+
 const NetworkSchema = z.object({
   chainId: ChainIdSchema,
   /** Names the params/deployments files (`:` is not allowed in Windows paths). */
@@ -49,7 +52,8 @@ const NetworkSchema = z.object({
   blockExplorerUrls: z.array(z.string().url()),
   faucetUrls: z.array(z.string().url()).default([]),
   paymentToken: z.object({
-    symbol: z.string(),
+    // Bounded: it is written into every work credential's on-chain description.
+    symbol: z.string().max(PAYMENT_TOKEN_SYMBOL_MAX),
     decimals: z.literal(6),
     accountId: AccountId.nullable(),
     deployWithProtocol: z.boolean(),

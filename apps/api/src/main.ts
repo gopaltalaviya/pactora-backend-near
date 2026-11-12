@@ -13,7 +13,7 @@ import {
   serviceLogger,
 } from '@pactora/service';
 import {buildApp} from './app.js';
-import {makeSignerFaucet, makeSignerSubmit, makeSignerWalletKeys} from './submit.js';
+import {makeSignerFaucet, makeSignerMint, makeSignerSubmit, makeSignerWalletKeys} from './submit.js';
 import {SanctionsIndex, SimulatedIdentityProvider} from './compliance.js';
 import {
   makeAccessKeysReader,
@@ -115,6 +115,8 @@ const Env = z
     FAUCET_AMOUNT: z.coerce.bigint().positive().default(5_000_000n),
     FAUCET_PER_IP_PER_DAY: env.positiveInt(5),
     FAUCET_DAILY_CAP: z.coerce.bigint().positive().default(500_000_000n),
+    /** Work credentials: new claims per worker agent per UTC day (each costs the minter storage NEAR). */
+    CREDENTIALS_PER_WORKER_PER_DAY: env.positiveInt(20),
     /** Sanctions screening of a person's legal name (docs/26 F14). `off` is refused in production. */
     SANCTIONS_SCREENING: z.enum(['on', 'off']).default('on'),
     /** Identity checks (docs/26 F13): `none`, or `simulated` (test chains only, labelled everywhere). */
@@ -305,6 +307,12 @@ const app = await buildApp({
   ...(cfg.WEBHOOK_ALLOW_PRIVATE ? {webhookTargetPolicy: {allowHttp: true, allowPrivate: true}} : {}),
   // Only where every enabled chain is a test chain; the route refuses others anyway.
   ...(Object.values(config.chains).every((c) => c.testnet) ? {faucetSend: makeSignerFaucet(signerDeps)} : {}),
+  // Work credentials: the same test-chains-only rule; without a Credentials
+  // contract in the chain config the route answers 503 regardless.
+  ...(Object.values(config.chains).every((c) => c.testnet)
+    ? {credentialMint: makeSignerMint(signerDeps)}
+    : {}),
+  credentialsPerWorkerPerDay: cfg.CREDENTIALS_PER_WORKER_PER_DAY,
   faucet: {amount: cfg.FAUCET_AMOUNT, perIpPerDay: cfg.FAUCET_PER_IP_PER_DAY, dailyCap: cfg.FAUCET_DAILY_CAP},
   db,
   chains: config.chains,

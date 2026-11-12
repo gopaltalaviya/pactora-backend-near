@@ -1177,6 +1177,34 @@ export const faucetClaims = pgTable(
   ],
 );
 
+/**
+ * Work credentials (migration 0034): one soulbound NFT per settled job,
+ * minted to the worker's wallet; token id = the chain job id. The row is the
+ * claim, written before the mint (see routes/credentials.ts).
+ */
+export const credentials = pgTable(
+  'credentials',
+  {
+    id: bigserial('id', {mode: 'number'}).primaryKey(),
+    chainId: text('chain_id').notNull(),
+    jobId: bigint('job_id', {mode: 'number'})
+      .notNull()
+      .references(() => jobs.id, {onDelete: 'cascade'}),
+    receiver: text('receiver').notNull(),
+    tokenId: text('token_id').notNull(),
+    /** pending (a mint in flight) | minted | failed (outcome unknown; check nft_token before minting again). */
+    status: text('status').notNull().default('pending'),
+    txHash: text('tx_hash'),
+    createdAt: timestamp('created_at', {withTimezone: true}).notNull().defaultNow(),
+    /** The last attempt: a `pending` row older than a few minutes was left by a crash. */
+    updatedAt: timestamp('updated_at', {withTimezone: true}).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('credentials_job_uk').on(t.jobId),
+    index('credentials_receiver_idx').on(t.chainId, t.receiver),
+  ],
+);
+
 // ──────────────── public profiles and two-way reviews (docs/26 F16, F17) ────────────────
 
 /**

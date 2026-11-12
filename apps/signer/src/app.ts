@@ -11,6 +11,7 @@ import {
 import {authorised} from './auth.js';
 import type {Faucet} from './faucet.js';
 import type {KeyStore} from './keystore.js';
+import type {Minter} from './minter.js';
 import type {SignerService, SignRequest} from './signer.js';
 
 /**
@@ -61,12 +62,37 @@ export interface SignerAppDeps {
   logger?: {warn: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void};
   /** Test tokens from a separate faucet account (testnet and sandbox only); none → 503. */
   faucet?: Faucet;
+  /** The work-credential minter (testnet and sandbox, with a Credentials contract); none → 503. */
+  minter?: Minter;
 }
 
 /** POST /faucet — the API has already applied the claim limits. */
 export const FaucetBody = z.object({
   receiverId: z.string().regex(ACCOUNT_ID_RE, 'a NEAR account id'),
   amount: z.string().regex(/^[1-9]\d{0,38}$/, 'a positive base-unit integer'),
+});
+
+/**
+ * POST /credentials/mint — the API has already decided the claim is the
+ * job's worker's and built the metadata from the job. NEP-177 fields only,
+ * bounded: what is written here is stored on chain for good, and the largest
+ * body must fit MINT_STORAGE_DEPOSIT (minter.ts has the arithmetic).
+ */
+export const MintBody = z.object({
+  tokenId: z.string().regex(/^\d{1,20}$/, 'the chain job id, a decimal u64'),
+  receiverId: z.string().regex(ACCOUNT_ID_RE, 'a NEAR account id'),
+  metadata: z
+    .object({
+      title: z.string().min(1).max(100),
+      description: z.string().min(1).max(300),
+      media: z
+        .string()
+        .max(1024)
+        .regex(/^data:image\/svg\+xml;base64,[A-Za-z0-9+/=]+$/, 'an inline base64 SVG'),
+      issued_at: z.string().regex(/^\d{1,16}$/, 'milliseconds since the epoch'),
+      extra: z.string().min(2).max(1024),
+    })
+    .strict(),
 });
 
 export function buildSignerApp(deps: SignerAppDeps): FastifyInstance {
@@ -192,6 +218,24 @@ export function buildSignerApp(deps: SignerAppDeps): FastifyInstance {
     }
     const result = await deps.faucet.send(body.receiverId, BigInt(body.amount));
     return reply.send({...result, from: deps.faucet.accountId});
+  });
+
+  app.post('/credentials/mint', async (request, reply) => {
+    guard(request.headers.authorization);
+    const body = MintBody.parse(request.body ?? {});
+    if (!deps.minter) {
+      throw new PactoraError(
+        ErrorCode.UPSTREAM_UNAVAILABLE,
+        'no credential minter is configured on this signer (MINTER_ACCOUNT_ID and a Credentials contract)',
+      );
+    }
+    const result = await deps.minter.mint(body.tokenId, body.receiverId, body.metadata);
+    return reply.send({
+      txHash: result.txHash,
+      tokenId: body.tokenId,
+      from: deps.minter.accountId,
+      contract: deps.minter.contract,
+    });
   });
 
   return app;

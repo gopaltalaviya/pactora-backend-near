@@ -128,6 +128,11 @@ services:
       FAUCET_ACCOUNT_ID: ${FAUCET_ACCOUNT_ID:-}
       FAUCET_SECRET_KEY: ${FAUCET_SECRET_KEY:-}
       FAUCET_MAX_PER_SEND: ${FAUCET_MAX_PER_SEND:-10000000}
+      # The work-credential minter (testnet only; feature/work-credentials): the
+      # account the Credentials contract names as its minter, with a little
+      # NEAR for storage. None, or no Credentials contract → minting is off.
+      MINTER_ACCOUNT_ID: ${MINTER_ACCOUNT_ID:-}
+      MINTER_SECRET_KEY: ${MINTER_SECRET_KEY:-}
       # Off testnet: AWS KMS instead of the raw keys above — docs/21.
       SIGNER_KMS_KEYS: ${SIGNER_KMS_KEYS:-}
       KEEPER_KMS_KEY_ID: ${KEEPER_KMS_KEY_ID:-}
@@ -210,6 +215,8 @@ services:
       FAUCET_AMOUNT: ${FAUCET_AMOUNT:-5000000}
       FAUCET_PER_IP_PER_DAY: ${FAUCET_PER_IP_PER_DAY:-5}
       FAUCET_DAILY_CAP: ${FAUCET_DAILY_CAP:-500000000}
+      # Work credentials: new claims per worker agent per UTC day (escrow jobs only).
+      CREDENTIALS_PER_WORKER_PER_DAY: ${CREDENTIALS_PER_WORKER_PER_DAY:-20}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       # Production screening refuses to start without two reviewers (NEAR
       # accounts, comma-separated) who clear a strong sanctions match.

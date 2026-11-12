@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {fileURLToPath} from 'node:url';
 import {loadConfig} from '@pactora/config';
-import {contractCall, makeSignerSubmit, makeSignerWalletKeys} from '../src/submit.js';
+import {contractCall, makeSignerMint, makeSignerSubmit, makeSignerWalletKeys} from '../src/submit.js';
 
 /** The API's half of the signer handshake: it must present the token it was given. */
 describe('calling the signer', () => {
@@ -231,5 +231,37 @@ describe('the contract call for each action', () => {
         body: {chainId: 'near:sandbox', walletAddress: 'bot.alice.test.near', chainAgentId: '5'},
       },
     ]);
+  });
+});
+
+describe('the credential mint call', () => {
+  const config = loadConfig({
+    contractsRoot: fileURLToPath(new URL('../../../chain', import.meta.url)),
+    env: {ENABLED_CHAINS: 'near:sandbox'},
+  });
+  const metadata = {title: 't', description: 'd', media: 'm', issued_at: '1', extra: '{}'};
+
+  it('POSTs the token, the receiver and the metadata to /credentials/mint with the token', async () => {
+    const seen: {url: string; init: RequestInit}[] = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      seen.push({url, init});
+      return new Response(JSON.stringify({txHash: 'M1', tokenId: '7', from: 'm.test.near', contract: 'c'}), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    const out = await makeSignerMint({signerUrl: 'http://signer', signerToken: 'tok', config, fetchImpl})(
+      '7',
+      'w.test.near',
+      metadata,
+      'trace-1',
+    );
+    expect(out).toMatchObject({txHash: 'M1', from: 'm.test.near'});
+    expect(seen[0]!.url).toBe('http://signer/credentials/mint');
+    expect(JSON.parse(String(seen[0]!.init.body))).toEqual({
+      tokenId: '7',
+      receiverId: 'w.test.near',
+      metadata,
+    });
+    expect((seen[0]!.init.headers as Record<string, string>)['authorization']).toBe('Bearer tok');
   });
 });

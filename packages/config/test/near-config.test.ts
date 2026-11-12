@@ -106,3 +106,18 @@ describe('NEAR network config (docs/NEAR-WIRE.md §3)', () => {
     expect(() => loadConfig({contractsRoot: root, env: sandbox})).toThrow(/protocol_fee/);
   });
 });
+
+describe('the payment token symbol', () => {
+  it('is bounded: it is written into every work credential stored on chain', () => {
+    const ok = copyRoot('config/networks.json', (n) => {
+      n['near:sandbox'].paymentToken.symbol = 'S'.repeat(16);
+    });
+    expect(loadConfig({contractsRoot: ok, env: sandbox}).chain('near:sandbox').formatToken(1_000_000n)).toBe(
+      `1 ${'S'.repeat(16)}`,
+    );
+    const tooLong = copyRoot('config/networks.json', (n) => {
+      n['near:sandbox'].paymentToken.symbol = 'S'.repeat(17);
+    });
+    expect(() => loadConfig({contractsRoot: tooLong, env: sandbox})).toThrow(/symbol/);
+  });
+});

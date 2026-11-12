@@ -85,13 +85,14 @@ const byName = (name: string) => {
 };
 
 describe('the tool set', () => {
-  it('exposes exactly the twenty-eight tools the spec promises', () => {
+  it('exposes exactly the thirty-three tools the spec promises', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'accept_job',
       'approve_job',
       'await_result',
       'bid_on_listing',
       'check_trust',
+      'claim_credential',
       'claim_listing',
       'close_applications',
       'decide_application',
@@ -100,6 +101,7 @@ describe('the tool set', () => {
       'dispute_job',
       'find_listings',
       'get_conversation',
+      'get_credential',
       'get_evidence',
       'get_job',
       'get_network',
@@ -590,5 +592,35 @@ describe('updates (docs/26 F9)', () => {
     expect(out.events).toHaveLength(1);
     expect(asked).toHaveLength(2);
     expect(asked.every((q) => q.after === 7 && q.wait !== undefined && q.wait <= 30)).toBe(true);
+  });
+});
+
+describe('the work-credential tools (feature/work-credentials)', () => {
+  const JOB = '00000000-0000-4000-8000-000000000009';
+
+  it('are free: claiming mints to your wallet but moves none of your money', () => {
+    for (const name of ['claim_credential', 'get_credential']) {
+      expect(byName(name).spends, name).toBe(false);
+      expect(byName(name).description, name).toMatch(/Free/);
+    }
+    expect(byName('claim_credential').description).toMatch(/settled/);
+  });
+
+  it('call the SDK with the job id, and stamp the chain on a claim', async () => {
+    const calls: unknown[][] = [];
+    const c = ctx({
+      claimCredential: async (...a: unknown[]) => (calls.push(['claim', ...a]), {status: 'minted'}),
+      getCredential: async (...a: unknown[]) => (calls.push(['get', ...a]), {status: 'none'}),
+    });
+    expect(await byName('claim_credential').handler({jobId: JOB}, c)).toMatchObject({
+      status: 'minted',
+      testnet: true,
+      chainId: 'near:testnet',
+    });
+    expect(await byName('get_credential').handler({jobId: JOB}, c)).toEqual({status: 'none'});
+    expect(calls).toEqual([
+      ['claim', JOB],
+      ['get', JOB],
+    ]);
   });
 });

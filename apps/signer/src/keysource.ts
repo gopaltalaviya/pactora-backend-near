@@ -119,3 +119,42 @@ export function faucetAccount(env: NodeJS.ProcessEnv, testnet: boolean): Service
   }
   return {accountId, key: keyPairKey(keyPair)};
 }
+
+/**
+ * `MINTER_ACCOUNT_ID` with `MINTER_SECRET_KEY` = `ed25519:...`: the
+ * work-credential minter (feature/work-credentials), the account the
+ * credentials contract names as its `minter`. It calls `nft_mint` and
+ * nothing else, from its own NEAR for storage. Testnet and sandbox only, so
+ * a raw key is all it takes; on any other chain a configured minter refuses
+ * to start. No account → no minter (POST /credentials/mint answers 503).
+ */
+export function minterAccount(env: NodeJS.ProcessEnv, testnet: boolean): ServiceAccount | undefined {
+  const accountId = env['MINTER_ACCOUNT_ID'];
+  const raw = env['MINTER_SECRET_KEY'];
+  if (!accountId) {
+    if (raw) throw new Error('MINTER_SECRET_KEY is set but MINTER_ACCOUNT_ID is not');
+    return undefined;
+  }
+  if (!testnet)
+    throw new Error(
+      'MINTER_ACCOUNT_ID is set on a chain that is not a testnet — the credential minter is test-only',
+    );
+  if (!isAccountId(accountId)) throw new Error(`MINTER_ACCOUNT_ID "${accountId}" is not a NEAR account id`);
+  // One account, one key, two senders each counting its own nonces: they would collide.
+  for (const other of ['FAUCET_ACCOUNT_ID', 'KEEPER_ACCOUNT_ID']) {
+    if (env[other] === accountId) {
+      throw new Error(
+        `MINTER_ACCOUNT_ID must not be ${other} (${accountId}): each sender needs its own account and nonces — refusing to start`,
+      );
+    }
+  }
+  if (!raw) throw new Error('MINTER_ACCOUNT_ID is set but MINTER_SECRET_KEY is not');
+  if (!raw.startsWith('ed25519:')) throw new Error('MINTER_SECRET_KEY must be an ed25519:<base58> key');
+  let keyPair: KeyPair;
+  try {
+    keyPair = KeyPair.fromString(raw as `ed25519:${string}`);
+  } catch {
+    throw new Error('MINTER_SECRET_KEY is not a valid ed25519 key');
+  }
+  return {accountId, key: keyPairKey(keyPair)};
+}

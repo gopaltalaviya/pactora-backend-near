@@ -257,3 +257,25 @@ export function makeSignerFaucet(deps: SignerSubmitDeps): FaucetSend {
   return (receiverId, amount, traceId) =>
     callSigner(deps, '/faucet', {receiverId, amount: amount.toString()}, traceId);
 }
+
+/** NEP-177 metadata of a work credential, built by the API from the job (routes/credentials.ts). */
+export interface CredentialMetadata {
+  title: string;
+  description: string;
+  media: string;
+  issued_at: string;
+  extra: string;
+}
+
+/** The signer's work-credential minter (testnet and sandbox, with a Credentials contract). */
+export type CredentialMint = (
+  tokenId: string,
+  receiverId: string,
+  metadata: CredentialMetadata,
+  traceId?: string,
+) => Promise<{txHash: string; from: string; contract: string}>;
+
+export function makeSignerMint(deps: SignerSubmitDeps): CredentialMint {
+  return (tokenId, receiverId, metadata, traceId) =>
+    callSigner(deps, '/credentials/mint', {tokenId, receiverId, metadata}, traceId);
+}
