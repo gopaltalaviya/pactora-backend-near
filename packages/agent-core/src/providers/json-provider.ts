@@ -177,7 +177,7 @@ const MAX_RETRY_WAIT_MS = 20_000;
  * block; otherwise the outermost {...}. Whatever comes back is still parsed
  * and validated against the schema by the caller — this only finds it.
  */
-function stripFences(text: string): string {
+export function stripFences(text: string): string {
   const trimmed = text.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) return trimmed;
   const fence = String.fromCharCode(96).repeat(3);

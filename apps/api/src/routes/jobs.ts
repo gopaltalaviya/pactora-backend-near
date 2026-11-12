@@ -626,7 +626,8 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
       }
     }
     if (judge) {
-      // One NEAR AI response vouches for one job.
+      // One signed NEAR AI response vouches for one job. Keyed on the signed
+      // text, not the response id, which the signature does not cover.
       const reused = await db
         .select({id: jobEvents.id})
         .from(jobEvents)
@@ -634,14 +635,14 @@ export async function registerJobRoutes(app: FastifyInstance, deps: JobRouteDeps
           and(
             sql`${jobEvents.jobId} <> ${job.id}`,
             inArray(jobEvents.kind, ['job.settled', 'job.disputed']),
-            sql`${jobEvents.payload} -> 'judge' ->> 'responseId' = ${judge.responseId}`,
+            sql`${jobEvents.payload} -> 'judge' ->> 'signedText' = ${judge.signedText}`,
           ),
         )
         .limit(1);
       if (reused.length > 0) {
         throw new PactoraError(
           ErrorCode.SCHEMA_MISMATCH,
-          `NEAR AI response ${judge.responseId} already vouches for another job`,
+          `this signed NEAR AI response (${judge.responseId}) already vouches for another job`,
         );
       }
     }
@@ -1126,14 +1127,19 @@ export const ApproveBody = JudgeBody;
 /** The attestation stored with the ruling that settled or disputed the job. */
 function judgeOf(
   events: {kind: string; payload: unknown}[],
-): (JudgeAttestation & {verified: boolean}) | null {
+): (Omit<JudgeAttestation, 'requestBody' | 'responseBody'> & {verified: boolean}) | null {
   const e = events.find(
     (x) => (x.kind === 'job.settled' || x.kind === 'job.disputed') && (x.payload as {judge?: unknown}).judge,
   );
   const payload = e?.payload as {judge?: unknown; judgeVerified?: unknown} | undefined;
   const parsed = payload ? JudgeAttestation.safeParse(payload.judge) : null;
   // `verified`: the API checked the signature and NEAR AI's attested key itself.
-  return parsed?.success ? {...parsed.data, verified: payload!.judgeVerified === true} : null;
+  if (!parsed?.success) return null;
+  // The exchanged bytes stay in the database: the request holds the job's work.
+  const {requestBody: _req, responseBody: _res, ...shown} = parsed.data;
+  void _req;
+  void _res;
+  return {...shown, verified: payload!.judgeVerified === true};
 }
 
 export const DeclineBody = z.object({

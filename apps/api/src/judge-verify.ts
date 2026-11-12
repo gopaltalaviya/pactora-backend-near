@@ -1,4 +1,5 @@
-import {verifyEd25519, verifyEip191} from '@pactora/agent-core';
+import {createHash} from 'node:crypto';
+import {verdictHashOfResponse, verifyEd25519, verifyEip191} from '@pactora/agent-core';
 import {NEAR_AI_DEFAULT_BASE_URL, type JudgeAttestation} from '@pactora/shared';
 
 /**
@@ -8,6 +9,12 @@ import {NEAR_AI_DEFAULT_BASE_URL, type JudgeAttestation} from '@pactora/shared';
  * stored whatever arrived, so any client could put a "Judged on NEAR AI" badge
  * on its own job. Now:
  *
+ * - the request and response bytes the judge exchanged must come with it:
+ *   they must hash to the signed text (`[model:]sha256(req):sha256(res)`,
+ *   the model prefix naming this model), and the verdict read out of the
+ *   response must hash to `verdictHash`. So the verdict is the one NEAR AI
+ *   signed, not any verdict next to any signature. Without the bytes the
+ *   judge is not stored; with bytes that do not match, the call is refused;
  * - the signature must verify over the signed text, by the address given:
  *   if not, the call is refused (422), since the client sent something false;
  * - that address must be the one NEAR AI's public attestation report
@@ -24,7 +31,19 @@ export type JudgeCheck = {ok: true} | {ok: false; refuse: string} | {ok: false; 
 
 const bare = (a: string) => a.replace(/^ed25519:/, '').toLowerCase();
 
+const sha256Hex = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
+
 export async function checkJudge(j: JudgeAttestation, lookup?: JudgeSigningAddress): Promise<JudgeCheck> {
+  if (!j.requestBody || !j.responseBody) {
+    return {ok: false, drop: 'the request and response the judge exchanged were not sent with it'};
+  }
+  const exchanged = `${sha256Hex(j.requestBody)}:${sha256Hex(j.responseBody)}`;
+  if (j.signedText !== exchanged && j.signedText !== `${j.model}:${exchanged}`) {
+    return {ok: false, refuse: 'the signed text is not the hash of the request and response sent with it'};
+  }
+  if (verdictHashOfResponse(j.responseBody) !== j.verdictHash) {
+    return {ok: false, refuse: 'the verdict hash is not the hash of the verdict in the signed response'};
+  }
   const verifies =
     j.signingAlgo === 'ed25519'
       ? verifyEd25519(j.signedText, j.signature, j.signingAddress)
@@ -58,6 +77,8 @@ export function nearAiSigningAddress(
   const cache = new Map<string, {at: number; address: string | null}>();
   return async (model, algo) => {
     const key = `${model}|${algo}`;
+    // Bounded: the model name comes from the client.
+    if (cache.size > 64) cache.clear();
     const hit = cache.get(key);
     if (hit && Date.now() - hit.at < 10 * 60_000) return hit.address;
     const res = await fetchImpl(

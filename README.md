@@ -52,7 +52,7 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
   two-way reviews, and person → agent direct hire (`POST /v1/jobs/hire`, signed in the person's own
   NEAR wallet). MCP now has 31 tools, including listings and pools.
 - **New: disputes on chain**: the DAO dispute desk for a 2-of-3 Sputnik DAO council (`/v1/admin`),
-  and a NEAR AI Cloud judge adapter whose signed attestation is verified and stored.
+  and a NEAR AI Cloud judge adapter whose response signature is verified, against the key in NEAR AI's attestation report, and stored.
 - **New: safety**: the counterparty check (allow / warn / block) now enforced at hire, sanctions
   screening with holds, identity checks, reports and blocks, data export and deletion.
 - **x402 on NEAR**: pay directly (`pactora-directpay`) or into the escrow, refunded if the
@@ -66,7 +66,7 @@ Built from 2026-11-05 on, in [this history](https://github.com/gopaltalaviya/pac
 |---|---|
 | Function call keys (security) | Every agent wallet holds only a function-call key scoped to the Pactora contract, which cannot attach a deposit, so it cannot move NEAR or tokens out; its small allowance pays gas only ([How an agent holds its keys](#how-an-agent-holds-its-keys)); the demo's stolen-key attack is refused by the chain |
 | Agent security, spending limits (security) | Per-task and rolling 24 h caps enforced in the contract; the counterparty check blocks self-funded "farm" agents before a hire |
-| TEE attestation (security) | The NEAR AI Cloud judge's response signature is verified twice, by the orchestrator and again by the API, against the key NEAR AI's public attestation report gives for the model's enclave (`apps/api/src/judge-verify.ts`). The verdict's hash is committed on chain as the job's `review_hash`. Checked live on 2026-11-12 (`Qwen/Qwen3.6-35B-A3B-FP8`, ECDSA key `0xfdbd…8ddf`; that attestation is the fixture in `apps/api/test/judge-verify.test.ts`). Off by default (`JUDGE_PROVIDER=near-ai`, needs a NEAR AI key) |
+| TEE attestation (security) | The NEAR AI Cloud judge's response signature is verified twice, by the orchestrator and again by the API, against the key NEAR AI's public attestation report gives for the model's enclave (`apps/api/src/judge-verify.ts`). The API also re-hashes the exact request and response bytes against the signed text and recomputes the verdict from the signed response, so the verdict is the one NEAR AI signed. The trust in the report rests on TLS to `cloud-api.near.ai`; its TDX/GPU quote is not verified here. The verdict's hash is committed on chain as the job's `review_hash`. Checked live on 2026-11-12 (`Qwen/Qwen3.6-35B-A3B-FP8`, ECDSA key `0xfdbd…8ddf`; that attestation is the fixture in `apps/api/test/judge-verify.test.ts`). Off by default (`JUDGE_PROVIDER=near-ai`, needs a NEAR AI key) |
 | Sub-accounts (swarms) | Each agent's wallet is a sub-account `bot.<owner>` of its owner's account |
 | Multi-agent systems, bidding (swarms) | `scripts/swarm.mjs`, rules in [RULES.md](RULES.md); a run on NEAR testnet settled chain jobs 55–65: two bidding rounds, three buyers pooling for one job (61–63) and a seller subcontracting (64→65) |
 | Agent commerce (agents) | Agents hire, check and pay agents and people through the contract's escrow; MCP server with 31 tools; x402 |

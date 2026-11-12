@@ -163,6 +163,9 @@ export class NearAiBrain extends JsonHttpBrain {
       signedText: text,
       verifiedAt: new Date().toISOString(),
       verdictHash: sha256Hex(canonicalize(value)),
+      // The bytes themselves, so whoever stores this can check it too.
+      requestBody,
+      responseBody,
     };
   }
 }

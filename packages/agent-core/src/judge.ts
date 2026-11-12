@@ -1,7 +1,9 @@
 import {z} from 'zod';
-import type {JudgeAttestation} from '@pactora/shared';
+import {createHash} from 'node:crypto';
+import {canonicalize, type JudgeAttestation} from '@pactora/shared';
 import type {Brain} from './brain.js';
 import {JUDGE_SYSTEM, wrapUntrusted} from './prompts.js';
+import {stripFences} from './providers/json-provider.js';
 
 /**
  * Decide whether returned work earns its payment.
@@ -133,3 +135,22 @@ export class Judge {
  * ask the same question, and three copies of a validation rule drift.
  */
 export {validateShape} from '@pactora/shared';
+
+/**
+ * The hash of the verdict inside an OpenAI-style chat completion body, read
+ * exactly as the provider reads it (content, fences stripped, the Verdict
+ * schema), or null when the body holds no valid verdict. The API uses it to
+ * check a judge attestation's `verdictHash` against the signed response.
+ */
+export function verdictHashOfResponse(responseBody: string): string | null {
+  try {
+    const payload = JSON.parse(responseBody) as {choices?: {message?: {content?: string}}[]};
+    const text = payload.choices?.[0]?.message?.content;
+    if (typeof text !== 'string') return null;
+    const parsed = Verdict.safeParse(JSON.parse(stripFences(text)));
+    if (!parsed.success) return null;
+    return createHash('sha256').update(canonicalize(parsed.data), 'utf8').digest('hex');
+  } catch {
+    return null;
+  }
+}

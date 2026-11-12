@@ -4,6 +4,7 @@ import {createHash, generateKeyPairSync, sign} from 'node:crypto';
 import type {FastifyInstance} from 'fastify';
 import {sql} from 'drizzle-orm';
 import {loadConfig} from '@pactora/config';
+import {canonicalize} from '@pactora/shared';
 import {createDb, closeDb, jobs, type Db} from '@pactora/db';
 import {buildApp, EventBus} from '../src/app.js';
 import {chainDeps} from './helpers/register.js';
@@ -39,8 +40,22 @@ const MODEL = 'Qwen/Qwen3.6-35B-A3B-FP8';
 let attested: (model: string, algo: string) => Promise<string | null> = async (model) =>
   model === MODEL ? TEE_ADDRESS : null;
 let seq = 0;
-function signedJudge(over: Record<string, unknown> = {}) {
-  const signedText = `${MODEL}:${createHash('sha256').update(`req${++seq}`).digest('hex')}:${createHash('sha256').update(`res${seq}`).digest('hex')}`;
+const sha = (x: string) => createHash('sha256').update(x, 'utf8').digest('hex');
+const VERDICT = {
+  accept: true,
+  reason: 'The summary is accurate and complete.',
+  rating: 'good',
+  injectionAttempted: false,
+};
+/** A judge attestation as NearAiBrain builds it: real request and response bytes, signed by the "enclave". */
+function signedJudge(over: Record<string, unknown> = {}, verdict: Record<string, unknown> = VERDICT) {
+  seq++;
+  const requestBody = JSON.stringify({model: MODEL, messages: [{role: 'user', content: `judge job ${seq}`}]});
+  const responseBody = JSON.stringify({
+    id: `resp-${seq}`,
+    choices: [{message: {content: JSON.stringify(verdict)}, finish_reason: 'stop'}],
+  });
+  const signedText = `${MODEL}:${sha(requestBody)}:${sha(responseBody)}`;
   return {
     provider: 'near-ai',
     model: MODEL,
@@ -50,10 +65,19 @@ function signedJudge(over: Record<string, unknown> = {}) {
     signingAlgo: 'ed25519',
     signedText,
     verifiedAt: '2026-11-12T10:00:00.000Z',
-    verdictHash: createHash('sha256').update(`verdict${seq}`).digest('hex'),
+    verdictHash: sha(canonicalize(verdict)),
+    requestBody,
+    responseBody,
     ...over,
   };
 }
+/** What GET /v1/jobs/:id shows: the bytes stay in the database. */
+const shown = (j: ReturnType<typeof signedJudge>) => {
+  const {requestBody: _q, responseBody: _r, ...rest} = j;
+  void _q;
+  void _r;
+  return {...rest, verified: true};
+};
 
 beforeAll(async () => {
   db = createDb(DB_URL, {max: 3});
@@ -125,7 +149,7 @@ describe('judge attestation on approve and dispute', () => {
     expect(r.statusCode, r.body).toBe(200);
     expect(payloads[0]).not.toHaveProperty('judge');
     const job = (await app.inject({method: 'GET', url: `/v1/jobs/${jobId}`})).json();
-    expect(job.judge).toEqual({...JUDGE, verified: true});
+    expect(job.judge).toEqual(shown(JUDGE));
   });
 
   it('travels with a dispute too, and a malformed one is 422', async () => {
@@ -146,7 +170,7 @@ describe('judge attestation on approve and dispute', () => {
     });
     expect(r.statusCode, r.body).toBe(200);
     const job = (await app.inject({method: 'GET', url: `/v1/jobs/${jobId}`})).json();
-    expect(job.judge).toEqual({...JUDGE, verified: true});
+    expect(job.judge).toEqual(shown(JUDGE));
     expect(job.dispute).toMatchObject({reason: 'Wrong token.'});
     expect(payloads.at(-1)).not.toHaveProperty('judge');
   });
@@ -199,8 +223,12 @@ describe('judge attestation on approve and dispute', () => {
   it('a valid signature by a key NEAR AI does not attest for that model pays, but carries no judge', async () => {
     const {c, jobId} = await submitted();
     const mine = generateKeyPairSync('ed25519');
-    const signedText = `${MODEL}:${'aa'.repeat(32)}:${'bb'.repeat(32)}`;
+    const base = signedJudge();
+    const signedText = base.signedText;
     const selfSigned = signedJudge({
+      requestBody: base.requestBody,
+      responseBody: base.responseBody,
+      verdictHash: base.verdictHash,
       signingAddress: Buffer.from(mine.publicKey.export({format: 'jwk'}).x!, 'base64url').toString('hex'),
       signedText,
       signature: sign(null, Buffer.from(signedText), mine.privateKey).toString('hex'),
@@ -253,5 +281,90 @@ describe('judge attestation on approve and dispute', () => {
     });
     expect(r.statusCode).toBe(422);
     expect(r.json().detail).toMatch(/already/);
+  });
+
+  // 2026-11-12, from the second review: the verdict is bound to the signed response.
+  it('a changed response id does not let one signed response vouch for a second job', async () => {
+    const judge = signedJudge();
+    const a = await submitted();
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/v1/jobs/${a.jobId}/approve`,
+          headers: bearer(a.c.apiKey),
+          payload: {judge},
+        })
+      ).statusCode,
+    ).toBe(200);
+    const b = await submitted();
+    const r = await app.inject({
+      method: 'POST',
+      url: `/v1/jobs/${b.jobId}/approve`,
+      headers: bearer(b.c.apiKey),
+      payload: {judge: {...judge, responseId: 'a-new-id'}},
+    });
+    expect(r.statusCode).toBe(422);
+    expect(r.json().detail).toMatch(/already/);
+  });
+
+  it('a verdict hash that is not the verdict in the signed response is refused', async () => {
+    const {c, jobId} = await submitted();
+    const judge = signedJudge({verdictHash: sha('a verdict NEAR AI never gave')});
+    const r = await app.inject({
+      method: 'POST',
+      url: `/v1/jobs/${jobId}/approve`,
+      headers: bearer(c.apiKey),
+      payload: {judge},
+    });
+    expect(r.statusCode).toBe(422);
+    expect(r.json().detail).toMatch(/verdict hash/);
+    expect(payloads).toHaveLength(0);
+  });
+
+  it('a signed text over other bytes, or naming another model, is refused', async () => {
+    const one = await submitted();
+    const swapped = signedJudge({
+      requestBody: JSON.stringify({messages: [{role: 'user', content: 'something else'}]}),
+    });
+    const r1 = await app.inject({
+      method: 'POST',
+      url: `/v1/jobs/${one.jobId}/approve`,
+      headers: bearer(one.c.apiKey),
+      payload: {judge: swapped},
+    });
+    expect(r1.statusCode).toBe(422);
+    const two = await submitted();
+    const base = signedJudge();
+    const other = `other/model:${base.signedText.split(':').slice(1).join(':')}`;
+    const r2 = await app.inject({
+      method: 'POST',
+      url: `/v1/jobs/${two.jobId}/approve`,
+      headers: bearer(two.c.apiKey),
+      payload: {
+        judge: {
+          ...base,
+          signedText: other,
+          signature: sign(null, Buffer.from(other), tee.privateKey).toString('hex'),
+        },
+      },
+    });
+    expect(r2.statusCode).toBe(422);
+  });
+
+  it('without the exchanged bytes the job is approved, but no judge is stored or put on chain', async () => {
+    const {c, jobId} = await submitted();
+    const {requestBody: _q, responseBody: _r, ...bare} = signedJudge();
+    void _q;
+    void _r;
+    const r = await app.inject({
+      method: 'POST',
+      url: `/v1/jobs/${jobId}/approve`,
+      headers: bearer(c.apiKey),
+      payload: {judge: bare},
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(payloads[0]).not.toHaveProperty('reviewHash');
+    expect((await app.inject({method: 'GET', url: `/v1/jobs/${jobId}`})).json().judge).toBeNull();
   });
 });

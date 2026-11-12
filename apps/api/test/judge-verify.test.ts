@@ -66,6 +66,12 @@ describe('checkJudge on a real NEAR AI attestation', async () => {
     expect(await checkJudge(real, nearAi)).toEqual({ok: true});
   });
 
+  it('carries the exact bytes: the signed text and the verdict hash are recomputed from them', async () => {
+    expect(real.requestBody).toContain('NEAR is a layer-1 blockchain');
+    const {verdictHashOfResponse} = await import('@pactora/agent-core');
+    expect(verdictHashOfResponse(real.responseBody)).toBe(real.verdictHash);
+  });
+
   it('a changed signed text is refused, and another attested key is not stored', async () => {
     const tampered = {
       ...real,
@@ -73,7 +79,7 @@ describe('checkJudge on a real NEAR AI attestation', async () => {
     };
     expect(await checkJudge(tampered, nearAi)).toMatchObject({
       ok: false,
-      refuse: expect.stringMatching(/does not verify/),
+      refuse: expect.stringMatching(/not the hash of the request and response/),
     });
     expect(await checkJudge(real, async () => '0x' + '11'.repeat(20))).toMatchObject({
       ok: false,

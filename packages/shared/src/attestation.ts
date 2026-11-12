@@ -22,5 +22,13 @@ export const JudgeAttestation = z.object({
   verifiedAt: z.iso.datetime({offset: true}),
   /** sha256 of the canonical verdict JSON, so the stored verdict can be matched to this attestation. */
   verdictHash: z.string().regex(/^[0-9a-f]{64}$/),
+  /**
+   * The exact request and response bytes exchanged with the provider
+   * (2026-11-12). The API re-hashes them against `signedText` and recomputes
+   * `verdictHash` from the response, so the verdict is bound to what was
+   * signed. Stored, never returned publicly: the request holds the job's work.
+   */
+  requestBody: z.string().min(1).max(200_000).optional(),
+  responseBody: z.string().min(1).max(200_000).optional(),
 });
 export type JudgeAttestation = z.infer<typeof JudgeAttestation>;
