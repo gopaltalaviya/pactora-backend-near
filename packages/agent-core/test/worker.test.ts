@@ -66,9 +66,17 @@ class FakeBrain implements Brain {
 
 interface Calls {
   accepted: string[];
-  submitted: {jobId: string; output: Record<string, unknown>}[];
+  submitted: {jobId: string; output: Record<string, unknown> | undefined}[];
   submitAttempts: number;
   declined: {jobId: string; reason: string}[];
+  /** Draft rounds posted (listing jobs). Optional so older call sites still build. */
+  drafts?: {jobId: string; text: string; output: Record<string, unknown> | undefined}[];
+}
+
+/** What the API's draft rounds look like for one job, as the fake serves them. */
+interface DraftBook {
+  phase: 'none' | 'awaiting_review' | 'revise' | 'accepted' | 'dispute_intent';
+  rounds: {round: number; text: string; review: {decision: string; reason: string} | null}[];
 }
 
 interface ClientFaults {
@@ -76,6 +84,8 @@ interface ClientFaults {
   acceptThrowsOnce?: unknown;
   submitThrowsOnce?: unknown;
   declineThrows?: unknown;
+  /** Per-job draft state; a listing job refuses submitResult until its draft is accepted. */
+  draftBook?: Map<string, DraftBook>;
 }
 
 function fakeClient(offers: JobSummary[], calls: Calls, over: ClientFaults = {}): PactoraClient {
@@ -97,14 +107,66 @@ function fakeClient(offers: JobSummary[], calls: Calls, over: ClientFaults = {})
       calls.accepted.push(jobId);
       return {jobId, chainId: 'near:testnet', state: 'accepted', txHash: '0x', explorerUrl: 'u'};
     },
-    submitResult: async (jobId: string, result: {output: Record<string, unknown>}) => {
+    submitResult: async (jobId: string, result?: {output: Record<string, unknown>}) => {
       calls.submitAttempts++;
       if (over.submitThrowsOnce && !submitThrown) {
         submitThrown = true;
         throw over.submitThrowsOnce;
       }
-      calls.submitted.push({jobId, output: result.output});
+      // What the API does: a listing job delivers its accepted draft, nothing else.
+      const book = over.draftBook?.get(jobId);
+      if (book && (result !== undefined || book.phase !== 'accepted')) {
+        throw new PactoraError(
+          ErrorCode.INVALID_STATE,
+          'a listing job is submitted from an accepted draft: POST /v1/jobs/:id/drafts, then the client reviews it with accept_draft',
+        );
+      }
+      calls.submitted.push({jobId, output: result?.output});
       return {jobId, chainId: 'near:testnet', state: 'submitted', txHash: '0x', explorerUrl: 'u'};
+    },
+    submitDraft: async (jobId: string, draft: {text: string; output?: Record<string, unknown>}) => {
+      const book = over.draftBook?.get(jobId);
+      if (!book) throw new PactoraError(ErrorCode.INVALID_STATE, 'drafts are for listing jobs');
+      if (book.phase !== 'none' && book.phase !== 'revise') {
+        throw new PactoraError(ErrorCode.INVALID_STATE, `a draft is not expected in phase ${book.phase}`);
+      }
+      if (draft.text.length < 10 || draft.text.length > 10_000) {
+        throw new PactoraError(ErrorCode.SCHEMA_MISMATCH, 'text must be 10..10000 characters');
+      }
+      (calls.drafts ??= []).push({jobId, text: draft.text, output: draft.output});
+      const round = book.rounds.length + 1;
+      book.rounds.push({round, text: draft.text, review: null});
+      book.phase = 'awaiting_review';
+      return {
+        jobId,
+        phase: book.phase,
+        draftId: `d${round}`,
+        round,
+        snapshotHash: `h${round}`,
+        replayed: false,
+      };
+    },
+    getDrafts: async (jobId: string) => {
+      const book = over.draftBook?.get(jobId) ?? {phase: 'none', rounds: []};
+      return {
+        jobId,
+        role: 'worker',
+        phase: book.phase,
+        revisionsUsed: 0,
+        revisionsLeft: 3,
+        acceptedSnapshotHash: null,
+        acceptedReviewHash: null,
+        readyToApprove: false,
+        resultMismatch: false,
+        drafts: book.rounds.map((r) => ({
+          draftId: `d${r.round}`,
+          round: r.round,
+          snapshotHash: `h${r.round}`,
+          snapshot: {text: r.text},
+          createdAt: new Date().toISOString(),
+          review: r.review,
+        })),
+      };
     },
   } as unknown as PactoraClient;
 }
@@ -138,7 +200,7 @@ function build(
   brain: Brain,
   over: ClientFaults = {},
 ): {worker: Worker<z.infer<typeof Output>>; calls: Calls; events: WorkerEvent[]} {
-  const calls: Calls = {accepted: [], submitted: [], submitAttempts: 0, declined: []};
+  const calls: Calls = {accepted: [], submitted: [], submitAttempts: 0, declined: [], drafts: []};
   const events: WorkerEvent[] = [];
   const worker = new Worker({
     client: fakeClient(offers, calls, over),
@@ -779,5 +841,155 @@ describe('daily job cap', () => {
     offers.splice(0, offers.length, offer({}, '3'));
     await worker.tick();
     expect(calls.accepted).toEqual(['1', '3']);
+  });
+});
+
+/**
+ * 2026-11-12, live on testnet: the hosted bot accepted a job hired from a
+ * listing, produced the work, and FAILED at submit — the API refuses a plain
+ * result for a listing job ("a listing job is submitted from an accepted
+ * draft"). The job stalled until it expired. A listing job is delivered as a
+ * draft round the client reviews; only an accepted draft is submitted, and
+ * then with no output, because the accepted snapshot IS the result.
+ */
+describe('a job hired from a listing', () => {
+  const listingOffer = (jobId = '1'): JobSummary =>
+    offer(
+      {input: {question: 'how deep is NEAR/USDC?', listing: {listingId: 'L1', title: 'Depth report'}}},
+      jobId,
+    );
+
+  function listing(book: DraftBook = {phase: 'none', rounds: []}, job = listingOffer()) {
+    const draftBook = new Map([[job.jobId, book]]);
+    const brain = new FakeBrain();
+    const built = build([job], brain, {draftBook});
+    return {...built, brain, book, job};
+  }
+
+  it('accepts, then posts one draft and does not submit a result', async () => {
+    const {worker, calls, events} = listing();
+    const [outcome] = await worker.tick();
+
+    expect(calls.accepted).toEqual(['1']);
+    expect(calls.drafts).toHaveLength(1);
+    expect(calls.drafts![0]!.text).toBe('NEAR/USDC depth is healthy');
+    expect(calls.drafts![0]!.output).toMatchObject({summary: 'NEAR/USDC depth is healthy'});
+    expect(calls.submitAttempts).toBe(0);
+    expect(outcome).toMatchObject({status: 'drafted', jobId: '1'});
+    expect(events.some((e) => e.kind === 'failed')).toBe(false);
+  });
+
+  it('waits while the draft is under review: no model call, no second draft', async () => {
+    const {worker, calls, brain, job} = listing();
+    await worker.tick();
+    job.state = 'accepted';
+    const prompts = brain.prompts.length;
+
+    await worker.tick();
+    await worker.tick();
+
+    expect(brain.prompts.length).toBe(prompts);
+    expect(calls.drafts).toHaveLength(1);
+    expect(calls.accepted).toEqual(['1']);
+    expect(calls.submitAttempts).toBe(0);
+  });
+
+  it('keeps holding the job even when the listing still says created', async () => {
+    // The indexer may lag the accept: the job comes back as `created`.
+    const {worker, calls, events} = listing();
+    await worker.tick();
+    await worker.tick();
+    expect(calls.accepted).toEqual(['1']);
+    expect(calls.drafts).toHaveLength(1);
+    expect(events.some((e) => e.kind === 'failed')).toBe(false);
+  });
+
+  it('produces a new round when the client asks for a revision, with the reason', async () => {
+    const {worker, calls, brain, book, job} = listing();
+    await worker.tick();
+    job.state = 'accepted';
+    book.phase = 'revise';
+    book.rounds[0]!.review = {decision: 'revise', reason: 'add the bid/ask spread'};
+    const prompts = brain.prompts.length;
+
+    await worker.tick();
+
+    expect(brain.prompts.length).toBe(prompts + 1);
+    expect(brain.prompts.at(-1)).toContain('add the bid/ask spread');
+    expect(calls.drafts).toHaveLength(2);
+    expect(calls.submitAttempts).toBe(0);
+  });
+
+  it('submits the accepted draft with no output, and is done', async () => {
+    const {worker, calls, brain, book, job, events} = listing();
+    await worker.tick();
+    job.state = 'accepted';
+    book.phase = 'accepted';
+    const prompts = brain.prompts.length;
+
+    const [outcome] = await worker.tick();
+
+    expect(outcome).toMatchObject({status: 'delivered', jobId: '1'});
+    expect(calls.submitted).toEqual([{jobId: '1', output: undefined}]);
+    expect(brain.prompts.length).toBe(prompts);
+    expect(calls.drafts).toHaveLength(1);
+    expect(events.at(-1)?.kind).toBe('delivered');
+
+    // Delivered: the API now lists it with a result, and the worker leaves it.
+    job.hasResult = true;
+    expect(await worker.tick()).toEqual([]);
+  });
+
+  it('does nothing while the client intends to dispute', async () => {
+    const {worker, calls, brain, book, job} = listing();
+    await worker.tick();
+    job.state = 'accepted';
+    book.phase = 'dispute_intent';
+    const prompts = brain.prompts.length;
+    await worker.tick();
+    expect(brain.prompts.length).toBe(prompts);
+    expect(calls.drafts).toHaveLength(1);
+    expect(calls.submitAttempts).toBe(0);
+  });
+
+  it('after a restart, resumes from the draft state instead of drafting again', async () => {
+    const job: JobSummary = {...listingOffer(), state: 'accepted'};
+    const {worker, calls, brain} = listing(
+      {phase: 'awaiting_review', rounds: [{round: 1, text: 'an earlier draft', review: null}]},
+      job,
+    );
+    await worker.tick();
+    expect(calls.drafts).toEqual([]);
+    expect(calls.accepted).toEqual([]);
+    expect(brain.prompts).toEqual([]);
+    expect(calls.submitAttempts).toBe(0);
+  });
+
+  it('after a restart with the draft already accepted, submits it', async () => {
+    const job: JobSummary = {...listingOffer(), state: 'accepted'};
+    const {worker, calls, brain} = listing(
+      {phase: 'accepted', rounds: [{round: 1, text: 'an earlier draft', review: null}]},
+      job,
+    );
+    await worker.tick();
+    expect(calls.submitted).toEqual([{jobId: '1', output: undefined}]);
+    expect(brain.prompts).toEqual([]);
+  });
+
+  it('renders output without a summary as readable JSON for the draft text', async () => {
+    const job = listingOffer();
+    const draftBook = new Map<string, DraftBook>([[job.jobId, {phase: 'none', rounds: []}]]);
+    const calls: Calls = {accepted: [], submitted: [], submitAttempts: 0, declined: [], drafts: []};
+    const worker = new Worker({
+      client: fakeClient([job], calls, {draftBook}),
+      brain: new FakeBrain({result: {ok: true}}),
+      capability: 'market-research',
+      role: 'r',
+      output: z.object({ok: z.boolean()}),
+    });
+    await worker.tick();
+    expect(calls.drafts).toHaveLength(1);
+    expect(calls.drafts![0]!.text.length).toBeGreaterThanOrEqual(10);
+    expect(JSON.parse(calls.drafts![0]!.text)).toEqual({ok: true});
   });
 });

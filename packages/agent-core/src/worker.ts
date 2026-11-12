@@ -116,6 +116,8 @@ export type WorkerEvent =
   | {kind: 'declined'; jobId: string; reason: string; structural: boolean}
   | {kind: 'accepted'; jobId: string}
   | {kind: 'delivered'; jobId: string; provider: string; latencyMs: number}
+  /** A listing job's draft round, posted for the client to review. */
+  | {kind: 'drafted'; jobId: string; round: number; provider: string; latencyMs: number}
   /** A transient failure: the job is kept, and the stage is tried again next poll. */
   | {kind: 'retrying'; jobId: string; stage: string; reason: string}
   | {kind: 'failed'; jobId: string; stage: string; reason: string};
@@ -125,6 +127,8 @@ export type Outcome =
   /** Wants the job, or holds it; the API asked it to retry. Tried again next poll. */
   | {status: 'waiting'; jobId: string; reason: string}
   | {status: 'delivered'; jobId: string}
+  /** A listing job's draft round is posted; the client reviews it before anything is submitted. */
+  | {status: 'drafted'; jobId: string; round: number}
   | {status: 'failed'; stage: string; reason: string};
 
 export class Worker<T> {
@@ -155,6 +159,21 @@ export class Worker<T> {
    * already accepted and the work already paid for in model time.
    */
   private readonly undelivered = new Map<string, {output: T; provider: string; latencyMs: number}>();
+
+  /**
+   * Listing jobs this worker has accepted. Such a job stays `accepted` across
+   * many polls — draft, review, perhaps revise — and the API may still list
+   * it as `created` until the indexer catches up; this keeps the worker from
+   * trying to accept it again. A restart loses it, which is fine: by then the
+   * listing says `accepted`, and the draft state is read from the API.
+   */
+  private readonly holding = new Set<string>();
+
+  /** A listing job's produced draft whose post the API said to retry, keyed by the round it fills. */
+  private readonly undrafted = new Map<
+    string,
+    {round: number; output: T; provider: string; latencyMs: number}
+  >();
 
   constructor(private readonly opts: WorkerOptions<T>) {
     this.requiredKeys = keysOf(opts.output);
@@ -224,7 +243,8 @@ export class Worker<T> {
     // lost, or by this worker before a restart. Triage is moot (it is
     // committed), and accepting again is refused as INVALID_STATE, which used
     // to make the worker abandon the job. Do the work.
-    if (offer.state === 'accepted' || this.willing.has(offer.jobId)) return this.take(offer);
+    if (offer.state === 'accepted' || this.willing.has(offer.jobId) || this.holding.has(offer.jobId))
+      return this.take(offer);
     return this.consider(offer);
   }
 
@@ -291,7 +311,8 @@ export class Worker<T> {
       // without emitting anything, and the job came back on the very next
       // poll — an invisible failure retried forever. `path` is fixed when the
       // job is created and does not lie.
-      if (offer.path === 'escrow' && offer.state !== 'accepted') await this.opts.client.accept(offer.jobId);
+      if (offer.path === 'escrow' && offer.state !== 'accepted' && !this.holding.has(offer.jobId))
+        await this.opts.client.accept(offer.jobId);
     } catch (err) {
       // "Not confirmed on-chain yet — retry in a moment" is the API's answer
       // until the indexer links a fresh escrow job, and it says so with a
@@ -312,8 +333,17 @@ export class Worker<T> {
       return {status: 'failed', stage: 'accept', reason: message(err)};
     }
     this.willing.delete(offer.jobId);
-    if (offer.path === 'escrow' && offer.state !== 'accepted')
+    if (offer.path === 'escrow' && offer.state !== 'accepted' && !this.holding.has(offer.jobId))
       this.emit({kind: 'accepted', jobId: offer.jobId});
+
+    // A job hired from a listing is not delivered with a result: the work
+    // goes up as a draft round the client reviews, and only the accepted
+    // snapshot is submitted. A plain submit is refused (live, 2026-11-12:
+    // the hosted bot accepted one, failed at submit, and the job stalled).
+    if (isListingJob(offer)) {
+      this.holding.add(offer.jobId);
+      return this.draftRound(offer);
+    }
 
     const startedAt = Date.now();
     let output: T;
@@ -342,6 +372,96 @@ export class Worker<T> {
     }
 
     return this.deliver(offer, {output, provider, latencyMs: Date.now() - startedAt});
+  }
+
+  /**
+   * One poll of a listing job this worker holds. What to do is read from the
+   * API's draft state every time — never from memory — so a restart, a lost
+   * response or a second poll during review cannot post a duplicate draft.
+   */
+  private async draftRound(offer: JobSummary): Promise<Outcome> {
+    const {jobId} = offer;
+    let state: Awaited<ReturnType<PactoraClient['getDrafts']>>;
+    try {
+      state = await this.opts.client.getDrafts(jobId);
+    } catch (err) {
+      // Kept: the next poll reads the state again.
+      this.emit({kind: 'retrying', jobId, stage: 'drafts', reason: message(err)});
+      return {status: 'waiting', jobId, reason: message(err)};
+    }
+
+    switch (state.phase) {
+      case 'awaiting_review':
+        return {status: 'waiting', jobId, reason: 'the draft is awaiting the client’s review'};
+      case 'dispute_intent':
+        return {status: 'waiting', jobId, reason: 'the client intends to dispute the draft'};
+      case 'accepted':
+        return this.submitAccepted(offer);
+      case 'none':
+      case 'revise':
+        break;
+    }
+
+    const round = state.drafts.length + 1;
+    let work = this.undrafted.get(jobId);
+    if (!work || work.round !== round) {
+      const latest = state.drafts.at(-1);
+      const revision = state.phase === 'revise' ? (latest?.review?.reason ?? '') : undefined;
+      const startedAt = Date.now();
+      let produced: {output: T; provider: string};
+      try {
+        produced = await this.produce(offer.spec, revision);
+      } catch (err) {
+        this.emit({kind: 'failed', jobId, stage: 'produce', reason: message(err)});
+        return {status: 'failed', stage: 'produce', reason: message(err)};
+      }
+      const shape = validateShape(produced.output, offer.spec.outputSchema);
+      if (!shape.ok) {
+        this.emit({kind: 'failed', jobId, stage: 'self-check', reason: shape.reason});
+        return {status: 'failed', stage: 'self-check', reason: shape.reason};
+      }
+      work = {round, ...produced, latencyMs: Date.now() - startedAt};
+    }
+
+    const output = work.output as Record<string, unknown>;
+    try {
+      await this.opts.client.submitDraft(jobId, {text: draftText(output), output});
+    } catch (err) {
+      if (err instanceof PactoraError && err.retryAfter !== undefined) {
+        this.undrafted.set(jobId, work);
+        this.emit({kind: 'retrying', jobId, stage: 'draft', reason: message(err)});
+        return {status: 'waiting', jobId, reason: message(err)};
+      }
+      this.undrafted.delete(jobId);
+      this.holding.delete(jobId);
+      this.declined.add(jobId);
+      this.emit({kind: 'failed', jobId, stage: 'draft', reason: message(err)});
+      return {status: 'failed', stage: 'draft', reason: message(err)};
+    }
+    this.undrafted.delete(jobId);
+    this.emit({kind: 'drafted', jobId, round, provider: work.provider, latencyMs: work.latencyMs});
+    return {status: 'drafted', jobId, round};
+  }
+
+  /** Deliver a listing job: its accepted draft snapshot is the result, so no output is sent. */
+  private async submitAccepted(offer: JobSummary): Promise<Outcome> {
+    const {jobId} = offer;
+    const startedAt = Date.now();
+    try {
+      await this.opts.client.submitResult(jobId);
+    } catch (err) {
+      if (err instanceof PactoraError && err.retryAfter !== undefined) {
+        this.emit({kind: 'retrying', jobId, stage: 'submit', reason: message(err)});
+        return {status: 'waiting', jobId, reason: message(err)};
+      }
+      this.holding.delete(jobId);
+      this.declined.add(jobId);
+      this.emit({kind: 'failed', jobId, stage: 'submit', reason: message(err)});
+      return {status: 'failed', stage: 'submit', reason: message(err)};
+    }
+    this.holding.delete(jobId);
+    this.emit({kind: 'delivered', jobId, provider: 'accepted-draft', latencyMs: Date.now() - startedAt});
+    return {status: 'delivered', jobId};
   }
 
   /**
@@ -479,14 +599,23 @@ export class Worker<T> {
   }
 
   /** Do the work, to schema. */
-  private async produce(spec: JobSpec): Promise<{output: T; provider: string}> {
+  private async produce(spec: JobSpec, revision?: string): Promise<{output: T; provider: string}> {
     const prompt = [
       `You are: ${this.opts.role}`,
       '',
       'The task:',
       wrapUntrusted(spec.input),
       '',
-      'Produce the result.',
+      // The client's review of the previous draft. Written by the other
+      // party, so wrapped like the task: what it asks for, not orders.
+      ...(revision !== undefined
+        ? [
+            'The client reviewed your previous draft and asked for a revision, saying:',
+            wrapUntrusted(revision || '(no reason given)'),
+            '',
+            'Produce the revised result.',
+          ]
+        : ['Produce the result.']),
     ].join('\n');
 
     const {value, provider} = await this.opts.brain.complete({
@@ -504,6 +633,29 @@ export class Worker<T> {
   private emit(event: WorkerEvent): void {
     this.opts.log?.(event);
   }
+}
+
+/**
+ * Whether a job was hired from a listing (docs/26 F4). The API lists it with
+ * `listingId`; the spec carries `input.listing.listingId`, which is what the
+ * API itself reads (read-model `listingOfSpec`).
+ */
+export function isListingJob(offer: JobSummary): boolean {
+  const fromApi = (offer as {listingId?: unknown}).listingId;
+  if (typeof fromApi === 'string' && fromApi.length > 0) return true;
+  const l = (offer.spec?.input as {listing?: {listingId?: unknown}} | undefined)?.listing;
+  return typeof l?.listingId === 'string' && l.listingId.length > 0;
+}
+
+/**
+ * A draft's readable text: the output's summary if it has one, else its
+ * pretty JSON — 10..10000 characters, as the API requires.
+ */
+export function draftText(output: Record<string, unknown>): string {
+  const summary = typeof output['summary'] === 'string' ? output['summary'].trim() : '';
+  let text = summary.length >= 10 ? summary : JSON.stringify(output, null, 2);
+  if (text.length > 10_000) text = `${text.slice(0, 9_999)}…`;
+  return text.length >= 10 ? text : `Result: ${text}`.padEnd(10, '.');
 }
 
 /** The top-level field names a schema produces. */
