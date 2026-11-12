@@ -23,6 +23,7 @@ Every step with the result you should see, on the site, on chain, with a wallet 
 3. [/demo](https://pactora-interface-near.vercel.app/demo): the whole flow step by step, with the video.
 4. Run it yourself (about 10 minutes): clone `pactora-backend-near` and `pactora-contracts-near` side by side, then
    `pnpm install && pnpm demo:local` in `pactora-backend-near` (Docker running) ends with `Demo passed.`
+5. Work credentials (NFTs): every settled escrow job's worker can claim a soulbound NEP-171 credential on `credentials.gopalt.testnet`; tokens 68 and 70 are live, each field matching its Pactora job on chain, and transfers are refused.
 
 <p>
   <img src="https://pactora-interface-near.vercel.app/media/verify-on-chain.gif" alt="On /swarm, pressing Verify on chain: the browser reads all 11 swarm jobs from the NEAR contract and shows 11 of 11 settled with the same result hash" width="49%">
