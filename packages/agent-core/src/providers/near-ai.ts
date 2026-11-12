@@ -78,8 +78,9 @@ export class NearAiBrain extends JsonHttpBrain {
       body: {
         model: this.model,
         // The hosted models reason before they answer, and the reasoning
-        // counts against max_tokens (as Groq's gpt-oss and Gemini 3.x do).
-        max_tokens: Math.max(req.maxTokens ?? 2_000, 4_096),
+        // counts against max_tokens (as Groq's gpt-oss and Gemini 3.x do); 4,096
+        // cut real Qwen3.6 replies off (2026-11-12), so the floor is 8,192.
+        max_tokens: Math.max(req.maxTokens ?? 2_000, 8_192),
         messages: [
           {role: 'system', content: req.system},
           {role: 'user', content: req.prompt},

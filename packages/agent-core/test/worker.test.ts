@@ -732,3 +732,52 @@ describe('a model out of quota', () => {
     ]);
   });
 });
+
+/**
+ * 2026-11-12: a hosted worker on a paid model gets a daily cap. Over it, the
+ * worker declines before any model runs, with a reason, so the client is
+ * refunded and the owner's credit is not spent.
+ */
+describe('daily job cap', () => {
+  function capped(offers: JobSummary[], brain: Brain, maxJobsPerDay: number, now: () => Date) {
+    const calls: Calls = {accepted: [], submitted: [], submitAttempts: 0, declined: []};
+    const worker = new Worker({
+      client: fakeClient(offers, calls),
+      brain,
+      capability: 'market-research',
+      role: 'a market research agent that reports order book depth',
+      output: Output,
+      maxJobsPerDay,
+      now,
+    });
+    return {worker, calls};
+  }
+
+  it('takes jobs up to the cap, then declines the rest without asking the model', async () => {
+    const brain = new FakeBrain();
+    const day = () => new Date('2026-11-12T10:00:00Z');
+    const {worker, calls} = capped([offer({}, '1'), offer({}, '2'), offer({}, '3')], brain, 2, day);
+    await worker.tick();
+    expect(calls.accepted).toEqual(['1', '2']);
+    expect(calls.declined).toHaveLength(1);
+    expect(calls.declined[0]).toMatchObject({jobId: '3'});
+    expect(calls.declined[0]!.reason).toMatch(/2 jobs a day/);
+    // Two triages and two results; nothing for the third.
+    expect(brain.prompts).toHaveLength(4);
+  });
+
+  it('counts afresh on the next UTC day, in the same worker', async () => {
+    let now = new Date('2026-11-12T23:59:00Z');
+    const offers = [offer({}, '1')];
+    const {worker, calls} = capped(offers, new FakeBrain(), 1, () => now);
+    await worker.tick();
+    offers.splice(0, offers.length, offer({}, '2'));
+    await worker.tick();
+    expect(calls.accepted).toEqual(['1']);
+    expect(calls.declined.map((d) => d.jobId)).toEqual(['2']);
+    now = new Date('2026-11-13T00:01:00Z');
+    offers.splice(0, offers.length, offer({}, '3'));
+    await worker.tick();
+    expect(calls.accepted).toEqual(['1', '3']);
+  });
+});

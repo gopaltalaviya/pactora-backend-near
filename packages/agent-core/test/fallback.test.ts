@@ -225,6 +225,20 @@ describe('buildBrain configuration', () => {
     expect(brain.name).toContain('groq→ollama');
   });
 
+  // 2026-11-12: hosted workers on NEAR AI Cloud, the owner's capped credit.
+  it('accepts near-ai in a chain, with the key and model from the environment', async () => {
+    const brain = buildBrain({
+      role: 'worker',
+      env: {AGENT_MODE: 'live', BRAIN_CHAIN: 'near-ai', NEAR_AI_API_KEY: 'sk-test-only'},
+      cacheDir: dir,
+    });
+    expect(brain.name).toContain('near-ai');
+    const status = await (
+      brain as unknown as {status(): Promise<{provider: string; available: boolean}[]>}
+    ).status();
+    expect(status.find((s) => s.provider === 'near-ai')?.available).toBe(true);
+  });
+
   it('always keeps cached as the final backstop in live mode', () => {
     const brain = buildBrain({role: 'worker', env: {AGENT_MODE: 'live'}, cacheDir: dir});
     expect(brain.name).toContain('cached');

@@ -276,8 +276,14 @@ services:
       PACTORA_API_URL: http://api:8080
       PACTORA_CHAIN_ID: ${DEFAULT_CHAIN:-near:testnet}
       PACTORA_API_KEY: ${RESEARCH_BOT_API_KEY:-}
-      AGENT_MODE: ${AGENT_MODE:-cached}
-      BRAIN_CHAIN: ${BRAIN_CHAIN:-}
+      # The bots' own mode and chain (2026-11-12), so going live for them does
+      # not make the API's hosted runs spend too. NEAR AI: BOT_BRAIN_CHAIN=near-ai.
+      AGENT_MODE: ${BOT_AGENT_MODE:-${AGENT_MODE:-cached}}
+      BRAIN_CHAIN: ${BOT_BRAIN_CHAIN:-${BRAIN_CHAIN:-}}
+      NEAR_AI_API_KEY: ${NEAR_AI_API_KEY:-}
+      NEAR_AI_MODEL: ${NEAR_AI_MODEL:-}
+      # At most this many jobs a day per bot; the rest are declined and refunded.
+      WORKER_MAX_JOBS_PER_DAY: ${WORKER_MAX_JOBS_PER_DAY:-50}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}

@@ -23,6 +23,14 @@ export interface RunWorkerConfig<T> {
   client?: PactoraClient;
 }
 
+/** `WORKER_MAX_JOBS_PER_DAY`: a positive whole number, or unset for no cap. */
+function maxJobsPerDay(raw: string | undefined): {maxJobsPerDay?: number} {
+  if (raw === undefined || raw === '') return {};
+  if (!/^[1-9]\d{0,5}$/.test(raw))
+    throw new Error(`WORKER_MAX_JOBS_PER_DAY must be a positive whole number, not "${raw}"`);
+  return {maxJobsPerDay: Number(raw)};
+}
+
 export async function runWorker<T>(config: RunWorkerConfig<T>): Promise<void> {
   const env = config.env ?? process.env;
   assertNoUnsupportedEnv(env);
@@ -49,6 +57,7 @@ export async function runWorker<T>(config: RunWorkerConfig<T>): Promise<void> {
     role: config.role,
     output: config.output,
     log: logEvent(config.capability),
+    ...maxJobsPerDay(env['WORKER_MAX_JOBS_PER_DAY']),
   });
 
   // One controller for both signals: a demo that leaves three worker

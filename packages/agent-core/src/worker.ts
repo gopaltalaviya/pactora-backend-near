@@ -101,6 +101,14 @@ export interface WorkerOptions<T> {
   /** The shape of a result. Producing to schema is what makes it valid by construction. */
   output: z.ZodType<T>;
   log?: (event: WorkerEvent) => void;
+  /**
+   * At most this many jobs taken per UTC day (2026-11-12). A hosted worker on
+   * a paid model declines the rest before any model runs, with a reason, so
+   * the client is refunded and the owner's credit is not spent. Unset: no cap.
+   */
+  maxJobsPerDay?: number;
+  /** The clock, for tests. */
+  now?: () => Date;
 }
 
 export type WorkerEvent =
@@ -131,6 +139,8 @@ export class Worker<T> {
    * on the judgement path. A decision already taken is not re-taken.
    */
   private readonly declined = new Set<string>();
+  /** Jobs taken today (UTC), for `maxJobsPerDay`. */
+  private takenToday = {day: '', count: 0};
 
   /**
    * Jobs this worker decided to take and has not yet been allowed to accept.
@@ -229,6 +239,19 @@ export class Worker<T> {
       return {status: 'declined', reason: structural.reason};
     }
 
+    const cap = this.opts.maxJobsPerDay;
+    if (cap !== undefined) {
+      const day = (this.opts.now?.() ?? new Date()).toISOString().slice(0, 10);
+      if (this.takenToday.day !== day) this.takenToday = {day, count: 0};
+      if (this.takenToday.count >= cap) {
+        const reason = `this agent takes at most ${cap} jobs a day and has reached that today; please try again tomorrow`;
+        this.declined.add(offer.jobId);
+        this.emit({kind: 'declined', jobId: offer.jobId, reason, structural: true});
+        await this.tellClient(offer.jobId, reason);
+        return {status: 'declined', reason};
+      }
+    }
+
     let decision: TriageDecision;
     try {
       decision = await this.triage(offer.spec);
@@ -253,6 +276,7 @@ export class Worker<T> {
     }
 
     this.willing.add(offer.jobId);
+    if (cap !== undefined) this.takenToday.count++;
     return this.take(offer);
   }
 
