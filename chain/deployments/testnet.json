@@ -5,10 +5,12 @@
   "contracts": {
     "Pactora": "pactora.gopalt.testnet",
     "PaymentToken": "musdc.gopalt.testnet",
-    "Arbiter": "pactora-arbiter-gopalt.sputnikv2.testnet"
+    "Arbiter": "pactora-arbiter-gopalt.sputnikv2.testnet",
+    "Credentials": "credentials.gopalt.testnet"
   },
   "wasm": {
     "pactora": "e0ed7876953624c49bbee99e4f4be2a9b5386c623f7b036180506388d1d2290a",
-    "mockUsdc": "de2a79c2e053ca08f346e629ce253c12c0c3ee3f869f452e8223606c02a1c0d0"
+    "mockUsdc": "de2a79c2e053ca08f346e629ce253c12c0c3ee3f869f452e8223606c02a1c0d0",
+    "credentials": "35a177fd185e48e077759dfd194238c7a513f526e9ff363fa8fb0dad5f84afe5"
   }
 }
