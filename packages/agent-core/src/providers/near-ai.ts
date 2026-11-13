@@ -9,7 +9,12 @@ import {
   type JudgeAttestation,
 } from '@pactora/shared';
 import {JsonHttpBrain} from './json-provider.js';
-import {JudgeAttestationFailed, type CompletionRequest, type CompletionResult} from '../brain.js';
+import {
+  BrainUnavailable,
+  JudgeAttestationFailed,
+  type CompletionRequest,
+  type CompletionResult,
+} from '../brain.js';
 
 /**
  * NEAR AI Cloud (docs.near.ai/cloud): OpenAI-compatible chat completions,
@@ -41,6 +46,8 @@ export class NearAiBrain extends JsonHttpBrain {
   readonly #baseUrl: string;
   readonly #requireAttestation: boolean;
   readonly #thinking: boolean;
+  /** Set for one retry: a reasoning reply was cut off, so this one answers without. */
+  #noThinking = false;
 
   constructor(
     model: string | undefined = undefined,
@@ -64,7 +71,21 @@ export class NearAiBrain extends JsonHttpBrain {
 
   override async complete<T>(req: CompletionRequest<T>): Promise<CompletionResult<T>> {
     try {
-      return await super.complete(req);
+      try {
+        return await super.complete(req);
+      } catch (err) {
+        // Live, 2026-11-13: the judge's reasoning plus its verdict outgrew the
+        // token cap ("cut off at the output token limit"), twice running. Asked
+        // once more without reasoning, as the workers answer; still signed.
+        if (!this.#thinking || !(err instanceof BrainUnavailable) || !/output token limit/.test(err.message))
+          throw err;
+        this.#noThinking = true;
+        try {
+          return await super.complete(req);
+        } finally {
+          this.#noThinking = false;
+        }
+      }
     } catch (err) {
       const key = this.#apiKey;
       if (key && err instanceof Error && (err.message.includes(key) || err.stack?.includes(key))) {
@@ -99,7 +120,7 @@ export class NearAiBrain extends JsonHttpBrain {
           type: 'json_schema',
           json_schema: {name: req.schemaName, schema: jsonSchema, strict: false},
         },
-        ...(this.#thinking ? {} : {chat_template_kwargs: {enable_thinking: false}}),
+        ...(this.#thinking && !this.#noThinking ? {} : {chat_template_kwargs: {enable_thinking: false}}),
       },
     };
   }

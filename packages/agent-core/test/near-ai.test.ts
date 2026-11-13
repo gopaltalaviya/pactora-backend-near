@@ -301,3 +301,34 @@ function verdictReqFor(input: typeof judgeInput) {
   void new Judge(spy as never).evaluate(input).catch(() => undefined);
   return captured!;
 }
+
+// Live, 2026-11-13: the judge's reasoning plus its verdict outgrew the 8,192
+// token cap twice in a row ("reply cut off at the output token limit"), and
+// the judged approval could not be made. A reasoning reply that is cut off is
+// asked once more without reasoning, the way the workers answer.
+describe('a judge reply cut off while reasoning', () => {
+  it('is asked once more without thinking, and that answer is the verdict', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      bodies.push(JSON.parse(String(init!.body)));
+      return reply(bodies.length === 1 ? 'truncated.json' : 'success.json');
+    });
+    const verdict = await new Judge(new FastNearAi(undefined, KEY)).evaluate(judgeInput);
+    expect(verdict).toMatchObject({accept: true, provider: 'near-ai'});
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).not.toHaveProperty('chat_template_kwargs');
+    expect(bodies[1]).toMatchObject({chat_template_kwargs: {enable_thinking: false}});
+  });
+
+  it('a reply cut off without thinking is not retried again', async () => {
+    let calls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      calls++;
+      return reply('truncated.json');
+    });
+    const err = await new Judge(new FastNearAi(undefined, KEY)).evaluate(judgeInput).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BrainUnavailable);
+    expect(calls).toBe(2);
+    noLeak(err);
+  });
+});
