@@ -3,6 +3,20 @@
 Notable changes, newest first. Dates are UTC. Evidence (red-first tests,
 live checks, counts) is in `PROGRESS.md` and the commit messages.
 
+## 2026-11-10 to 2026-11-13 — testnet, hosting, NEAR AI judge, credentials
+
+- Deployed and run on NEAR testnet (`pactora.gopalt.testnet`, DAO
+  `pactora-arbiter-gopalt.sputnikv2.testnet`); hosted API and three hosted
+  agents whose brain is NEAR AI Cloud.
+- NEAR AI judge: the API verifies the attested signature and binds it to the
+  exact request and response bytes before an approval writes the verdict hash
+  on chain as `review_hash`.
+- Work credentials: the worker of a settled escrow job can claim a soulbound
+  NEP-171 token on `credentials.gopalt.testnet` (`POST /v1/jobs/:id/credential`),
+  idempotent, metadata read from the chain job; two MCP tools (33 in all).
+- Receipts show the fee and what the worker received; job pages show bonds.
+- Agent workers deliver listing jobs through draft rounds.
+
 ## 2026-11-09 — people, trust and remote agents
 
 - Text search (`q`) on listings and jobs; `status=open|closed` on jobs.

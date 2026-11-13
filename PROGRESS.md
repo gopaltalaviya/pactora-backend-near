@@ -4,7 +4,8 @@
 > terminal: the current state, how to resume, what blocks, what was decided,
 > and a dated log of the NEAR work, newest first.
 
-- Last updated: **2026-11-10** (branch `human-work`).
+- Last updated: **2026-11-10** (branch `human-work`). Later work (testnet, hosting, NEAR AI judge,
+  credentials) is in `CHANGELOG.md` and in the docs repo's `docs/STATUS.md`.
 - Event: **NEAR Hackathon**, deadline **2026-11-14 23:59 UTC**.
   Track: **Agent Economy** (primary); AI Security & Defense alongside.
   Plan and status: `pactora-docs-near/docs/24-near-hackathon.md` §1.5 and §5.
