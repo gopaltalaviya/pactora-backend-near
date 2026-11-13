@@ -1,5 +1,6 @@
 import type {FastifyInstance} from 'fastify';
-import {and, asc, eq, inArray} from 'drizzle-orm';
+import {and, asc, eq, inArray, isNull, ne, or} from 'drizzle-orm';
+import {z} from 'zod';
 import {agentCapabilities, agents, jobs, type Db} from '@pactora/db';
 import {ErrorCode, PactoraError} from '@pactora/shared';
 import type {ChainConfig} from '@pactora/config';
@@ -18,6 +19,20 @@ import {feeOf} from '../fees.js';
  * one yet). `spentBaseUnits` is what settled jobs cost the person as a
  * client: the amount, no fee on top. Neither is a wallet balance.
  */
+/** A terms version as the site names it, e.g. `2026-11-09`. */
+export const TermsBody = z.object({
+  version: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9._-]+$/, 'letters, digits, dot, dash or underscore'),
+});
+
+const termsOf = (row: {termsAcceptedAt: Date | null; termsVersion: string | null}) => ({
+  acceptedAt: row.termsAcceptedAt ? row.termsAcceptedAt.toISOString() : null,
+  version: row.termsVersion,
+});
+
 export interface MeRouteDeps {
   db: Db;
   chains: Record<string, ChainConfig>;
@@ -73,10 +88,40 @@ export async function registerMeRoutes(app: FastifyInstance, deps: MeRouteDeps):
         description: person.description,
         location: person.location,
         capabilities: caps.map((c) => c.capability),
+        terms: termsOf(person),
       },
       earnings: {settledCount: asWorker.length, receivedBaseUnits: received.toString()},
       spentBaseUnits: spent.toString(),
     };
+  });
+
+  /**
+   * Record that the signed-in person accepted the terms (issue 17): when, and
+   * which version, on the person's record. Idempotent: the first acceptance
+   * of a version stands (200, the same answer); a new version is a new
+   * acceptance (201). Needs a person agent — the site calls it once
+   * POST /v1/people has registered one.
+   */
+  app.post('/v1/me/terms', async (request, reply) => {
+    const caller = await authenticatePerson(db, request);
+    const body = TermsBody.parse(request.body ?? {});
+    const person = await personAgentOf(db, caller.account, caller.chainId);
+    if (!person) {
+      throw new PactoraError(
+        ErrorCode.INVALID_STATE,
+        `${caller.account} has no person agent on ${caller.chainId} — register (POST /v1/people), then record the acceptance`,
+      );
+    }
+    const [updated] = await db
+      .update(agents)
+      .set({termsAcceptedAt: new Date(), termsVersion: body.version})
+      .where(
+        and(eq(agents.id, person.id), or(isNull(agents.termsVersion), ne(agents.termsVersion, body.version))),
+      )
+      .returning({termsAcceptedAt: agents.termsAcceptedAt, termsVersion: agents.termsVersion});
+    if (updated) return reply.status(201).send(termsOf(updated));
+    const row = (await db.query.agents.findFirst({where: eq(agents.id, person.id)}))!;
+    return reply.status(200).send(termsOf(row));
   });
 
   /**

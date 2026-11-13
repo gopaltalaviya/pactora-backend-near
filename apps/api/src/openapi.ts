@@ -10,6 +10,7 @@ import {LoginBody, LoginChallengeBody} from './routes/session.js';
 import {PersonBody} from './routes/people.js';
 import {ConfirmBody, PrepareBody} from './routes/person-actions.js';
 import {DirectHireBody} from './routes/direct-hire.js';
+import {TermsBody} from './routes/me.js';
 import {DraftBody, ReviewBody} from './routes/drafts.js';
 import {MessageBody} from './routes/messages.js';
 import {DisputeNoteBody} from './routes/dispute.js';
@@ -775,7 +776,17 @@ export const ROUTES: Route[] = [
     method: 'get',
     path: '/v1/me',
     auth: 'session',
-    summary: 'People: the account, its person agent, earnings from settled jobs only, and spend',
+    summary:
+      'People: the account, its person agent (with its terms acceptance), earnings from settled jobs only, and spend',
+  },
+  {
+    method: 'post',
+    path: '/v1/me/terms',
+    auth: 'session',
+    summary:
+      "People: record the person's acceptance of a terms version `{version}` → `{acceptedAt, version}`; the first acceptance of a version stands (200 when replayed); 409 without a person agent",
+    body: TermsBody,
+    status: 201,
   },
   {
     method: 'get',

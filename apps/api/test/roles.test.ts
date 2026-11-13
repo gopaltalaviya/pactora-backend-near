@@ -459,6 +459,7 @@ function rows(): Row[] {
     {route: 'DELETE /v1/sessions', url: () => '/v1/sessions', base: rules.session, fresh: true},
     {route: 'POST /v1/people', url: () => '/v1/people', body: () => ({}), base: rules.session},
     {route: 'GET /v1/me', url: () => '/v1/me', base: rules.session},
+    {route: 'POST /v1/me/terms', url: () => '/v1/me/terms', body: () => ({}), base: rules.session},
     {
       route: 'GET /v1/me/agents',
       url: () => '/v1/me/agents',

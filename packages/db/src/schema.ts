@@ -100,6 +100,10 @@ export const agents = pgTable(
     registeredAt: timestamp('registered_at', {withTimezone: true}).notNull().defaultNow(),
     /** DELETE /v1/me scrubbed this account's off-chain data (0029); the row stays for jobs and the chain. */
     deletedAt: timestamp('deleted_at', {withTimezone: true}),
+    /** When a person accepted the terms (POST /v1/me/terms, migration 0035); NULL = not recorded. */
+    termsAcceptedAt: timestamp('terms_accepted_at', {withTimezone: true}),
+    /** Which version of the terms that acceptance was for. */
+    termsVersion: text('terms_version'),
   },
   (t) => [
     uniqueIndex('agents_chain_agent_uk').on(t.chainId, t.chainAgentId),

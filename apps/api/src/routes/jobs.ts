@@ -2,7 +2,7 @@ import type {FastifyInstance, FastifyRequest} from 'fastify';
 import {and, asc, desc, eq, exists, gt, inArray, isNotNull, or, sql} from 'drizzle-orm';
 import {sha256Hex} from '@pactora/near';
 import {z} from 'zod';
-import {agents, agentStats, jobEvents, jobs, readTrust, type Db} from '@pactora/db';
+import {agents, agentStats, jobEvents, jobs, readTrust, signerTxs, type Db} from '@pactora/db';
 import {
   PactoraError,
   BaseUnits,
@@ -959,21 +959,23 @@ export async function hire(
   const jobPath = job.path;
   const amount = BigInt(job.amount);
 
+  // The row's public id is fixed for every retry under the client's key,
+  // so a retry reaches the signer under the same key and is replayed — even
+  // one whose first attempt broadcast and then lost its answer. Except when
+  // the contract definitely refused it (issue 22): see `hireSignerKey`.
+  const hireSigner = await hireSignerKey(db, {
+    chainId,
+    agentId: caller.agentId,
+    jobId: job.publicId,
+    clientKey: hireKey,
+  });
   const result = await submit({
     agentId: caller.agentId,
     chainId,
     kind: jobPath === 'direct' ? 'directPay' : 'createJob',
     job: {id: job.id, chainJobId: null},
     spend: amount,
-    // The row's public id is fixed for every retry under the client's key,
-    // so a retry reaches the signer under the same key and is replayed — even
-    // one whose first attempt broadcast and then lost its answer.
-    idempotencyKey: signerKey({
-      agentId: caller.agentId,
-      action: 'hire',
-      jobId: job.publicId,
-      clientKey: hireKey,
-    }),
+    idempotencyKey: hireSigner,
     traceId: ctx.traceId,
     payload: {
       // Contract agent ids, never the database's.
@@ -985,6 +987,8 @@ export async function hire(
         ? {acceptWindowSeconds: listing.acceptWindowSeconds, workWindowSeconds: listing.workWindowSeconds}
         : {}),
     },
+  }).catch(async (err: unknown) => {
+    throw await withRetryHint(db, {chainId, agentId: caller.agentId, idempotencyKey: hireSigner}, err);
   });
 
   // What the row says and what the response says must be the same thing.
@@ -1062,6 +1066,75 @@ export function signerKey(parts: {
   clientKey: string;
 }): string {
   return sha256Hex(`pactora:sign:v1:${parts.agentId}:${parts.action}:${parts.jobId}:${parts.clientKey}`);
+}
+
+/**
+ * A contract panic: the transaction executed, the contract refused it, and
+ * the call (one receipt, no promises — create_job and direct_pay) changed
+ * nothing. The same test as the signer's `refusalOf` "nothing changed".
+ */
+const DEFINITE_REFUSAL = /Smart contract panicked: [A-Za-z]+/;
+
+/** The signer's ledger row for a key, when the contract definitely refused it. */
+async function definitelyRefused(
+  db: Db,
+  k: {chainId: string; agentId: number; idempotencyKey: string},
+): Promise<{txHash: string} | null> {
+  const row = await db.query.signerTxs.findFirst({
+    where: and(
+      eq(signerTxs.chainId, k.chainId),
+      eq(signerTxs.agentId, k.agentId),
+      eq(signerTxs.idempotencyKey, k.idempotencyKey),
+    ),
+  });
+  if (row?.status === 'reverted' && row.txHash && DEFINITE_REFUSAL.test(row.failure ?? '')) {
+    return {txHash: row.txHash};
+  }
+  return null;
+}
+
+/**
+ * The signer key for a hire (issue 22). The signer answers a known key from
+ * its ledger forever, which is right for every outcome but one: a create_job
+ * the contract REFUSED (a panic — nothing changed, nothing paid) replayed its
+ * refusal even after the cause (storage, balance) was fixed, so the job could
+ * never be funded. Each definite refusal therefore moves the key on to one
+ * derived from the refused transaction's hash: deterministic, so concurrent
+ * retries agree on it, and the chain of keys is walked from the first. Any
+ * other outcome — final, unknown, or a failure that is not a panic — keeps
+ * its key, so a lost broadcast is still found rather than paid twice.
+ */
+async function hireSignerKey(
+  db: Db,
+  p: {chainId: string; agentId: number; jobId: string; clientKey: string},
+): Promise<string> {
+  let key = signerKey({agentId: p.agentId, action: 'hire', jobId: p.jobId, clientKey: p.clientKey});
+  for (let i = 0; i < 1000; i++) {
+    const refused = await definitelyRefused(db, {
+      chainId: p.chainId,
+      agentId: p.agentId,
+      idempotencyKey: key,
+    });
+    if (!refused) return key;
+    key = sha256Hex(`pactora:sign:v1:retry:${key}:${refused.txHash}`);
+  }
+  throw new PactoraError(ErrorCode.LIMIT_REACHED, 'this hire was refused by the contract too many times');
+}
+
+/** A definite refusal says that it can be retried, and how. Anything else is passed on as it was. */
+async function withRetryHint(
+  db: Db,
+  k: {chainId: string; agentId: number; idempotencyKey: string},
+  err: unknown,
+): Promise<unknown> {
+  if (!(err instanceof PactoraError)) return err;
+  const refused = await definitelyRefused(db, k).catch(() => null);
+  if (!refused) return err;
+  return new PactoraError(
+    err.code,
+    `${err.detail ?? err.code} — nothing was paid; fix the cause, then send the same request again to retry it as a new transaction`,
+    err.retryAfter,
+  );
 }
 
 async function findHire(db: Db, clientAgentId: number, idempotencyKey: string) {

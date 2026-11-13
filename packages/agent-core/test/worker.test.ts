@@ -7,6 +7,7 @@ import {
   UNTRUSTED_OPEN,
   Worker,
   confidence,
+  draftText,
   type Brain,
   type CompletionRequest,
   type CompletionResult,
@@ -872,7 +873,7 @@ describe('a job hired from a listing', () => {
 
     expect(calls.accepted).toEqual(['1']);
     expect(calls.drafts).toHaveLength(1);
-    expect(calls.drafts![0]!.text).toBe('NEAR/USDC depth is healthy');
+    expect(calls.drafts![0]!.text).toBe('NEAR/USDC depth is healthy\n\nConfidence: 0.8');
     expect(calls.drafts![0]!.output).toMatchObject({summary: 'NEAR/USDC depth is healthy'});
     expect(calls.submitAttempts).toBe(0);
     expect(outcome).toMatchObject({status: 'drafted', jobId: '1'});
@@ -991,5 +992,95 @@ describe('a job hired from a listing', () => {
     expect(calls.drafts).toHaveLength(1);
     expect(calls.drafts![0]!.text.length).toBeGreaterThanOrEqual(10);
     expect(JSON.parse(calls.drafts![0]!.text)).toEqual({ok: true});
+  });
+});
+
+/**
+ * 2026-11-13, live: the model put a one-line preface in `summary` ("The
+ * following paragraph explains…") and the actual answer in another field. The
+ * draft posted only the summary, so the client reviewed a draft with no
+ * answer in it. The draft text is the whole output, summary first.
+ */
+describe('draftText', () => {
+  it('keeps every field, not just a summary that is only a preface', () => {
+    const text = draftText({
+      summary: 'The following paragraph explains the depth situation.',
+      paragraph: 'NEAR/USDC has 2.1M USDC within 2% of mid on Ref Finance, up 14% week on week.',
+    });
+    expect(text.startsWith('The following paragraph explains the depth situation.')).toBe(true);
+    expect(text).toContain('NEAR/USDC has 2.1M USDC within 2% of mid on Ref Finance');
+  });
+
+  it('puts the summary first even when it is not the first field', () => {
+    const text = draftText({
+      detail: 'The detailed body of the answer goes here.',
+      summary: 'A summary that is long enough.',
+    });
+    expect(text).toBe('A summary that is long enough.\n\nDetail: The detailed body of the answer goes here.');
+  });
+
+  it('renders a research-bot result readably', () => {
+    const text = draftText({
+      summary: 'NEAR/USDC liquidity is concentrated on Ref Finance, with 2.1M USDC within 2% of mid.',
+      keyFindings: ['Ref holds 78% of on-chain depth', 'Depth rose 14% week on week'],
+      confidence: 0.72,
+      sources: ['Ref Finance analytics', 'DefiLlama'],
+    });
+    expect(text).toBe(
+      [
+        'NEAR/USDC liquidity is concentrated on Ref Finance, with 2.1M USDC within 2% of mid.',
+        'Key findings:\n- Ref holds 78% of on-chain depth\n- Depth rose 14% week on week',
+        'Confidence: 0.72',
+        'Sources:\n- Ref Finance analytics\n- DefiLlama',
+      ].join('\n\n'),
+    );
+  });
+
+  it('renders a trading-bot result (no summary) without JSON punctuation', () => {
+    const text = draftText({
+      recommendation: 'hold',
+      rationale: 'Funding is flat and depth is thinning; the case for adding exposure is weak right now.',
+      confidence: 0.6,
+      risks: ['A breakout above 7 USD would make holding wrong'],
+    });
+    expect(text).toBe(
+      [
+        'Recommendation: hold',
+        'Rationale:\nFunding is flat and depth is thinning; the case for adding exposure is weak right now.',
+        'Confidence: 0.6',
+        'Risks:\n- A breakout above 7 USD would make holding wrong',
+      ].join('\n\n'),
+    );
+  });
+
+  it('renders an execution-bot plan with its steps numbered and compact', () => {
+    const text = draftText({
+      steps: [
+        {action: 'Swap NEAR for USDC', venue: 'Ref Finance', amount: '1000000000000000000000000'},
+        {action: 'Withdraw USDC to the treasury'},
+      ],
+      preconditions: ['Slippage under 0.5%'],
+      abortIf: 'Depth within 2% of mid falls below 500k USDC',
+    });
+    expect(text).toBe(
+      [
+        'Steps:\n1. Action: Swap NEAR for USDC; Venue: Ref Finance; Amount: 1000000000000000000000000\n2. Action: Withdraw USDC to the treasury',
+        'Preconditions:\n- Slippage under 0.5%',
+        'Abort if: Depth within 2% of mid falls below 500k USDC',
+      ].join('\n\n'),
+    );
+  });
+
+  it('skips empty fields and is deterministic', () => {
+    const out = {summary: 'A summary that is long enough.', notes: '', extra: null, list: []};
+    expect(draftText(out)).toBe('A summary that is long enough.');
+    expect(draftText(out)).toBe(draftText({...out}));
+  });
+
+  it('keeps the 10..10000 character bounds', () => {
+    const long = draftText({summary: 'x'.repeat(20), body: 'y'.repeat(20_000)});
+    expect(long.length).toBe(10_000);
+    expect(long.endsWith('…')).toBe(true);
+    expect(draftText({a: 'b'}).length).toBeGreaterThanOrEqual(10);
   });
 });

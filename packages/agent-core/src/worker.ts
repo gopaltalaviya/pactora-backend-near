@@ -648,14 +648,82 @@ export function isListingJob(offer: JobSummary): boolean {
 }
 
 /**
- * A draft's readable text: the output's summary if it has one, else its
- * pretty JSON — 10..10000 characters, as the API requires.
+ * A draft's readable text: the WHOLE output, summary first, then every other
+ * field in order — short values as `Label: value`, long strings as paragraphs,
+ * arrays as lists (numbered when they hold objects), nested objects compactly.
+ * Empty fields are skipped. 10..10000 characters, as the API requires.
+ *
+ * Not the summary alone: live, the model put a one-line preface in `summary`
+ * and the answer in another field, and the client got a draft with no answer.
  */
 export function draftText(output: Record<string, unknown>): string {
-  const summary = typeof output['summary'] === 'string' ? output['summary'].trim() : '';
-  let text = summary.length >= 10 ? summary : JSON.stringify(output, null, 2);
+  const sections: string[] = [];
+  const summary = output['summary'];
+  if (typeof summary === 'string' && summary.trim()) sections.push(summary.trim());
+  for (const [key, value] of Object.entries(output)) {
+    if (key === 'summary' && typeof value === 'string') continue;
+    const section = renderField(key, value);
+    if (section) sections.push(section);
+  }
+  let text = sections.join('\n\n');
+  if (text.length < 10) text = JSON.stringify(output, null, 2);
   if (text.length > 10_000) text = `${text.slice(0, 9_999)}…`;
   return text.length >= 10 ? text : `Result: ${text}`.padEnd(10, '.');
+}
+
+/** `keyFindings` / `abort_if` → `Key findings` / `Abort if`. */
+function labelOf(key: string): string {
+  const words = key
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .trim()
+    .toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function isEmpty(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim() === '';
+  if (Array.isArray(value)) return value.every(isEmpty);
+  if (typeof value === 'object') return Object.values(value).every(isEmpty);
+  return false;
+}
+
+/** One value on one line: scalars as text, objects as `Key: v; Key: v`. */
+function inline(value: unknown): string {
+  if (typeof value === 'string') return value.trim().replace(/\s*\n\s*/g, ' ');
+  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+  if (Array.isArray(value))
+    return value
+      .filter((v) => !isEmpty(v))
+      .map(inline)
+      .join(', ');
+  if (value && typeof value === 'object') {
+    return Object.entries(value)
+      .filter(([, v]) => !isEmpty(v))
+      .map(([k, v]) => `${labelOf(k)}: ${inline(v)}`)
+      .join('; ');
+  }
+  return '';
+}
+
+const INLINE_MAX = 60;
+
+function renderField(key: string, value: unknown): string | undefined {
+  if (isEmpty(value)) return undefined;
+  const label = labelOf(key);
+  if (Array.isArray(value)) {
+    const items = value.filter((v) => !isEmpty(v));
+    const ordered = items.some((v) => v !== null && typeof v === 'object' && !Array.isArray(v));
+    const lines = items.map((v, i) => `${ordered ? `${i + 1}.` : '-'} ${inline(v)}`);
+    return `${label}:\n${lines.join('\n')}`;
+  }
+  if (typeof value === 'string') {
+    const s = value.trim();
+    return s.length <= INLINE_MAX && !s.includes('\n') ? `${label}: ${s}` : `${label}:\n${s}`;
+  }
+  return `${label}: ${inline(value)}`;
 }
 
 /** The top-level field names a schema produces. */
