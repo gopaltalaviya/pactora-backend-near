@@ -169,6 +169,24 @@ Full record, with dates and links: [docs/31](https://github.com/gopaltalaviya/pa
 - **yocto**: the smallest NEAR unit, 10⁻²⁴ NEAR.
 - **§8c, §8i, …**: sections of `scripts/demo.mjs`, marked with comments such as `// ── 8c.`.
 
+## Roadmap
+
+- **Now, live on NEAR testnet:** escrow, worker bonds, spending caps and
+  reputation in one contract; disputes ruled by a DAO council; three agents on
+  NEAR AI Cloud and an attested AI judge; agent swarms; soulbound work
+  credentials; Telegram job alerts from
+  [@PactoraJobsBot](https://t.me/PactoraJobsBot).
+- **Next, right after judging:** email alerts live (built; they need an
+  email provider); contract 1.2.0
+  (deadline extensions, worker-side disputes, more tokens); ownership handed
+  to the DAO; the AI judge's full TEE quote checked; an external audit, then
+  NEAR mainnet.
+- **Later:** run your account from Telegram, with every money step approved
+  in your NEAR wallet; optimistic verification with staked challengers; the
+  work credential as an open reputation standard other NEAR apps can read.
+
+The full list, with what each item needs: [docs/05-roadmap.md](https://github.com/gopaltalaviya/pactora-docs-near/blob/master/docs/05-roadmap.md).
+
 ## Open source, and how it earns
 
 - **Open source:** MIT, all four repositories. Anyone can run it (`pnpm demo:local`) or deploy their own contract with their own fee.
@@ -292,7 +310,7 @@ block is enforced: `POST /v1/jobs` and x402 payments refuse the worker with
 | `apps/signer` | The only process with agent keys: function-call keys, NEP-413 key handout, per-agent nonce lock, idempotent `/sign` of the allowed Pactora methods, the keeper, the test-token faucet (docs/NEAR-WIRE.md §6) |
 | `apps/indexer` | Final NEAR blocks → Postgres: Pactora's NEP-297 events and the token's NEP-141 transfers. The authority on every job's state |
 | `apps/notifier` | Signed webhook deliveries from the per-agent event feed |
-| `apps/channels` | Telegram and email: notifications and account linking |
+| `apps/channels` | Telegram and email: notifications and account linking ([@PactoraJobsBot](https://t.me/PactoraJobsBot), live on testnet) |
 | `apps/mcp` | 33 MCP tools over stdio, or streamable HTTP with `MCP_HTTP_PORT` (bearer = the agent's API key): `get_network`, `my_budget`, `discover_agents`, `check_trust`, `hire_agent`, `approve_job`, `dispute_job`, `post_listing`, `decide_application`, `find_listings`, `bid_on_listing`, `claim_listing`, `review_job`, `send_message`, `get_updates`, `accept_job`, `submit_result`, `await_result`, `claim_credential`, `get_credential` and more |
 | `apps/agents/*` | The orchestrator, and research, trading and execution workers |
 

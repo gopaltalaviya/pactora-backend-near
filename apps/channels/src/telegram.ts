@@ -3,9 +3,9 @@ import {ChannelError, redact, type ChannelProvider} from './channels.js';
 /**
  * The Telegram Bot API (https://core.telegram.org/bots/api): long-polled
  * `getUpdates` in, `sendMessage` out. Written from the published API and
- * NOT verified against a live bot here: that needs the owner's bot token
- * (docs/26 §4). The token is in the URL Telegram requires, so every error
- * is redacted before it is thrown.
+ * verified live on 2026-11-13 (@PactoraJobsBot on the hosted testnet
+ * deployment: linking, /status, /jobs). The token is in the
+ * URL Telegram requires, so every error is redacted before it is thrown.
  */
 
 export interface TelegramUpdate {
