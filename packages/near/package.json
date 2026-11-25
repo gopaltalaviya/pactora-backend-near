@@ -17,6 +17,6 @@
   },
   "dependencies": {
     "@pactora/shared": "workspace:*",
-    "near-api-js": "7.4.0"
+    "near-api-js": "7.5.3"
   }
 }
